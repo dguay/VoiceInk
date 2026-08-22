@@ -9,9 +9,8 @@
 ## Local Build
 
 ```bash
-git clone https://github.com/Beingpax/VoiceInk.git
+git clone git@github.com:dguay/VoiceInk.git
 cd VoiceInk
-git remote set-url origin git@github.com:dguay/VoiceInk.git
 make bootstrap
 open ~/Downloads/VoiceInk.app
 ```

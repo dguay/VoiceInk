@@ -10,6 +10,7 @@ real_git="$(command -v git)"
 clone_path="$fixture_root/VoiceInk clone with spaces"
 fake_bin="$fixture_root/bin"
 make_log="$fixture_root/make.log"
+git_log="$fixture_root/git.log"
 global_git_config="$fixture_root/gitconfig"
 installed_app="$fixture_root/Applications/VoiceInk.app"
 
@@ -30,9 +31,12 @@ fixture_sha="$("$real_git" -C "$clone_path" rev-parse HEAD)"
 
 cat > "$fake_bin/git" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "fetch" ]]; then
-    exit 0
-fi
+printf '%s\n' "$*" >> "$BOOTSTRAP_TEST_GIT_LOG"
+for argument in "$@"; do
+    if [[ "$argument" == "fetch" || "$argument" == "push" ]]; then
+        exit 0
+    fi
+done
 exec "$BOOTSTRAP_TEST_REAL_GIT" "$@"
 EOF
 
@@ -70,16 +74,21 @@ EOF
 
 chmod +x "$fake_bin"/* "$clone_path/scripts/bootstrap-local.sh"
 
-output="$({
+run_bootstrap() {
     cd /
     PATH="$fake_bin:/usr/bin:/bin" \
         BOOTSTRAP_TEST_REAL_GIT="$real_git" \
+        BOOTSTRAP_TEST_GIT_LOG="$git_log" \
         BOOTSTRAP_TEST_MAKE_LOG="$make_log" \
         GIT_CONFIG_GLOBAL="$global_git_config" \
         VOICEINK_INSTALLED_APP_PATH="$installed_app" \
         VOICEINK_MIN_FREE_GIB=0 \
+        VOICEINK_UPSTREAM_REPOSITORY=someone-else/VoiceInk \
+        VOICEINK_UPSTREAM_URL=https://github.com/someone-else/VoiceInk.git \
         "$clone_path/scripts/bootstrap-local.sh"
-} 2>&1)"
+}
+
+output="$(run_bootstrap 2>&1)"
 
 registered_path="$(GIT_CONFIG_GLOBAL="$global_git_config" "$real_git" config --global --get voiceink.repositoryPath)"
 [[ "$registered_path" == "$clone_path" ]]
@@ -90,6 +99,7 @@ grep -Fqx -- "VOICEINK_FORK_COMMIT=$fixture_sha" "$make_log"
 grep -Fqx -- "VOICEINK_UPSTREAM_COMMIT=$fixture_sha" "$make_log"
 grep -Fq 'Warning: Codex is not installed or authenticated; continuing.' <<< "$output"
 grep -Fq "Registered clone: $clone_path" <<< "$output"
+grep -Fq 'push --dry-run --porcelain origin HEAD:refs/heads/voiceink-bootstrap-access-check-' "$git_log"
 
 # These Info.plist keys are the external bundle contract consumed by SourceProvenance.
 make -n -C "$project_root" local \
@@ -98,19 +108,32 @@ make -n -C "$project_root" local \
 grep -Fq 'VOICEINK_FORK_COMMIT="0123456789abcdef"' "$fixture_root/make-dry-run.log"
 grep -Fq 'VOICEINK_UPSTREAM_COMMIT="fedcba9876543210"' "$fixture_root/make-dry-run.log"
 
+"$real_git" -C "$clone_path" config remote.origin.pushurl git@github.com:someone-else/VoiceInk.git
+rm -f "$make_log"
+set +e
+invalid_push_url_output="$(run_bootstrap 2>&1)"
+invalid_push_url_status=$?
+set -e
+[[ "$invalid_push_url_status" -ne 0 ]]
+[[ ! -e "$make_log" ]]
+grep -Fq "origin push URL" <<< "$invalid_push_url_output"
+"$real_git" -C "$clone_path" config --unset-all remote.origin.pushurl
+
+chmod 500 "$(dirname "$installed_app")"
+rm -f "$make_log"
+set +e
+invalid_install_output="$(run_bootstrap 2>&1)"
+invalid_install_status=$?
+set -e
+chmod 700 "$(dirname "$installed_app")"
+[[ "$invalid_install_status" -ne 0 ]]
+[[ ! -e "$make_log" ]]
+grep -Fq "cannot replace $installed_app" <<< "$invalid_install_output"
+
 "$real_git" -C "$clone_path" remote set-url origin https://github.com/someone-else/VoiceInk.git
 rm -f "$make_log"
 set +e
-invalid_remote_output="$({
-    cd /
-    PATH="$fake_bin:/usr/bin:/bin" \
-        BOOTSTRAP_TEST_REAL_GIT="$real_git" \
-        BOOTSTRAP_TEST_MAKE_LOG="$make_log" \
-        GIT_CONFIG_GLOBAL="$global_git_config" \
-        VOICEINK_INSTALLED_APP_PATH="$installed_app" \
-        VOICEINK_MIN_FREE_GIB=0 \
-        "$clone_path/scripts/bootstrap-local.sh"
-} 2>&1)"
+invalid_remote_output="$(run_bootstrap 2>&1)"
 invalid_remote_status=$?
 set -e
 
