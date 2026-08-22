@@ -271,6 +271,17 @@ struct SettingsView: View {
                         showResetOnboardingAlert = true
                     }
                 }
+
+                if let provenance = updaterViewModel.state.sourceProvenance {
+                    LabeledContent("Installed Source") {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("Fork \(provenance.forkCommit)")
+                            Text("Upstream \(provenance.upstreamCommit)")
+                        }
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                    }
+                }
             }
 
             Section {

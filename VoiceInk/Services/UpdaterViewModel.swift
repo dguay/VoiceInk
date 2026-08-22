@@ -1,6 +1,33 @@
 import Foundation
 import SwiftUI
 
+struct SourceProvenance: Equatable {
+    static let forkCommitInfoKey = "VoiceInkForkCommit"
+    static let upstreamCommitInfoKey = "VoiceInkUpstreamCommit"
+
+    let forkCommit: String
+    let upstreamCommit: String
+
+    static func from(bundle: Bundle) -> SourceProvenance? {
+        guard
+            let forkCommit = bundle.object(forInfoDictionaryKey: forkCommitInfoKey) as? String,
+            let upstreamCommit = bundle.object(forInfoDictionaryKey: upstreamCommitInfoKey) as? String,
+            isCommitSHA(forkCommit),
+            isCommitSHA(upstreamCommit)
+        else {
+            return nil
+        }
+
+        return SourceProvenance(forkCommit: forkCommit, upstreamCommit: upstreamCommit)
+    }
+
+    private static func isCommitSHA(_ value: String) -> Bool {
+        value.utf8.count == 40 && value.utf8.allSatisfy { byte in
+            (48 ... 57).contains(byte) || (65 ... 70).contains(byte) || (97 ... 102).contains(byte)
+        }
+    }
+}
+
 struct UpdaterState: Equatable {
     struct AvailableUpdate: Equatable {
         let versionIdentifier: String
@@ -10,6 +37,7 @@ struct UpdaterState: Equatable {
     var canCheckForUpdates: Bool
     var checksForUpdatesWhenDashboardAppears: Bool
     var availableUpdate: AvailableUpdate?
+    var sourceProvenance: SourceProvenance?
 }
 
 @MainActor
@@ -100,13 +128,18 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         self.init(defaults: defaults, adapter: ProductionUpdaterAdapter.make())
     }
 
-    init(defaults: UserDefaults, adapter: any UpdaterAdapter) {
+    init(
+        defaults: UserDefaults,
+        adapter: any UpdaterAdapter,
+        sourceProvenance: SourceProvenance? = SourceProvenance.from(bundle: .main)
+    ) {
         self.defaults = defaults
         self.adapter = adapter
         state = UpdaterState(
             canCheckForUpdates: adapter.state.canCheckForUpdates,
             checksForUpdatesWhenDashboardAppears: Self.initialAutomaticCheckPreference(in: defaults),
-            availableUpdate: nil
+            availableUpdate: nil,
+            sourceProvenance: sourceProvenance
         )
 
         adapter.onEvent = { [weak self] event in

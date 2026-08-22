@@ -9,13 +9,15 @@
 ## Local Build
 
 ```bash
-git clone https://github.com/Beingpax/VoiceInk.git
+git clone git@github.com:dguay/VoiceInk.git
 cd VoiceInk
-make local
+make bootstrap
 open ~/Downloads/VoiceInk.app
 ```
 
-`make local` prepares `whisper.xcframework` in `~/VoiceInk-Dependencies`, builds in `.local-build`, and copies `VoiceInk.app` to `~/Downloads`.
+`make bootstrap` discovers the clone from its own location, validates `dguay/VoiceInk` as `origin`, adds or validates `Beingpax/VoiceInk` as `upstream`, and records the clone path in global Git configuration as `voiceink.repositoryPath`. It also checks GitHub push access, Xcode and Command Line Tools, 15 GiB of free disk space, and permission to replace `/Applications/VoiceInk.app`. Override the last two checks with `VOICEINK_MIN_FREE_GIB` and `VOICEINK_INSTALLED_APP_PATH` when needed.
+
+A missing or unauthenticated Codex CLI produces a warning but does not stop bootstrap. After preflight checks, bootstrap prepares `whisper.xcframework` in `~/VoiceInk-Dependencies`, builds in `.local-build`, and copies `VoiceInk.app` to `~/Downloads`.
 
 It uses `LocalBuild.xcconfig`, `VoiceInk.local.entitlements`, and the `LOCAL_BUILD` Swift flag. Without an override, it uses the only available Apple Development identity or falls back to ad-hoc signing when none or multiple are found.
 
@@ -31,11 +33,12 @@ Force ad-hoc signing:
 make local LOCAL_CODESIGN_IDENTITY=-
 ```
 
-Local builds do not include iCloud dictionary sync or automatic updates. Ad-hoc builds may require macOS permissions again after rebuilding. Normal project Debug and Release settings are unchanged.
+Local builds do not include iCloud dictionary sync or automatic updates. They embed the exact fork commit and newest contained `upstream/main` commit, which appear in Settings under General. Ad-hoc builds may require macOS permissions again after rebuilding. Normal project Debug and Release settings are unchanged.
 
 ## Other Commands
 
 - `make check` — verify required tools
+- `make bootstrap` — register the clone, run local-update preflights, and build with source provenance
 - `make whisper` — prepare `whisper.xcframework`
 - `make build` — build the standard Debug configuration
 - `make dev` — build and launch the app

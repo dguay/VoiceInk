@@ -44,6 +44,70 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func installedSourceProvenanceFlowsThroughTheUpdaterInterface() {
+        let suiteName = "UpdaterViewModelTests.provenance"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let provenance = SourceProvenance(
+            forkCommit: "0123456789abcdef",
+            upstreamCommit: "fedcba9876543210"
+        )
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: ForkUpdaterAdapter(),
+            sourceProvenance: provenance
+        )
+
+        #expect(updater.state.sourceProvenance == provenance)
+    }
+
+    @Test
+    func sourceProvenanceReadsTheLocalBuildBundleContract() throws {
+        let bundleURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("bundle")
+        let contentsURL = bundleURL.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contentsURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bundleURL) }
+
+        let info: [String: Any] = [
+            "CFBundleIdentifier": "com.voiceink.tests.provenance",
+            SourceProvenance.forkCommitInfoKey: "0123456789abcdef0123456789abcdef01234567",
+            SourceProvenance.upstreamCommitInfoKey: "fedcba9876543210fedcba9876543210fedcba98",
+        ]
+        let infoData = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+        try infoData.write(to: contentsURL.appendingPathComponent("Info.plist"))
+
+        let bundle = try #require(Bundle(url: bundleURL))
+        #expect(
+            SourceProvenance.from(bundle: bundle) == SourceProvenance(
+                forkCommit: "0123456789abcdef0123456789abcdef01234567",
+                upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98"
+            ))
+    }
+
+    @Test
+    func sourceProvenanceRejectsUnexpandedBuildSettings() throws {
+        let bundleURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("bundle")
+        let contentsURL = bundleURL.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contentsURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bundleURL) }
+
+        let info: [String: Any] = [
+            "CFBundleIdentifier": "com.voiceink.tests.empty-provenance",
+            SourceProvenance.forkCommitInfoKey: "$(VOICEINK_FORK_COMMIT)",
+            SourceProvenance.upstreamCommitInfoKey: "$(VOICEINK_UPSTREAM_COMMIT)",
+        ]
+        let infoData = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+        try infoData.write(to: contentsURL.appendingPathComponent("Info.plist"))
+
+        let bundle = try #require(Bundle(url: bundleURL))
+        #expect(SourceProvenance.from(bundle: bundle) == nil)
+    }
+
+    @Test
     func productionAdapterMatchesTheBuildConfiguration() {
         #if LOCAL_BUILD
             #expect(ProductionUpdaterAdapter.make() is ForkUpdaterAdapter)
