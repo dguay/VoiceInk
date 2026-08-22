@@ -596,6 +596,23 @@ struct DashboardContent: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
+            if let stagedUpdate = updaterViewModel.state.stagedUpdate {
+                Button(action: updaterViewModel.showStagedUpdate) {
+                    footerActionLabel(
+                        icon: "arrow.clockwise.circle.fill",
+                        title: "Update Ready",
+                        color: AppTheme.Status.infoStrong
+                    )
+                }
+                .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: true)
+                .help("Review staged fork commit \(stagedUpdate.forkCommit.prefix(12))")
+                .accessibilityLabel("Update Ready")
+                .accessibilityValue(Text(verbatim: String(stagedUpdate.forkCommit.prefix(12))))
+                .accessibilityHint("Shows restart update choices")
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+
             Button(action: copySystemInfo) {
                 footerActionLabel(
                     icon: isSystemInfoCopied ? "checkmark" : "doc.on.doc",
@@ -608,6 +625,7 @@ struct DashboardContent: View {
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSystemInfoCopied)
         }
         .animation(.easeOut(duration: 0.2), value: updaterViewModel.state.availableUpdate)
+        .animation(.easeOut(duration: 0.2), value: updaterViewModel.state.stagedUpdate)
     }
 
     @ViewBuilder

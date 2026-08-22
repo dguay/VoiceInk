@@ -24,6 +24,8 @@
 	<string>$(VOICEINK_FORK_COMMIT)</string>
 	<key>VoiceInkUpstreamCommit</key>
 	<string>$(VOICEINK_UPSTREAM_COMMIT)</string>
+	<key>VoiceInkUpdaterKind</key>
+	<string>$(VOICEINK_UPDATER_KIND)</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

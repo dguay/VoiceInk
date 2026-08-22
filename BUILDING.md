@@ -21,6 +21,8 @@ A missing or unauthenticated Codex CLI produces a warning but does not stop boot
 
 It uses `LocalBuild.xcconfig`, `VoiceInk.local.entitlements`, and the `LOCAL_BUILD` Swift flag. Without an override, it uses the only available Apple Development identity or falls back to ad-hoc signing when none or multiple are found.
 
+After bootstrap, a local build's update controls prepare `origin/main` in a temporary worktree. VoiceInk runs the updater tests and non-UI unit tests, builds the candidate, validates its signature and source metadata, and stages it under Application Support. The registered clone must be clean. Preparation never resets or cleans it, and VoiceInk keeps running while the update waits for an explicit restart.
+
 Choose an identity explicitly:
 
 ```bash

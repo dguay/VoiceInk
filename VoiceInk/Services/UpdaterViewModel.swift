@@ -38,6 +38,10 @@ struct UpdaterState: Equatable {
     var checksForUpdatesWhenDashboardAppears: Bool
     var availableUpdate: AvailableUpdate?
     var sourceProvenance: SourceProvenance?
+    var stagedUpdate: StagedForkCandidate?
+    var isPreparingUpdate: Bool
+    var isPresentingStagedUpdate: Bool
+    var preparationError: String?
 }
 
 @MainActor
@@ -47,6 +51,9 @@ protocol UpdaterModule: AnyObject {
     func setChecksForUpdatesWhenDashboardAppears(_ value: Bool)
     func checkForUpdatesIfDue()
     func checkForUpdates()
+    func showStagedUpdate()
+    func deferStagedUpdate()
+    func restartAndUpdate()
 }
 
 struct UpdaterAdapterState: Equatable {
@@ -68,6 +75,8 @@ enum UpdaterAdapterEvent: Equatable {
     case foundUpdate(versionIdentifier: String, displayVersion: String)
     case didNotFindUpdate
     case didFinishUpdateCycle
+    case stagedCandidate(StagedForkCandidate)
+    case preparationFailed(String)
 }
 
 @MainActor
@@ -78,27 +87,22 @@ protocol UpdaterAdapter: AnyObject {
     func start()
     func checkForUpdateInformation()
     func checkForUpdates()
+    func requestRestart(for candidate: StagedForkCandidate)
 }
 
-@MainActor
-final class ForkUpdaterAdapter: UpdaterAdapter {
-    let state = UpdaterAdapterState.unavailable
-    var onEvent: ((UpdaterAdapterEvent) -> Void)?
-
-    func start() {
-        onEvent?(.stateChanged(state))
-    }
-
-    func checkForUpdateInformation() {}
-
-    func checkForUpdates() {}
+extension UpdaterAdapter {
+    func requestRestart(for candidate: StagedForkCandidate) {}
 }
 
 @MainActor
 enum ProductionUpdaterAdapter {
     static func make() -> any UpdaterAdapter {
         #if LOCAL_BUILD
-            ForkUpdaterAdapter()
+            if let preparer = ForkUpdatePreparationService.production() {
+                ForkUpdaterAdapter(preparer: preparer)
+            } else {
+                ForkUpdaterAdapter()
+            }
         #else
             SparkleUpdaterAdapter()
         #endif
@@ -139,7 +143,11 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             canCheckForUpdates: adapter.state.canCheckForUpdates,
             checksForUpdatesWhenDashboardAppears: Self.initialAutomaticCheckPreference(in: defaults),
             availableUpdate: nil,
-            sourceProvenance: sourceProvenance
+            sourceProvenance: sourceProvenance,
+            stagedUpdate: nil,
+            isPreparingUpdate: adapter.state.sessionInProgress,
+            isPresentingStagedUpdate: false,
+            preparationError: nil
         )
 
         adapter.onEvent = { [weak self] event in
@@ -179,6 +187,8 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
     func checkForUpdates() {
         guard state.canCheckForUpdates else { return }
 
+        state.preparationError = nil
+
         // Any explicit check is interaction with the currently advertised update.
         // Persist it before presenting the adapter's update UI so dismissing or closing
         // that UI cannot make the Dashboard button reappear for the same build.
@@ -193,6 +203,21 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         adapter.checkForUpdates()
     }
 
+    func showStagedUpdate() {
+        guard state.stagedUpdate != nil else { return }
+        state.isPresentingStagedUpdate = true
+    }
+
+    func deferStagedUpdate() {
+        state.isPresentingStagedUpdate = false
+    }
+
+    func restartAndUpdate() {
+        guard let candidate = state.stagedUpdate else { return }
+        state.isPresentingStagedUpdate = false
+        adapter.requestRestart(for: candidate)
+    }
+
     private func handle(_ event: UpdaterAdapterEvent) {
         switch event {
         case .stateChanged(let adapterState):
@@ -203,11 +228,18 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.availableUpdate = nil
         case .didFinishUpdateCycle:
             isUserInitiatedUpdateCheck = false
+        case .stagedCandidate(let candidate):
+            state.stagedUpdate = candidate
+            state.isPresentingStagedUpdate = true
+            state.preparationError = nil
+        case .preparationFailed(let message):
+            state.preparationError = message
         }
     }
 
     private func apply(_ adapterState: UpdaterAdapterState) {
         state.canCheckForUpdates = adapterState.canCheckForUpdates
+        state.isPreparingUpdate = adapterState.sessionInProgress
     }
 
     private func handleFoundUpdate(versionIdentifier: String, displayVersion: String) {

@@ -265,11 +265,33 @@ struct SettingsView: View {
                     Button("Check for Updates") {
                         updaterViewModel.checkForUpdates()
                     }
-                    .disabled(!updaterViewModel.state.canCheckForUpdates)
+                    .disabled(
+                        !updaterViewModel.state.canCheckForUpdates
+                            || updaterViewModel.state.isPreparingUpdate
+                    )
 
                     Button("Reset Onboarding") {
                         showResetOnboardingAlert = true
                     }
+                }
+
+                if updaterViewModel.state.isPreparingUpdate {
+                    LabeledContent("Local Update") {
+                        ProgressView("Preparing…")
+                            .controlSize(.small)
+                    }
+                } else if let stagedUpdate = updaterViewModel.state.stagedUpdate {
+                    LabeledContent("Local Update") {
+                        Button("Update Ready") {
+                            updaterViewModel.showStagedUpdate()
+                        }
+                        .help("Staged fork commit \(stagedUpdate.forkCommit.prefix(12))")
+                    }
+                } else if let preparationError = updaterViewModel.state.preparationError {
+                    Text(preparationError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
                 }
 
                 if let provenance = updaterViewModel.state.sourceProvenance {
