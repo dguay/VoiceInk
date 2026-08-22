@@ -4,8 +4,10 @@ WHISPER_CPP_DIR := $(DEPS_DIR)/whisper.cpp
 FRAMEWORK_PATH := $(WHISPER_CPP_DIR)/build-apple/whisper.xcframework
 LOCAL_DERIVED_DATA := $(CURDIR)/.local-build
 LOCAL_CODESIGN_IDENTITY ?=
+VOICEINK_FORK_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
+VOICEINK_UPSTREAM_COMMIT ?= $(shell git merge-base HEAD refs/remotes/upstream/main 2>/dev/null)
 
-.PHONY: all clean whisper setup build local check healthcheck help dev run release release-setup
+.PHONY: all bootstrap clean whisper setup build local check healthcheck help dev run release release-setup
 
 # Default target
 all: check build
@@ -22,6 +24,10 @@ check:
 	@echo "Prerequisites OK"
 
 healthcheck: check
+
+# Register this clone, validate local-update prerequisites, and build it with source provenance.
+bootstrap:
+	@./scripts/bootstrap-local.sh
 
 # Build process
 whisper:
@@ -47,6 +53,10 @@ build: setup
 
 # Build locally with stable Apple Development signing when available.
 local: check setup
+	@if [ -z "$(VOICEINK_FORK_COMMIT)" ] || [ -z "$(VOICEINK_UPSTREAM_COMMIT)" ]; then \
+		echo "Source provenance is unavailable; run 'make bootstrap' first"; \
+		exit 1; \
+	fi
 	@echo "Building VoiceInk for local use (no Apple Developer certificate required)..."
 	@rm -rf "$(LOCAL_DERIVED_DATA)"
 	@SIGNING_IDENTITY="$(LOCAL_CODESIGN_IDENTITY)"; \
@@ -76,6 +86,8 @@ local: check setup
 		DEVELOPMENT_TEAM="" \
 		CODE_SIGN_ENTITLEMENTS="$(CURDIR)/VoiceInk/VoiceInk.local.entitlements" \
 		SWIFT_ACTIVE_COMPILATION_CONDITIONS='$$(inherited) LOCAL_BUILD' \
+		VOICEINK_FORK_COMMIT="$(VOICEINK_FORK_COMMIT)" \
+		VOICEINK_UPSTREAM_COMMIT="$(VOICEINK_UPSTREAM_COMMIT)" \
 		build
 	@APP_PATH="$(LOCAL_DERIVED_DATA)/Build/Products/Debug/VoiceInk.app" && \
 	if [ -d "$$APP_PATH" ]; then \
@@ -133,6 +145,7 @@ clean:
 # Help
 help:
 	@echo "Available targets:"
+	@echo "  bootstrap          Register this clone, run preflights, and build with source provenance"
 	@echo "  check/healthcheck  Check if required CLI tools are installed"
 	@echo "  whisper            Clone and build whisper.cpp XCFramework"
 	@echo "  setup              Copy whisper XCFramework to VoiceInk project"

@@ -20,6 +20,10 @@
 	<string>VoiceInk needs to interact with your browser to detect the current website for applying website-specific configurations.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>VoiceInk needs screen recording access to understand context from your screen for improved transcription accuracy.</string>
+	<key>VoiceInkForkCommit</key>
+	<string>$(VOICEINK_FORK_COMMIT)</string>
+	<key>VoiceInkUpstreamCommit</key>
+	<string>$(VOICEINK_UPSTREAM_COMMIT)</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
