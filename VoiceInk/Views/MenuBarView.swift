@@ -158,7 +158,17 @@ struct MenuBarView: View {
             Button("Check for Updates") {
                 updaterViewModel.checkForUpdates()
             }
-            .disabled(!updaterViewModel.state.canCheckForUpdates)
+            .disabled(
+                !updaterViewModel.state.canCheckForUpdates
+                    || updaterViewModel.state.isPreparingUpdate
+            )
+
+            if updaterViewModel.state.stagedUpdate != nil {
+                Button("Update Ready…") {
+                    showMainWindow()
+                    updaterViewModel.showStagedUpdate()
+                }
+            }
 
             Button("Quit VoiceInk") {
                 NSApplication.shared.terminate(nil)

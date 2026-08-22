@@ -44,6 +44,72 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func manualForkUpdateStagesCandidateWithoutRequestingAppTermination() async throws {
+        let suiteName = "UpdaterViewModelTests.staging"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let candidate = StagedForkCandidate(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
+            bundleURL: URL(fileURLWithPath: "/tmp/VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_000)
+        )
+        let preparer = ForkUpdatePreparerStub(stagedCandidate: candidate)
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: ForkUpdaterAdapter(preparer: preparer)
+        )
+
+        updater.checkForUpdates()
+        try await waitUntil { updater.state.stagedUpdate == candidate }
+
+        #expect(preparer.prepareCount == 1)
+        #expect(updater.state.isPresentingStagedUpdate)
+        #expect(preparer.restartRequestCount == 0)
+
+        updater.deferStagedUpdate()
+        #expect(!updater.state.isPresentingStagedUpdate)
+        #expect(updater.state.stagedUpdate == candidate)
+
+        updater.showStagedUpdate()
+        updater.restartAndUpdate()
+        #expect(preparer.restartRequestCount == 1)
+        #expect(!updater.state.isPresentingStagedUpdate)
+    }
+
+    @Test
+    func stagedCandidateIsRestoredFromThePersistentManifest() throws {
+        let suiteName = "UpdaterViewModelTests.restored-staging"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let manifestURL = temporaryDirectory.appendingPathComponent("staged-candidate.plist")
+        let candidate = StagedForkCandidate(
+            forkCommit: "1111111111111111111111111111111111111111",
+            upstreamCommit: "2222222222222222222222222222222222222222",
+            bundleURL: temporaryDirectory.appendingPathComponent("VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_100)
+        )
+        try PropertyListEncoder().encode(candidate).write(to: manifestURL, options: .atomic)
+        let preparer = ForkUpdatePreparationService(
+            scriptURL: temporaryDirectory.appendingPathComponent("prepare-local-update.sh"),
+            manifestURL: manifestURL,
+            commandRunner: ForkUpdateCommandRunnerStub()
+        )
+
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: ForkUpdaterAdapter(preparer: preparer)
+        )
+
+        #expect(updater.state.stagedUpdate == candidate)
+        #expect(updater.state.isPresentingStagedUpdate)
+    }
+
+    @Test
     func installedSourceProvenanceFlowsThroughTheUpdaterInterface() {
         let suiteName = "UpdaterViewModelTests.provenance"
         let defaults = makeDefaults(suiteName: suiteName)
@@ -110,7 +176,9 @@ struct UpdaterViewModelTests {
     @Test
     func productionAdapterMatchesTheBuildConfiguration() {
         #if LOCAL_BUILD
-            #expect(ProductionUpdaterAdapter.make() is ForkUpdaterAdapter)
+            let adapter = ProductionUpdaterAdapter.make()
+            #expect(adapter is ForkUpdaterAdapter)
+            #expect(adapter.state.canCheckForUpdates)
         #else
             #expect(ProductionUpdaterAdapter.make() is SparkleUpdaterAdapter)
         #endif
@@ -137,6 +205,49 @@ struct UpdaterViewModelTests {
         defaults.removePersistentDomain(forName: suiteName)
         return defaults
     }
+
+    private func waitUntil(
+        timeout: Duration = .seconds(2),
+        condition: @escaping @MainActor () -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while !condition() {
+            guard clock.now < deadline else {
+                Issue.record("Timed out waiting for updater state")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}
+
+@MainActor
+private final class ForkUpdatePreparerStub: ForkUpdatePreparing {
+    let stagedCandidate: StagedForkCandidate
+    private(set) var prepareCount = 0
+    private(set) var restartRequestCount = 0
+
+    init(stagedCandidate: StagedForkCandidate) {
+        self.stagedCandidate = stagedCandidate
+    }
+
+    func loadStagedCandidate() throws -> StagedForkCandidate? {
+        nil
+    }
+
+    func prepare() async throws -> StagedForkCandidate {
+        prepareCount += 1
+        return stagedCandidate
+    }
+
+    func requestRestart(for candidate: StagedForkCandidate) {
+        restartRequestCount += 1
+    }
+}
+
+private struct ForkUpdateCommandRunnerStub: ForkUpdateCommandRunning {
+    func run(scriptURL: URL, manifestURL: URL) async throws {}
 }
 
 @MainActor

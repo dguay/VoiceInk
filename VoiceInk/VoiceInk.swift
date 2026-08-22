@@ -360,6 +360,27 @@ struct VoiceInkApp: App {
             .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)) { _ in
                 licenseViewModel.refreshLicenseState()
             }
+            .alert(
+                "Update Ready",
+                isPresented: Binding(
+                    get: { updaterViewModel.state.isPresentingStagedUpdate },
+                    set: { isPresented in
+                        if !isPresented {
+                            updaterViewModel.deferStagedUpdate()
+                        }
+                    }
+                ),
+                presenting: updaterViewModel.state.stagedUpdate
+            ) { _ in
+                Button("Restart and Update") {
+                    updaterViewModel.restartAndUpdate()
+                }
+                Button("Later", role: .cancel) {
+                    updaterViewModel.deferStagedUpdate()
+                }
+            } message: { candidate in
+                Text("VoiceInk prepared fork commit \(candidate.forkCommit.prefix(12)).")
+            }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: AppWindowLayout.width, height: AppWindowLayout.minimumHeight)
