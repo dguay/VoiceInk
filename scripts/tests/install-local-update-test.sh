@@ -155,11 +155,34 @@ cat > "$fake_bin/fail-replacement" <<'EOF'
 exit 1
 EOF
 
+cat > "$fake_bin/git-with-late-update" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ " $* " == *" fetch origin main "* ]]; then
+    count=0
+    if [[ -f "$VOICEINK_TEST_FETCH_COUNT" ]]; then
+        count="$(< "$VOICEINK_TEST_FETCH_COUNT")"
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$VOICEINK_TEST_FETCH_COUNT"
+    if [[ "$count" -eq 2 ]]; then
+        printf 'newest\n' > "$VOICEINK_TEST_SEED_CLONE/version"
+        /usr/bin/git -C "$VOICEINK_TEST_SEED_CLONE" add version
+        /usr/bin/git -C "$VOICEINK_TEST_SEED_CLONE" commit -m "test: publish during restart" >/dev/null
+        /usr/bin/git -C "$VOICEINK_TEST_SEED_CLONE" push origin main >/dev/null
+    fi
+fi
+
+exec /usr/bin/git "$@"
+EOF
+
 chmod +x \
     "$fake_bin/codesign" \
     "$fake_bin/launch-voiceink" \
     "$fake_bin/relaunch-voiceink" \
-    "$fake_bin/fail-replacement"
+    "$fake_bin/fail-replacement" \
+    "$fake_bin/git-with-late-update"
 
 staged_bundle="$fixture_root/staging/candidates/$new_sha/VoiceInk.app"
 /usr/bin/plutil -replace forkCommit -string "$new_sha" "$manifest_path"
@@ -313,5 +336,38 @@ fi
 parent_pid=""
 [[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
 grep -Fqx "rollback:$installed_bundle" "$launch_log"
+
+: > "$launch_log"
+fetch_count="$fixture_root/fetch-count"
+sleep 30 &
+parent_pid=$!
+
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_GIT_COMMAND="$fake_bin/git-with-late-update" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_TEST_FETCH_COUNT="$fetch_count" \
+    VOICEINK_TEST_SEED_CLONE="$seed_clone" \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/late-stale-output.log" 2>&1
+late_stale_status=$?
+set -e
+
+[[ "$late_stale_status" -eq 75 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: approved parent survived late stale detection\n' >&2
+    exit 1
+fi
+parent_pid=""
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+grep -Fqx "rollback:$installed_bundle" "$launch_log"
+grep -Fq "origin/main changed after preparation" "$fixture_root/late-stale-output.log"
 
 printf 'install-local-update-test: PASS\n'

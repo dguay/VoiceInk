@@ -20,6 +20,7 @@ manifest_path="$2"
 target_bundle="$3"
 backup_bundle="$4"
 parent_pid="$5"
+git_command="${VOICEINK_UPDATE_GIT_COMMAND:-git}"
 
 [[ -f "$manifest_path" ]] || stale "the approved candidate is no longer staged."
 
@@ -30,18 +31,22 @@ manifest_sha="$(/usr/bin/plutil -extract forkCommit raw "$manifest_path" 2>/dev/
 
 repository_path="${VOICEINK_REPOSITORY_PATH:-}"
 if [[ -z "$repository_path" ]]; then
-    repository_path="$(git config --global --get voiceink.repositoryPath 2>/dev/null || true)"
+    repository_path="$("$git_command" config --global --get voiceink.repositoryPath 2>/dev/null || true)"
 fi
 [[ -n "$repository_path" ]] \
     || fail "No VoiceInk clone is registered. Run 'make bootstrap' from the clone first."
-repository_path="$(git -C "$repository_path" rev-parse --show-toplevel 2>/dev/null)" \
+repository_path="$("$git_command" -C "$repository_path" rev-parse --show-toplevel 2>/dev/null)" \
     || fail "The registered VoiceInk clone is unavailable. Run 'make bootstrap' again."
 
-git -C "$repository_path" fetch origin main
-latest_fork_sha="$(git -C "$repository_path" rev-parse refs/remotes/origin/main)" \
-    || fail "The fetched fork does not have origin/main."
-[[ "$latest_fork_sha" == "$approved_sha" ]] \
-    || stale "origin/main changed after preparation. Prepare the new candidate before restarting."
+revalidate_fork() {
+    "$git_command" -C "$repository_path" fetch origin main
+    latest_fork_sha="$("$git_command" -C "$repository_path" rev-parse refs/remotes/origin/main)" \
+        || fail "The fetched fork does not have origin/main."
+    [[ "$latest_fork_sha" == "$approved_sha" ]] \
+        || stale "origin/main changed after preparation. Prepare the new candidate before restarting."
+}
+
+revalidate_fork
 
 manifest_upstream_sha="$(/usr/bin/plutil -extract upstreamCommit raw "$manifest_path" 2>/dev/null)" \
     || fail "The staged candidate manifest has no upstream provenance."
@@ -186,6 +191,9 @@ if kill -0 "$parent_pid" 2>/dev/null; then
 fi
 parent_terminated=true
 
+# Close the fetch-to-install race after the approved app has exited. A stale result
+# takes the EXIT trap's relaunch-only path because replacement has not started.
+revalidate_fork
 replace_bundle_atomically
 replacement_started=true
 
