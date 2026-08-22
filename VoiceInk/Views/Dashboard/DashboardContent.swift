@@ -578,7 +578,7 @@ struct DashboardContent: View {
                 .animation(.easeInOut(duration: 0.15), value: starPrompt.openFailed)
             }
 
-            if let availableUpdate = updaterViewModel.availableUpdate {
+            if let availableUpdate = updaterViewModel.state.availableUpdate {
                 Button(action: updaterViewModel.checkForUpdates) {
                     footerActionLabel(
                         icon: "arrow.down.circle.fill",
@@ -588,7 +588,7 @@ struct DashboardContent: View {
                 }
                 .buttonStyle(.plain)
                 .fixedSize(horizontal: true, vertical: true)
-                .disabled(!updaterViewModel.canCheckForUpdates)
+                .disabled(!updaterViewModel.state.canCheckForUpdates)
                 .help("Open the VoiceInk \(availableUpdate.displayVersion) update")
                 .accessibilityLabel("Update Available")
                 .accessibilityValue(Text(verbatim: availableUpdate.displayVersion))
@@ -607,7 +607,7 @@ struct DashboardContent: View {
             .fixedSize(horizontal: true, vertical: true)
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSystemInfoCopied)
         }
-        .animation(.easeOut(duration: 0.2), value: updaterViewModel.availableUpdate)
+        .animation(.easeOut(duration: 0.2), value: updaterViewModel.state.availableUpdate)
     }
 
     @ViewBuilder

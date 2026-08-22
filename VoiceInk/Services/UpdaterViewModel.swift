@@ -1,15 +1,84 @@
-import Combine
 import Foundation
-import Sparkle
 import SwiftUI
 
-@MainActor
-final class UpdaterViewModel: NSObject, ObservableObject, SPUUpdaterDelegate {
+struct UpdaterState: Equatable {
     struct AvailableUpdate: Equatable {
         let versionIdentifier: String
         let displayVersion: String
     }
 
+    var canCheckForUpdates: Bool
+    var checksForUpdatesWhenDashboardAppears: Bool
+    var availableUpdate: AvailableUpdate?
+}
+
+@MainActor
+protocol UpdaterModule: AnyObject {
+    var state: UpdaterState { get }
+
+    func setChecksForUpdatesWhenDashboardAppears(_ value: Bool)
+    func checkForUpdatesIfDue()
+    func checkForUpdates()
+}
+
+struct UpdaterAdapterState: Equatable {
+    let canCheckForUpdates: Bool
+    let sessionInProgress: Bool
+    let lastUpdateCheckDate: Date?
+    let updateCheckInterval: TimeInterval
+
+    static let unavailable = UpdaterAdapterState(
+        canCheckForUpdates: false,
+        sessionInProgress: false,
+        lastUpdateCheckDate: nil,
+        updateCheckInterval: 0
+    )
+}
+
+enum UpdaterAdapterEvent: Equatable {
+    case stateChanged(UpdaterAdapterState)
+    case foundUpdate(versionIdentifier: String, displayVersion: String)
+    case didNotFindUpdate
+    case didFinishUpdateCycle
+}
+
+@MainActor
+protocol UpdaterAdapter: AnyObject {
+    var state: UpdaterAdapterState { get }
+    var onEvent: ((UpdaterAdapterEvent) -> Void)? { get set }
+
+    func start()
+    func checkForUpdateInformation()
+    func checkForUpdates()
+}
+
+@MainActor
+final class ForkUpdaterAdapter: UpdaterAdapter {
+    let state = UpdaterAdapterState.unavailable
+    var onEvent: ((UpdaterAdapterEvent) -> Void)?
+
+    func start() {
+        onEvent?(.stateChanged(state))
+    }
+
+    func checkForUpdateInformation() {}
+
+    func checkForUpdates() {}
+}
+
+@MainActor
+enum ProductionUpdaterAdapter {
+    static func make() -> any UpdaterAdapter {
+        #if LOCAL_BUILD
+            ForkUpdaterAdapter()
+        #else
+            SparkleUpdaterAdapter()
+        #endif
+    }
+}
+
+@MainActor
+final class UpdaterViewModel: ObservableObject, UpdaterModule {
     private enum DefaultsKey {
         // Keep the existing persisted key strings so current user preferences migrate automatically.
         static let automaticUpdateChecks = "VoiceInkChecksForUpdatesOnLaunch"
@@ -18,112 +87,115 @@ final class UpdaterViewModel: NSObject, ObservableObject, SPUUpdaterDelegate {
     }
 
     private let defaults: UserDefaults
+    private let adapter: any UpdaterAdapter
     private var isUserInitiatedUpdateCheck = false
-    private lazy var updaterController = SPUStandardUpdaterController(
-        startingUpdater: false,
-        updaterDelegate: self,
-        userDriverDelegate: nil
-    )
 
-    @Published var canCheckForUpdates = false
-    @Published private(set) var checksForUpdatesWhenDashboardAppears = false
-    @Published private(set) var availableUpdate: AvailableUpdate?
+    @Published private(set) var state: UpdaterState
 
-    override init() {
-        let defaults = UserDefaults.standard
+    convenience init() {
+        self.init(defaults: .standard)
+    }
+
+    convenience init(defaults: UserDefaults) {
+        self.init(defaults: defaults, adapter: ProductionUpdaterAdapter.make())
+    }
+
+    init(defaults: UserDefaults, adapter: any UpdaterAdapter) {
         self.defaults = defaults
-        checksForUpdatesWhenDashboardAppears = Self.initialAutomaticCheckPreference(in: defaults)
-        super.init()
+        self.adapter = adapter
+        state = UpdaterState(
+            canCheckForUpdates: adapter.state.canCheckForUpdates,
+            checksForUpdatesWhenDashboardAppears: Self.initialAutomaticCheckPreference(in: defaults),
+            availableUpdate: nil
+        )
 
-        let updater = updaterController.updater
-
-        // VoiceInk owns automatic discovery through Sparkle's non-presenting probe.
-        // Keeping Sparkle's scheduler disabled prevents it from showing an update
-        // window independently of the Dashboard button.
-        updater.automaticallyChecksForUpdates = false
-        updaterController.startUpdater()
-
-        canCheckForUpdates = updater.canCheckForUpdates
-        updater.publisher(for: \.canCheckForUpdates)
-            .assign(to: &$canCheckForUpdates)
+        adapter.onEvent = { [weak self] event in
+            self?.handle(event)
+        }
+        adapter.start()
+        apply(adapter.state)
     }
 
     func setChecksForUpdatesWhenDashboardAppears(_ value: Bool) {
-        guard checksForUpdatesWhenDashboardAppears != value else { return }
+        guard state.checksForUpdatesWhenDashboardAppears != value else { return }
 
-        checksForUpdatesWhenDashboardAppears = value
+        state.checksForUpdatesWhenDashboardAppears = value
         defaults.set(value, forKey: DefaultsKey.automaticUpdateChecks)
 
         if value {
             checkForUpdateInformationIfPossible()
         } else {
-            availableUpdate = nil
+            state.availableUpdate = nil
         }
     }
 
     func checkForUpdatesIfDue() {
-        guard checksForUpdatesWhenDashboardAppears else { return }
+        guard state.checksForUpdatesWhenDashboardAppears else { return }
 
-        let updater = updaterController.updater
-        guard !updater.sessionInProgress else { return }
+        let adapterState = adapter.state
+        guard !adapterState.sessionInProgress else { return }
 
-        if let lastCheckDate = updater.lastUpdateCheckDate {
+        if let lastCheckDate = adapterState.lastUpdateCheckDate {
             let elapsed = Date().timeIntervalSince(lastCheckDate)
-            guard elapsed < 0 || elapsed >= updater.updateCheckInterval else { return }
+            guard elapsed < 0 || elapsed >= adapterState.updateCheckInterval else { return }
         }
 
         checkForUpdateInformationIfPossible()
     }
 
     func checkForUpdates() {
-        guard canCheckForUpdates else { return }
+        guard state.canCheckForUpdates else { return }
 
         // Any explicit check is interaction with the currently advertised update.
-        // Persist it before presenting Sparkle so dismissing or closing the native
-        // window cannot make the Dashboard button reappear for the same build.
-        if let availableUpdate {
+        // Persist it before presenting the adapter's update UI so dismissing or closing
+        // that UI cannot make the Dashboard button reappear for the same build.
+        if let availableUpdate = state.availableUpdate {
             rememberInteraction(with: availableUpdate.versionIdentifier)
-            self.availableUpdate = nil
+            state.availableUpdate = nil
         }
 
-        if !updaterController.updater.sessionInProgress {
+        if !adapter.state.sessionInProgress {
             isUserInitiatedUpdateCheck = true
         }
-        updaterController.checkForUpdates(nil)
+        adapter.checkForUpdates()
     }
 
-    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
-        let update = AvailableUpdate(
-            versionIdentifier: item.versionString,
-            displayVersion: item.displayVersionString
+    private func handle(_ event: UpdaterAdapterEvent) {
+        switch event {
+        case .stateChanged(let adapterState):
+            apply(adapterState)
+        case .foundUpdate(let versionIdentifier, let displayVersion):
+            handleFoundUpdate(versionIdentifier: versionIdentifier, displayVersion: displayVersion)
+        case .didNotFindUpdate:
+            state.availableUpdate = nil
+        case .didFinishUpdateCycle:
+            isUserInitiatedUpdateCheck = false
+        }
+    }
+
+    private func apply(_ adapterState: UpdaterAdapterState) {
+        state.canCheckForUpdates = adapterState.canCheckForUpdates
+    }
+
+    private func handleFoundUpdate(versionIdentifier: String, displayVersion: String) {
+        let update = UpdaterState.AvailableUpdate(
+            versionIdentifier: versionIdentifier,
+            displayVersion: displayVersion
         )
 
         if isUserInitiatedUpdateCheck {
             rememberInteraction(with: update.versionIdentifier)
-            availableUpdate = nil
-        } else if checksForUpdatesWhenDashboardAppears && !hasInteracted(with: update.versionIdentifier) {
-            availableUpdate = update
+            state.availableUpdate = nil
+        } else if state.checksForUpdatesWhenDashboardAppears && !hasInteracted(with: update.versionIdentifier) {
+            state.availableUpdate = update
         } else {
-            availableUpdate = nil
+            state.availableUpdate = nil
         }
     }
 
-    func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
-        availableUpdate = nil
-    }
-
-    func updater(
-        _ updater: SPUUpdater,
-        didFinishUpdateCycleFor updateCheck: SPUUpdateCheck,
-        error: Error?
-    ) {
-        isUserInitiatedUpdateCheck = false
-    }
-
     private func checkForUpdateInformationIfPossible() {
-        let updater = updaterController.updater
-        guard !updater.sessionInProgress else { return }
-        updater.checkForUpdateInformation()
+        guard !adapter.state.sessionInProgress else { return }
+        adapter.checkForUpdateInformation()
     }
 
     private func hasInteracted(with versionIdentifier: String) -> Bool {
@@ -157,6 +229,6 @@ struct CheckForUpdatesView: View {
 
     var body: some View {
         Button("Check for Updates…", action: updaterViewModel.checkForUpdates)
-            .disabled(!updaterViewModel.canCheckForUpdates)
+            .disabled(!updaterViewModel.state.canCheckForUpdates)
     }
 }
