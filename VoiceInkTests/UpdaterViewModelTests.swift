@@ -9,7 +9,7 @@ struct UpdaterViewModelTests {
         let suiteName = "UpdaterViewModelTests.official"
         let defaults = makeDefaults(suiteName: suiteName)
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let adapter = RecordingUpdaterAdapter(canCheckForUpdates: true)
+        let adapter = OfficialUpdaterAdapterStub(canCheckForUpdates: true)
         let updater: any UpdaterModule = UpdaterViewModel(defaults: defaults, adapter: adapter)
 
         #expect(adapter.startCount == 1)
@@ -29,7 +29,10 @@ struct UpdaterViewModelTests {
         let suiteName = "UpdaterViewModelTests.local"
         let defaults = makeDefaults(suiteName: suiteName)
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let updater: any UpdaterModule = UpdaterViewModel(defaults: defaults)
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: ForkUpdaterAdapter()
+        )
 
         #expect(!updater.state.canCheckForUpdates)
         #expect(updater.state.availableUpdate == nil)
@@ -41,6 +44,15 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func productionAdapterMatchesTheBuildConfiguration() {
+        #if LOCAL_BUILD
+            #expect(ProductionUpdaterAdapter.make() is ForkUpdaterAdapter)
+        #else
+            #expect(ProductionUpdaterAdapter.make() is SparkleUpdaterAdapter)
+        #endif
+    }
+
+    @Test
     func automaticCheckPreferenceMigratesFromSparkleWithoutLosingTheChoice() {
         let suiteName = "UpdaterViewModelTests.migration"
         let defaults = makeDefaults(suiteName: suiteName)
@@ -49,7 +61,7 @@ struct UpdaterViewModelTests {
 
         let updater: any UpdaterModule = UpdaterViewModel(
             defaults: defaults,
-            adapter: RecordingUpdaterAdapter(canCheckForUpdates: true)
+            adapter: OfficialUpdaterAdapterStub(canCheckForUpdates: true)
         )
 
         #expect(!updater.state.checksForUpdatesWhenDashboardAppears)
@@ -64,7 +76,7 @@ struct UpdaterViewModelTests {
 }
 
 @MainActor
-private final class RecordingUpdaterAdapter: UpdaterAdapter {
+private final class OfficialUpdaterAdapterStub: UpdaterAdapter {
     var state: UpdaterAdapterState
     var onEvent: ((UpdaterAdapterEvent) -> Void)?
     private(set) var startCount = 0

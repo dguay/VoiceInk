@@ -67,7 +67,7 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
 }
 
 @MainActor
-private enum ProductionUpdaterAdapter {
+enum ProductionUpdaterAdapter {
     static func make() -> any UpdaterAdapter {
         #if LOCAL_BUILD
             ForkUpdaterAdapter()
