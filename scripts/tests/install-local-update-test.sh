@@ -130,12 +130,18 @@ info_plist="$bundle_path/Contents/Info.plist"
 /bin/sleep 30 >/dev/null 2>&1 &
 app_pid=$!
 
-/usr/bin/plutil -create xml1 "$health_path"
-/usr/bin/plutil -insert forkCommit -string "${VOICEINK_TEST_HEALTH_FORK_OVERRIDE:-$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$info_plist")}" "$health_path"
-/usr/bin/plutil -insert upstreamCommit -string "$(/usr/bin/plutil -extract VoiceInkUpstreamCommit raw "$info_plist")" "$health_path"
-/usr/bin/plutil -insert updaterKind -string "$(/usr/bin/plutil -extract VoiceInkUpdaterKind raw "$info_plist")" "$health_path"
-/usr/bin/plutil -insert processIdentifier -integer "$app_pid" "$health_path"
+if [[ "${VOICEINK_TEST_SKIP_HEALTH:-0}" != 1 ]]; then
+    /usr/bin/plutil -create xml1 "$health_path"
+    /usr/bin/plutil -insert forkCommit -string "${VOICEINK_TEST_HEALTH_FORK_OVERRIDE:-$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$info_plist")}" "$health_path"
+    /usr/bin/plutil -insert upstreamCommit -string "$(/usr/bin/plutil -extract VoiceInkUpstreamCommit raw "$info_plist")" "$health_path"
+    /usr/bin/plutil -insert updaterKind -string "$(/usr/bin/plutil -extract VoiceInkUpdaterKind raw "$info_plist")" "$health_path"
+    /usr/bin/plutil -insert processIdentifier -integer "$app_pid" "$health_path"
+fi
+if [[ -n "${VOICEINK_TEST_PID_LOG:-}" ]]; then
+    printf '%s\n' "$app_pid" > "$VOICEINK_TEST_PID_LOG"
+fi
 printf '%s\n' "$bundle_path" >> "$VOICEINK_TEST_LAUNCH_LOG"
+printf '%s\n' "$app_pid"
 EOF
 
 cat > "$fake_bin/relaunch-voiceink" <<'EOF'
@@ -144,7 +150,16 @@ set -euo pipefail
 printf 'rollback:%s\n' "$1" >> "$VOICEINK_TEST_LAUNCH_LOG"
 EOF
 
-chmod +x "$fake_bin/codesign" "$fake_bin/launch-voiceink" "$fake_bin/relaunch-voiceink"
+cat > "$fake_bin/fail-replacement" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+
+chmod +x \
+    "$fake_bin/codesign" \
+    "$fake_bin/launch-voiceink" \
+    "$fake_bin/relaunch-voiceink" \
+    "$fake_bin/fail-replacement"
 
 staged_bundle="$fixture_root/staging/candidates/$new_sha/VoiceInk.app"
 /usr/bin/plutil -replace forkCommit -string "$new_sha" "$manifest_path"
@@ -227,5 +242,76 @@ grep -Fqx "$installed_bundle" "$launch_log"
 grep -Fqx "rollback:$installed_bundle" "$launch_log"
 grep -Fq "wrong fork provenance" "$fixture_root/rollback-output.log"
 launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path")"
+
+launched_pid=""
+: > "$launch_log"
+pid_log="$fixture_root/timed-out-pid.log"
+sleep 30 &
+parent_pid=$!
+
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
+    VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=1 \
+    VOICEINK_UPDATE_STABILITY_SECONDS=1 \
+    VOICEINK_TEST_SKIP_HEALTH=1 \
+    VOICEINK_TEST_PID_LOG="$pid_log" \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/timeout-output.log" 2>&1
+timeout_status=$?
+set -e
+
+[[ "$timeout_status" -ne 0 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: approved parent survived health timeout\n' >&2
+    exit 1
+fi
+parent_pid=""
+timed_out_pid="$(< "$pid_log")"
+if kill -0 "$timed_out_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: timed-out candidate survived rollback\n' >&2
+    exit 1
+fi
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+grep -Fqx "rollback:$installed_bundle" "$launch_log"
+grep -Fq "did not report healthy" "$fixture_root/timeout-output.log"
+
+: > "$launch_log"
+sleep 30 &
+parent_pid=$!
+
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/fail-replacement" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/replacement-output.log" 2>&1
+replacement_status=$?
+set -e
+
+[[ "$replacement_status" -ne 0 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: approved parent survived replacement failure\n' >&2
+    exit 1
+fi
+parent_pid=""
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+grep -Fqx "rollback:$installed_bundle" "$launch_log"
 
 printf 'install-local-update-test: PASS\n'

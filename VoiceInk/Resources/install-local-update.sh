@@ -76,18 +76,43 @@ health_path="${VOICEINK_UPDATE_HEALTH_PATH:-$stage_root/install-health.plist}"
 failed_root="$stage_root/failed/$approved_sha-$$"
 launcher="${VOICEINK_UPDATE_LAUNCHER:-}"
 relauncher="${VOICEINK_UPDATE_RELAUNCHER:-}"
+atomic_replacer="${VOICEINK_UPDATE_ATOMIC_REPLACER:-}"
 health_timeout="${VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS:-30}"
 stability_seconds="${VOICEINK_UPDATE_STABILITY_SECONDS:-10}"
 parent_exit_timeout="${VOICEINK_UPDATE_PARENT_EXIT_TIMEOUT_SECONDS:-30}"
 replacement_started=false
+parent_terminated=false
 launched_pid=""
 
 launch_candidate() {
     if [[ -n "$launcher" ]]; then
         "$launcher" "$target_bundle" "$health_path"
     else
-        /usr/bin/open -n "$target_bundle" --args --voiceink-update-health-path "$health_path"
+        executable="$target_bundle/Contents/MacOS/VoiceInk"
+        [[ -x "$executable" ]] || fail "The installed app has no executable."
+        "$executable" --voiceink-update-health-path "$health_path" >/dev/null 2>&1 &
+        printf '%s\n' "$!"
     fi
+}
+
+replace_bundle_atomically() {
+    if [[ -n "$atomic_replacer" ]]; then
+        "$atomic_replacer" "$target_bundle" "$candidate_temporary" "$retired_bundle"
+        return
+    fi
+    /usr/bin/swift - "$target_bundle" "$candidate_temporary" "$(basename "$retired_bundle")" <<'SWIFT'
+import Foundation
+
+let arguments = CommandLine.arguments
+let target = URL(fileURLWithPath: arguments[1])
+let candidate = URL(fileURLWithPath: arguments[2])
+_ = try FileManager.default.replaceItemAt(
+    target,
+    withItemAt: candidate,
+    backupItemName: arguments[3],
+    options: [.withoutDeletingBackupItem]
+)
+SWIFT
 }
 
 relaunch_previous() {
@@ -103,6 +128,8 @@ finish_transaction() {
     trap - EXIT
     set +e
 
+    # Once replacement begins, every failure path must stop the candidate, put the
+    # retired bundle back at the original path, and relaunch that known-good app.
     if [[ "$result" -ne 0 && "$replacement_started" == true ]]; then
         if [[ "$launched_pid" =~ ^[1-9][0-9]*$ ]]; then
             kill -TERM "$launched_pid" >/dev/null 2>&1 || true
@@ -114,6 +141,10 @@ finish_transaction() {
         if [[ -d "$retired_bundle" ]]; then
             mv "$retired_bundle" "$target_bundle" >/dev/null 2>&1 || true
         fi
+        relaunch_previous >/dev/null 2>&1 || true
+    elif [[ "$result" -ne 0 && "$parent_terminated" == true ]]; then
+        # A failure between termination and replacement leaves the old bundle in
+        # place but VoiceInk closed, so recovery still has to relaunch it.
         relaunch_previous >/dev/null 2>&1 || true
     fi
 
@@ -153,13 +184,15 @@ done
 if kill -0 "$parent_pid" 2>/dev/null; then
     fail "VoiceInk did not terminate before the installation timeout."
 fi
+parent_terminated=true
 
-mv "$target_bundle" "$retired_bundle"
+replace_bundle_atomically
 replacement_started=true
-mv "$candidate_temporary" "$target_bundle"
 
 /bin/rm -f "$health_path"
-launch_candidate
+launched_pid="$(launch_candidate)"
+[[ "$launched_pid" =~ ^[1-9][0-9]*$ ]] \
+    || fail "The installed app did not return a valid process identifier."
 
 for ((attempt = 0; attempt < health_timeout * 10; attempt++)); do
     if [[ -f "$health_path" ]]; then
@@ -175,7 +208,7 @@ health_upstream_sha="$(/usr/bin/plutil -extract upstreamCommit raw "$health_path
     || fail "The installed app reported an invalid health handshake."
 health_updater_kind="$(/usr/bin/plutil -extract updaterKind raw "$health_path" 2>/dev/null)" \
     || fail "The installed app reported an invalid health handshake."
-launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path" 2>/dev/null)" \
+reported_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path" 2>/dev/null)" \
     || fail "The installed app reported an invalid process identifier."
 
 [[ "$health_fork_sha" == "$approved_sha" ]] \
@@ -184,7 +217,7 @@ launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path" 2>
     || fail "The installed app reported the wrong upstream provenance."
 [[ "$health_updater_kind" == "fork" ]] \
     || fail "The installed app reported the wrong updater kind."
-[[ "$launched_pid" =~ ^[1-9][0-9]*$ ]] \
+[[ "$reported_pid" =~ ^[1-9][0-9]*$ && "$reported_pid" == "$launched_pid" ]] \
     || fail "The installed app reported an invalid process identifier."
 
 for ((attempt = 0; attempt < stability_seconds * 10; attempt++)); do
