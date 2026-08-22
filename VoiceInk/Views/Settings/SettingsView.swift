@@ -248,7 +248,7 @@ struct SettingsView: View {
                 Toggle(
                     "Automatically Check for Updates",
                     isOn: Binding(
-                        get: { updaterViewModel.checksForUpdatesWhenDashboardAppears },
+                        get: { updaterViewModel.state.checksForUpdatesWhenDashboardAppears },
                         set: { updaterViewModel.setChecksForUpdatesWhenDashboardAppears($0) }
                     ))
 
@@ -265,7 +265,7 @@ struct SettingsView: View {
                     Button("Check for Updates") {
                         updaterViewModel.checkForUpdates()
                     }
-                    .disabled(!updaterViewModel.canCheckForUpdates)
+                    .disabled(!updaterViewModel.state.canCheckForUpdates)
 
                     Button("Reset Onboarding") {
                         showResetOnboardingAlert = true
