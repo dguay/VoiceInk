@@ -73,8 +73,44 @@ struct UpdaterViewModelTests {
 
         updater.showStagedUpdate()
         updater.restartAndUpdate()
+        try await waitUntil { preparer.restartRequestCount == 1 }
         #expect(preparer.restartRequestCount == 1)
         #expect(!updater.state.isPresentingStagedUpdate)
+    }
+
+    @Test
+    func staleRestartApprovalReturnsToPreparationForTheNewCandidate() async throws {
+        let suiteName = "UpdaterViewModelTests.stale-restart"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let approvedCandidate = StagedForkCandidate(
+            forkCommit: "1111111111111111111111111111111111111111",
+            upstreamCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            bundleURL: URL(fileURLWithPath: "/tmp/approved/VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_200)
+        )
+        let replacementCandidate = StagedForkCandidate(
+            forkCommit: "2222222222222222222222222222222222222222",
+            upstreamCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            bundleURL: URL(fileURLWithPath: "/tmp/replacement/VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_300)
+        )
+        let preparer = ForkUpdatePreparerStub(
+            stagedCandidate: approvedCandidate,
+            restartResult: replacementCandidate
+        )
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: ForkUpdaterAdapter(preparer: preparer)
+        )
+
+        updater.checkForUpdates()
+        try await waitUntil { updater.state.stagedUpdate == approvedCandidate }
+        updater.restartAndUpdate()
+        try await waitUntil { updater.state.stagedUpdate == replacementCandidate }
+
+        #expect(preparer.restartRequestCount == 1)
+        #expect(updater.state.isPresentingStagedUpdate)
     }
 
     @Test
@@ -153,6 +189,42 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func launchedLocalBuildReportsItsTransactionHealth() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let bundleURL = temporaryDirectory.appendingPathComponent("VoiceInk.bundle", isDirectory: true)
+        let contentsURL = bundleURL.appendingPathComponent("Contents", isDirectory: true)
+        let healthURL = temporaryDirectory.appendingPathComponent("health.plist")
+        try FileManager.default.createDirectory(at: contentsURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let info: [String: Any] = [
+            "CFBundleIdentifier": "com.voiceink.tests.health",
+            SourceProvenance.forkCommitInfoKey: "0123456789abcdef0123456789abcdef01234567",
+            SourceProvenance.upstreamCommitInfoKey: "fedcba9876543210fedcba9876543210fedcba98",
+            "VoiceInkUpdaterKind": "fork",
+        ]
+        let infoData = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+        try infoData.write(to: contentsURL.appendingPathComponent("Info.plist"))
+        let bundle = try #require(Bundle(url: bundleURL))
+
+        try LocalUpdateHealthReporter.reportIfRequested(
+            arguments: ["VoiceInk", "--voiceink-update-health-path", healthURL.path],
+            bundle: bundle,
+            processIdentifier: 4_321
+        )
+
+        let report = try PropertyListDecoder().decode(
+            LocalUpdateHealthReport.self,
+            from: Data(contentsOf: healthURL)
+        )
+        #expect(report.forkCommit == "0123456789abcdef0123456789abcdef01234567")
+        #expect(report.upstreamCommit == "fedcba9876543210fedcba9876543210fedcba98")
+        #expect(report.updaterKind == "fork")
+        #expect(report.processIdentifier == 4_321)
+    }
+
+    @Test
     func sourceProvenanceRejectsUnexpandedBuildSettings() throws {
         let bundleURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -225,11 +297,13 @@ struct UpdaterViewModelTests {
 @MainActor
 private final class ForkUpdatePreparerStub: ForkUpdatePreparing {
     let stagedCandidate: StagedForkCandidate
+    let restartResult: StagedForkCandidate?
     private(set) var prepareCount = 0
     private(set) var restartRequestCount = 0
 
-    init(stagedCandidate: StagedForkCandidate) {
+    init(stagedCandidate: StagedForkCandidate, restartResult: StagedForkCandidate? = nil) {
         self.stagedCandidate = stagedCandidate
+        self.restartResult = restartResult
     }
 
     func loadStagedCandidate() throws -> StagedForkCandidate? {
@@ -241,8 +315,9 @@ private final class ForkUpdatePreparerStub: ForkUpdatePreparing {
         return stagedCandidate
     }
 
-    func requestRestart(for candidate: StagedForkCandidate) {
+    func requestRestart(for candidate: StagedForkCandidate) async throws -> StagedForkCandidate? {
         restartRequestCount += 1
+        return restartResult
     }
 }
 

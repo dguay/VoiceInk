@@ -23,6 +23,8 @@ It uses `LocalBuild.xcconfig`, `VoiceInk.local.entitlements`, and the `LOCAL_BUI
 
 After bootstrap, a local build's update controls prepare `origin/main` in a temporary worktree. VoiceInk runs the updater tests and non-UI unit tests, builds the candidate, validates its signature and source metadata, and stages it under Application Support. The registered clone must be clean. Preparation never resets or cleans it, and VoiceInk keeps running while the update waits for an explicit restart.
 
+`Restart and Update` approves only the staged candidate SHA. The on-demand installer fetches `origin/main` again before quitting VoiceInk, preserves the current app, replaces it from a same-volume copy, and waits for the new app's provenance handshake and stability window. A stale candidate returns to preparation without quitting VoiceInk. A launch or health failure restores and relaunches the preserved app.
+
 Choose an identity explicitly:
 
 ```bash
