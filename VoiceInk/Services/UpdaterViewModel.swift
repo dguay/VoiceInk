@@ -98,8 +98,8 @@ extension UpdaterAdapter {
 enum ProductionUpdaterAdapter {
     static func make() -> any UpdaterAdapter {
         #if LOCAL_BUILD
-            if let preparer = ForkUpdatePreparationService.production() {
-                ForkUpdaterAdapter(preparer: preparer)
+            if let transaction = ForkUpdateTransaction.production() {
+                ForkUpdaterAdapter(transaction: transaction)
             } else {
                 ForkUpdaterAdapter()
             }
