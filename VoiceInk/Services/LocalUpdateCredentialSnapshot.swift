@@ -234,6 +234,11 @@ struct LocalUpdateRecoveryReconciler {
         }
         let installedCommit = try installedForkCommit(at: installedBundleURL)
 
+        // Precedence is deliberate. A matching pending generation means bundle
+        // replacement won but publication stopped. A matching root is already
+        // authoritative. Previous is used only when publication moved root aside
+        // before replacement took effect. A pending generation whose previous
+        // commit is still installed never became active and is discarded.
         if let state = try state(at: pending), isSettled(state, installedCommit: installedCommit) {
             try activatePending(pending, root: root, previous: previous, generation: state.credentialGeneration)
             return
@@ -299,8 +304,11 @@ struct LocalUpdateRecoveryReconciler {
     }
 
     private func isSettled(_ state: LocalUpdateRecoveryState, installedCommit: String) -> Bool {
-        state.candidateForkCommit == installedCommit
+        state.installInProgress != true
+            && state.restoreInProgress != true
+            && (state.candidateForkCommit == installedCommit
             || (state.previousForkCommit == installedCommit && state.suppressedForkCommit == state.candidateForkCommit)
+            )
     }
 
     private func defaultRecoveryRootURL() -> URL {
@@ -317,5 +325,99 @@ struct LocalUpdateRecoveryReconciler {
             throw ForkUpdateError(message: "VoiceInk could not read the installed source revision.")
         }
         return commit
+    }
+}
+
+struct LocalUpdateRestoreResumer {
+    private let fileManager: FileManager
+
+    init(fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+    }
+
+    func resumeIfNeeded(
+        installedBundleURL: URL = Bundle.main.bundleURL,
+        recoveryRootURL: URL? = nil,
+        restorationScriptURL: URL? = nil
+    ) throws -> Bool {
+        let root = recoveryRootURL ?? defaultRecoveryRootURL()
+        let pending = URL(fileURLWithPath: root.path + ".pending", isDirectory: true)
+        let previous = URL(fileURLWithPath: root.path + ".previous", isDirectory: true)
+        let installedCommit = try installedForkCommitIfRecoveryExists(
+            at: installedBundleURL,
+            recoveryURLs: [pending, root, previous]
+        )
+        guard let installedCommit else { return false }
+
+        let recoveryURL = try [pending, root, previous].first { url in
+            guard let state = try state(at: url) else { return false }
+            if state.restoreInProgress == true {
+                return state.candidateForkCommit == installedCommit || state.previousForkCommit == installedCommit
+            }
+            return state.installInProgress == true && state.candidateForkCommit == installedCommit
+        }
+        guard let recoveryURL else { return false }
+        guard let scriptURL = restorationScriptURL
+            ?? Bundle.main.url(forResource: "restore-local-update", withExtension: "sh")
+        else {
+            throw ForkUpdateError(message: "VoiceInk could not find its interrupted rollback helper.")
+        }
+
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [
+            scriptURL.path,
+            "--resume",
+            installedBundleURL.path,
+            recoveryURL.appendingPathComponent("VoiceInk.app", isDirectory: true).path,
+        ]
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+        let outputData = output.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else {
+            let detail = String(data: outputData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw ForkUpdateError(
+                message: detail.flatMap { $0.isEmpty ? nil : $0 }
+                    ?? "VoiceInk could not resume its interrupted rollback."
+            )
+        }
+        return true
+    }
+
+    private func state(at recoveryURL: URL) throws -> LocalUpdateRecoveryState? {
+        let stateURL = recoveryURL.appendingPathComponent("recovery.plist")
+        guard fileManager.fileExists(atPath: stateURL.path) else { return nil }
+        return try PropertyListDecoder().decode(
+            LocalUpdateRecoveryState.self,
+            from: Data(contentsOf: stateURL)
+        )
+    }
+
+    private func installedForkCommitIfRecoveryExists(
+        at bundleURL: URL,
+        recoveryURLs: [URL]
+    ) throws -> String? {
+        guard recoveryURLs.contains(where: { fileManager.fileExists(atPath: $0.path) }) else { return nil }
+        let infoURL = bundleURL.appendingPathComponent("Contents/Info.plist")
+        let propertyList = try PropertyListSerialization.propertyList(
+            from: Data(contentsOf: infoURL),
+            options: [],
+            format: nil
+        )
+        guard let info = propertyList as? [String: Any],
+              let commit = info[SourceProvenance.forkCommitInfoKey] as? String
+        else {
+            throw ForkUpdateError(message: "VoiceInk could not read the installed source revision.")
+        }
+        return commit
+    }
+
+    private func defaultRecoveryRootURL() -> URL {
+        fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("com.prakashjoshipax.VoiceInk.UpdaterRecovery", isDirectory: true)
     }
 }

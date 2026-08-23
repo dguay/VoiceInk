@@ -15,7 +15,27 @@ enum VoiceInkMain {
                     Darwin.exit(EXIT_SUCCESS)
                 }
                 if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
-                    try LocalUpdateRecoveryReconciler().reconcile()
+                    let recoveryRoot = FileManager.default.urls(
+                        for: .applicationSupportDirectory,
+                        in: .userDomainMask
+                    )[0].appendingPathComponent(
+                        "com.prakashjoshipax.VoiceInk.UpdaterRecovery",
+                        isDirectory: true
+                    )
+                    let resumer = LocalUpdateRestoreResumer()
+                    let resumed = try resumer.resumeIfNeeded(recoveryRootURL: recoveryRoot)
+                    try LocalUpdateRecoveryReconciler().reconcile(recoveryRootURL: recoveryRoot)
+                    if resumed {
+                        let relaunch = Process()
+                        relaunch.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                        relaunch.arguments = ["-n", Bundle.main.bundleURL.path]
+                        try relaunch.run()
+                        relaunch.waitUntilExit()
+                        guard relaunch.terminationStatus == 0 else {
+                            throw ForkUpdateError(message: "VoiceInk could not relaunch after resuming rollback.")
+                        }
+                        Darwin.exit(EXIT_SUCCESS)
+                    }
                 }
             } catch {
                 let message = "VoiceInk could not prepare its updater recovery state: \(error.localizedDescription)\n"

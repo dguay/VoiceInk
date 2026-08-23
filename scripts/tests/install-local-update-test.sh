@@ -287,13 +287,30 @@ export VOICEINK_UPDATE_CREDENTIAL_SNAPSHOT_CREATOR="$fake_bin/create-credentials
 export VOICEINK_UPDATE_CREDENTIAL_SNAPSHOT_DELETER="$fake_bin/delete-credentials"
 export VOICEINK_TEST_CREDENTIAL_CREATE_LOG="$credential_create_log"
 export VOICEINK_TEST_CREDENTIAL_DELETE_LOG="$credential_delete_log"
-export VOICEINK_UPDATE_CREDENTIAL_GENERATION="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+intent_counter=0
+prepare_recovery_intent() {
+    intent_counter=$((intent_counter + 1))
+    printf -v intent_suffix '%012x' "$intent_counter"
+    export VOICEINK_UPDATE_CREDENTIAL_GENERATION="aaaaaaaa-aaaa-4aaa-8aaa-$intent_suffix"
+    /bin/rm -rf "$recovery_root.pending"
+    mkdir -m 700 "$recovery_root.pending"
+    intent_previous_sha="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$installed_bundle/Contents/Info.plist")"
+    /usr/bin/plutil -create xml1 "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert previousForkCommit -string "$intent_previous_sha" "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert candidateForkCommit -string "$new_sha" "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert credentialGeneration -string "$VOICEINK_UPDATE_CREDENTIAL_GENERATION" "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert installInProgress -bool true "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert restoreInProgress -bool false "$recovery_root.pending/recovery.plist"
+    chmod 600 "$recovery_root.pending/recovery.plist"
+}
 
 staged_bundle="$fixture_root/staging/candidates/$new_sha/VoiceInk.app"
 /usr/bin/plutil -replace forkCommit -string "$new_sha" "$manifest_path"
 /usr/bin/plutil -replace upstreamCommit -string "$upstream_sha" "$manifest_path"
 /usr/bin/plutil -replace bundlePath -string "$staged_bundle" "$manifest_path"
 
+prepare_recovery_intent
 set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -317,6 +334,7 @@ kill -0 "$parent_pid"
 grep -Fq "disk space" "$fixture_root/disk-space-output.log"
 
 : > "$launch_log"
+prepare_recovery_intent
 set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -348,6 +366,7 @@ grep -Fq "snapshot" "$fixture_root/snapshot-output.log"
 
 sleep 30 &
 parent_pid=$!
+prepare_recovery_intent
 set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -374,6 +393,7 @@ grep -Fq "could not relaunch the previous version" "$fixture_root/relaunch-failu
 sleep 30 &
 parent_pid=$!
 : > "$launch_log"
+prepare_recovery_intent
 
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -404,6 +424,9 @@ parent_pid=""
 [[ "$(< "$recovery_root/Preferences.plist")" == "preferences-before-update" ]]
 [[ "$(/usr/bin/plutil -extract previousForkCommit raw "$recovery_root/recovery.plist")" == "$old_sha" ]]
 [[ "$(/usr/bin/plutil -extract candidateForkCommit raw "$recovery_root/recovery.plist")" == "$new_sha" ]]
+[[ "$(/usr/bin/plutil -extract installInProgress raw "$recovery_root/recovery.plist")" == "false" ]]
+[[ "$(stat -f '%Lp' "$recovery_root")" == "700" ]]
+[[ "$(stat -f '%Lp' "$recovery_root/recovery.plist")" == "600" ]]
 credential_generation="$(/usr/bin/plutil -extract credentialGeneration raw "$recovery_root/recovery.plist")"
 [[ "$(< "$credential_create_log")" == "$credential_generation" ]]
 [[ ! -e "$manifest_path" ]]
@@ -426,6 +449,7 @@ printf 'obsolete\n' > "$recovery_root/obsolete-state"
 sleep 30 &
 parent_pid=$!
 
+prepare_recovery_intent
 set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -457,6 +481,7 @@ grep -Fqx "rollback:$installed_bundle" "$launch_log"
 sleep 30 &
 parent_pid=$!
 
+prepare_recovery_intent
 set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -492,6 +517,7 @@ grep -Fqx "rollback:$installed_bundle" "$launch_log"
 sleep 30 &
 parent_pid=$!
 
+prepare_recovery_intent
 set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -546,6 +572,7 @@ pid_log="$fixture_root/timed-out-pid.log"
 sleep 30 &
 parent_pid=$!
 
+prepare_recovery_intent
 set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -587,6 +614,7 @@ grep -Fq "did not report healthy" "$fixture_root/timeout-output.log"
 sleep 30 &
 parent_pid=$!
 
+prepare_recovery_intent
 set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -625,6 +653,7 @@ fetch_count="$fixture_root/fetch-count"
 sleep 30 &
 parent_pid=$!
 
+prepare_recovery_intent
 set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \

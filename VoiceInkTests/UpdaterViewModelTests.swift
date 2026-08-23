@@ -120,6 +120,18 @@ struct UpdaterViewModelTests {
         try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
         let manifestURL = temporaryDirectory.appendingPathComponent("staged-candidate.plist")
+        let installedBundle = temporaryDirectory.appendingPathComponent("Installed.app", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: installedBundle.appendingPathComponent("Contents", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try PropertyListSerialization.data(
+            fromPropertyList: [
+                SourceProvenance.forkCommitInfoKey: "3333333333333333333333333333333333333333",
+            ],
+            format: .xml,
+            options: 0
+        ).write(to: installedBundle.appendingPathComponent("Contents/Info.plist"))
         let candidate = StagedForkCandidate(
             forkCommit: "1111111111111111111111111111111111111111",
             upstreamCommit: "2222222222222222222222222222222222222222",
@@ -133,7 +145,7 @@ struct UpdaterViewModelTests {
             scriptURL: temporaryDirectory.appendingPathComponent("prepare-local-update.sh"),
             manifestURL: manifestURL,
             installationScriptURL: temporaryDirectory.appendingPathComponent("install-local-update.sh"),
-            targetBundleURL: temporaryDirectory.appendingPathComponent("Installed.app"),
+            targetBundleURL: installedBundle,
             backupBundleURL: temporaryDirectory.appendingPathComponent("Recovery/VoiceInk.app"),
             credentialSnapshotter: credentialStore,
             installationRunner: ForkUpdateInstallationRunnerStub(recorder: recorder)
@@ -143,6 +155,13 @@ struct UpdaterViewModelTests {
 
         #expect(recorder.events == [.credentialsSnapshotted, .installerStarted])
         #expect(credentialStore.createdGenerations.count == 1)
+        let recoveryIntent = temporaryDirectory.appendingPathComponent("Recovery.pending/recovery.plist")
+        let intent = try PropertyListDecoder().decode(
+            LocalUpdateRecoveryState.self,
+            from: Data(contentsOf: recoveryIntent)
+        )
+        #expect(intent.installInProgress == true)
+        #expect(intent.credentialGeneration == credentialStore.createdGenerations[0])
     }
 
     @Test
@@ -200,7 +219,9 @@ struct UpdaterViewModelTests {
                 previousForkCommit: "3333333333333333333333333333333333333333",
                 candidateForkCommit: previousCommit,
                 credentialGeneration: currentGeneration,
-                suppressedForkCommit: nil
+                suppressedForkCommit: nil,
+                installInProgress: false,
+                restoreInProgress: false
             ),
             marker: "current",
             at: recoveryRoot
@@ -210,7 +231,9 @@ struct UpdaterViewModelTests {
                 previousForkCommit: previousCommit,
                 candidateForkCommit: installedCommit,
                 credentialGeneration: pendingGeneration,
-                suppressedForkCommit: nil
+                suppressedForkCommit: nil,
+                installInProgress: false,
+                restoreInProgress: false
             ),
             marker: "pending",
             at: pendingRecovery
@@ -226,6 +249,101 @@ struct UpdaterViewModelTests {
         #expect(!FileManager.default.fileExists(atPath: pendingRecovery.path))
         #expect(!FileManager.default.fileExists(atPath: recoveryRoot.path + ".previous"))
         #expect(credentialStore.deletedGenerations == [currentGeneration])
+    }
+
+    @Test
+    func launchDiscardsAnInstallIntentWhenBundleReplacementNeverStarted() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let installedBundle = temporaryDirectory.appendingPathComponent("VoiceInk.app", isDirectory: true)
+        let recoveryRoot = temporaryDirectory.appendingPathComponent("Recovery", isDirectory: true)
+        let pendingRecovery = URL(fileURLWithPath: recoveryRoot.path + ".pending", isDirectory: true)
+        let installedCommit = "1111111111111111111111111111111111111111"
+        let generation = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        try FileManager.default.createDirectory(
+            at: installedBundle.appendingPathComponent("Contents", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try PropertyListSerialization.data(
+            fromPropertyList: [SourceProvenance.forkCommitInfoKey: installedCommit],
+            format: .xml,
+            options: 0
+        ).write(to: installedBundle.appendingPathComponent("Contents/Info.plist"))
+        try writeRecoveryState(
+            LocalUpdateRecoveryState(
+                previousForkCommit: installedCommit,
+                candidateForkCommit: "2222222222222222222222222222222222222222",
+                credentialGeneration: generation,
+                suppressedForkCommit: nil,
+                installInProgress: true,
+                restoreInProgress: false
+            ),
+            marker: "intent",
+            at: pendingRecovery
+        )
+        let credentialStore = ForkUpdateCredentialRestorerStub()
+
+        try LocalUpdateRecoveryReconciler(credentialStore: credentialStore).reconcile(
+            installedBundleURL: installedBundle,
+            recoveryRootURL: recoveryRoot
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: pendingRecovery.path))
+        #expect(credentialStore.deletedGenerations == [generation])
+    }
+
+    @Test
+    func launchResumesAnInterruptedInstallBeforeRecoveryReconciliation() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let installedBundle = temporaryDirectory.appendingPathComponent("VoiceInk.app", isDirectory: true)
+        let recoveryRoot = temporaryDirectory.appendingPathComponent("Recovery", isDirectory: true)
+        let pendingRecovery = URL(fileURLWithPath: recoveryRoot.path + ".pending", isDirectory: true)
+        let recoveryBundle = pendingRecovery.appendingPathComponent("VoiceInk.app", isDirectory: true)
+        let scriptURL = temporaryDirectory.appendingPathComponent("restore-local-update.sh")
+        let resumedMarker = temporaryDirectory.appendingPathComponent("resumed")
+        let installedCommit = "1111111111111111111111111111111111111111"
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        try FileManager.default.createDirectory(
+            at: installedBundle.appendingPathComponent("Contents", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try PropertyListSerialization.data(
+            fromPropertyList: [SourceProvenance.forkCommitInfoKey: installedCommit],
+            format: .xml,
+            options: 0
+        ).write(to: installedBundle.appendingPathComponent("Contents/Info.plist"))
+        try writeRecoveryState(
+            LocalUpdateRecoveryState(
+                previousForkCommit: "2222222222222222222222222222222222222222",
+                candidateForkCommit: installedCommit,
+                credentialGeneration: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                suppressedForkCommit: nil,
+                installInProgress: true,
+                restoreInProgress: false
+            ),
+            marker: "pending",
+            at: pendingRecovery
+        )
+        try FileManager.default.createDirectory(at: recoveryBundle, withIntermediateDirectories: true)
+        let script = """
+        #!/usr/bin/env bash
+        [[ "$1" == "--resume" && -d "$2" && -d "$3" ]] || exit 1
+        /usr/bin/touch "\(resumedMarker.path)"
+        """
+        try Data(script.utf8).write(to: scriptURL)
+
+        let resumed = try LocalUpdateRestoreResumer().resumeIfNeeded(
+            installedBundleURL: installedBundle,
+            recoveryRootURL: recoveryRoot,
+            restorationScriptURL: scriptURL
+        )
+
+        #expect(resumed)
+        #expect(FileManager.default.fileExists(atPath: resumedMarker.path))
     }
 
     @Test
@@ -271,7 +389,9 @@ struct UpdaterViewModelTests {
                 previousForkCommit: "2222222222222222222222222222222222222222",
                 candidateForkCommit: candidateCommit,
                 credentialGeneration: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                suppressedForkCommit: nil
+                suppressedForkCommit: nil,
+                installInProgress: false,
+                restoreInProgress: false
             )
         ).write(to: recoveryManifest)
         let restoreRunner = ForkUpdateRestoreRunnerStub()

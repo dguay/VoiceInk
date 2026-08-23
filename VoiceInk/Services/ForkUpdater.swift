@@ -91,6 +91,8 @@ struct LocalUpdateRecoveryState: Codable, Equatable {
     let candidateForkCommit: String
     let credentialGeneration: String
     let suppressedForkCommit: String?
+    let installInProgress: Bool?
+    let restoreInProgress: Bool?
 }
 
 struct ForkUpdateError: LocalizedError {
@@ -379,7 +381,24 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         }
 
         let credentialGeneration = UUID().uuidString.lowercased()
-        try credentialSnapshotter.createSnapshot(generationIdentifier: credentialGeneration)
+        let recoveryIntentURL = try createRecoveryIntent(
+            candidate: candidate,
+            targetBundleURL: targetBundleURL,
+            backupBundleURL: backupBundleURL,
+            credentialGeneration: credentialGeneration
+        )
+        do {
+            try credentialSnapshotter.createSnapshot(generationIdentifier: credentialGeneration)
+        } catch {
+            do {
+                try FileManager.default.removeItem(at: recoveryIntentURL)
+            } catch {
+                throw ForkUpdateError(
+                    message: "VoiceInk could not create the credential snapshot or remove its recovery intent."
+                )
+            }
+            throw error
+        }
 
         let request = ForkUpdateInstallationRequest(
             scriptURL: installationScriptURL,
@@ -396,9 +415,10 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         } catch {
             do {
                 try credentialSnapshotter.deleteSnapshot(generationIdentifier: credentialGeneration)
+                try FileManager.default.removeItem(at: recoveryIntentURL)
             } catch {
                 throw ForkUpdateError(
-                    message: "VoiceInk could not install the update or remove its temporary credential snapshot."
+                    message: "VoiceInk could not install the update or remove its temporary recovery intent."
                 )
             }
             throw error
@@ -408,6 +428,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             return nil
         case .candidateStale:
             try credentialSnapshotter.deleteSnapshot(generationIdentifier: credentialGeneration)
+            try FileManager.default.removeItem(at: recoveryIntentURL)
             return try await prepare(retryingSuppressedCandidate: false)
         }
     }
@@ -453,6 +474,50 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             throw ForkUpdateError(message: "VoiceInk could not read the installed source revision.")
         }
         return forkCommit
+    }
+
+    private func createRecoveryIntent(
+        candidate: StagedForkCandidate,
+        targetBundleURL: URL,
+        backupBundleURL: URL,
+        credentialGeneration: String
+    ) throws -> URL {
+        let recoveryRoot = backupBundleURL.deletingLastPathComponent()
+        let pendingRecovery = URL(fileURLWithPath: recoveryRoot.path + ".pending", isDirectory: true)
+        guard !FileManager.default.fileExists(atPath: pendingRecovery.path) else {
+            throw ForkUpdateError(
+                message: "VoiceInk has an unfinished recovery transaction. Relaunch VoiceInk before retrying the update."
+            )
+        }
+
+        try FileManager.default.createDirectory(
+            at: pendingRecovery,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        do {
+            let state = LocalUpdateRecoveryState(
+                previousForkCommit: try installedForkCommit(at: targetBundleURL),
+                candidateForkCommit: candidate.forkCommit,
+                credentialGeneration: credentialGeneration,
+                suppressedForkCommit: nil,
+                installInProgress: true,
+                restoreInProgress: false
+            )
+            let stateURL = pendingRecovery.appendingPathComponent("recovery.plist")
+            try PropertyListEncoder().encode(state).write(to: stateURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
+            return pendingRecovery
+        } catch let creationError {
+            do {
+                try FileManager.default.removeItem(at: pendingRecovery)
+            } catch {
+                throw ForkUpdateError(
+                    message: "VoiceInk could not create or remove its temporary recovery intent."
+                )
+            }
+            throw creationError
+        }
     }
 }
 

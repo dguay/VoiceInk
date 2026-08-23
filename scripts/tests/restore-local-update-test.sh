@@ -179,4 +179,35 @@ set -e
 [[ "$automatic_staging_status" -ne 0 ]]
 [[ "$(< "$launch_log")" == "$installed_bundle" ]]
 
+# Simulate a helper interruption after installation publication. Resume must be
+# idempotent, restore every store, commit suppression, and leave relaunching to
+# the pre-initialization parent process.
+if /usr/bin/plutil -extract installInProgress raw "$recovery_root/recovery.plist" >/dev/null 2>&1; then
+    /usr/bin/plutil -replace installInProgress -bool true "$recovery_root/recovery.plist"
+else
+    /usr/bin/plutil -insert installInProgress -bool true "$recovery_root/recovery.plist"
+fi
+: > "$launch_log"
+PATH="$fake_bin:$PATH" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+    VOICEINK_UPDATE_PREFERENCES_RESTORER="$fake_bin/restore-preferences" \
+    VOICEINK_UPDATE_CREDENTIAL_RESTORER="$fake_bin/restore-credentials" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_TEST_CREDENTIAL_LOG="$credential_log" \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/restore-local-update.sh" \
+    --resume \
+    "$installed_bundle" \
+    "$backup_bundle"
+
+[[ "$(< "$installed_bundle/Contents/version")" == "previous" ]]
+[[ "$(< "$application_support/state")" == "previous-data" ]]
+[[ "$(< "$preferences")" == "previous-preferences" ]]
+[[ "$(< "$credential_log")" == "restored:$credential_generation" ]]
+[[ ! -s "$launch_log" ]]
+[[ "$(/usr/bin/plutil -extract suppressedForkCommit raw "$recovery_root/recovery.plist")" == "$candidate_sha" ]]
+[[ "$(/usr/bin/plutil -extract installInProgress raw "$recovery_root/recovery.plist")" == "false" ]]
+[[ "$(/usr/bin/plutil -extract restoreInProgress raw "$recovery_root/recovery.plist")" == "false" ]]
+
 printf 'restore-local-update-test: PASS\n'

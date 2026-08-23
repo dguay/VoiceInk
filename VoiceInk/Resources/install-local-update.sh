@@ -44,6 +44,18 @@ if [[ -n "$credential_generation" ]]; then
                     result=2
                 fi
             fi
+            preflight_recovery_root="$(dirname "$backup_bundle")"
+            preflight_pending="$preflight_recovery_root.pending"
+            if [[ -d "$preflight_pending" ]]; then
+                if ! pending_generation="$(/usr/bin/plutil -extract credentialGeneration raw "$preflight_pending/recovery.plist" 2>/dev/null)"; then
+                    printf 'Error: VoiceInk could not validate the preflight recovery intent.\n' >&2
+                    result=2
+                elif [[ "$pending_generation" == "$credential_generation" ]] \
+                    && ! /bin/rm -rf "$preflight_pending"; then
+                    printf 'Error: VoiceInk could not remove the preflight recovery intent.\n' >&2
+                    result=2
+                fi
+            fi
         fi
         exit "$result"
     }
@@ -194,102 +206,76 @@ move_recovery_directory() {
     fi
 }
 
-finish_transaction() {
-    result=$?
-    trap - EXIT
-    set +e
-
-    # Once replacement begins, every failure path must stop the candidate, restore
-    # the preserved app, and relaunch that known-good version.
-    installed_after_failure="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null || true)"
-    if [[ "$result" -ne 0 && "$installed_after_failure" == "$approved_sha" ]]; then
-        candidate_stopped=true
-        if [[ "$launched_pid" =~ ^[1-9][0-9]*$ ]]; then
-            if kill -0 "$launched_pid" 2>/dev/null && ! kill -TERM "$launched_pid"; then
-                printf 'Error: VoiceInk could not stop the rejected candidate before rollback.\n' >&2
-                candidate_stopped=false
-            fi
-            for ((attempt = 0; attempt < parent_exit_timeout * 10; attempt++)); do
-                if ! kill -0 "$launched_pid" 2>/dev/null; then
-                    break
-                fi
-                sleep 0.1
-            done
-            if kill -0 "$launched_pid" 2>/dev/null; then
-                if ! kill -KILL "$launched_pid"; then
-                    printf 'Error: VoiceInk could not force the rejected candidate to stop before rollback.\n' >&2
-                    candidate_stopped=false
-                fi
-            fi
-            if kill -0 "$launched_pid" 2>/dev/null; then
-                printf 'Error: VoiceInk left the rejected candidate running and did not mutate recovery state.\n' >&2
-                candidate_stopped=false
-            fi
-        fi
-        rollback_bundle="$backup_bundle"
-        if [[ "$recovery_published" == false ]]; then
-            rollback_bundle="$recovery_temporary/VoiceInk.app"
-        fi
-        rollback_succeeded=false
-        if [[ "$candidate_stopped" == false || ! -d "$rollback_bundle" ]] \
-            || ! /bin/bash "$restoration_script" --automatic "$target_bundle" "$rollback_bundle"; then
-            printf 'Error: Automatic rollback could not restore a consistent local state.\n' >&2
-            result=2
-        else
-            rollback_succeeded=true
-        fi
-        if [[ "$rollback_succeeded" == true && "$rollback_bundle" == "$recovery_temporary/VoiceInk.app" ]]; then
-            if [[ -d "$recovery_root" && ! -d "$previous_recovery" ]]; then
-                if ! move_recovery_directory "$recovery_root" "$previous_recovery"; then
-                    printf 'Error: VoiceInk could not preserve the prior recovery generation during rollback.\n' >&2
-                    result=2
-                fi
-            fi
-            if [[ ! -d "$recovery_root" ]] && ! move_recovery_directory "$recovery_temporary" "$recovery_root"; then
-                printf 'Error: VoiceInk could not publish the recovered generation after rollback.\n' >&2
-                result=2
-            else
-                recovery_published=true
-            fi
-        fi
-        if [[ "$rollback_succeeded" == true && -d "$previous_recovery" ]]; then
-            if ! obsolete_generation="$(/usr/bin/plutil -extract credentialGeneration raw "$previous_recovery/recovery.plist" 2>/dev/null)"; then
-                printf 'Error: VoiceInk could not read the superseded credential recovery generation.\n' >&2
-                result=2
-            elif ! delete_credential_snapshot "$obsolete_generation"; then
-                printf 'Error: VoiceInk could not remove the superseded credential recovery generation.\n' >&2
-                result=2
-            elif ! /bin/rm -rf "$previous_recovery"; then
-                printf 'Error: VoiceInk could not remove the superseded filesystem recovery generation.\n' >&2
-                result=2
-            fi
-        fi
-    elif [[ "$result" -ne 0 && "$parent_terminated" == true ]]; then
-        # A failure between termination and replacement leaves the old bundle in
-        # place but VoiceInk closed, so recovery still has to relaunch it.
-        if ! relaunch_previous; then
-            printf 'Error: VoiceInk could not relaunch the previous version after the failed update.\n' >&2
-            result=2
-        fi
+stop_launched_candidate() {
+    candidate_stopped=true
+    [[ "$launched_pid" =~ ^[1-9][0-9]*$ ]] || return
+    if kill -0 "$launched_pid" 2>/dev/null && ! kill -TERM "$launched_pid"; then
+        candidate_stopped=false
     fi
-
-    if [[ "$result" -ne 0 && "$installed_after_failure" != "$approved_sha" && -d "$previous_recovery" ]]; then
-        if [[ -d "$recovery_root" ]] && ! /bin/rm -rf "$recovery_root"; then
-            printf 'Error: VoiceInk could not remove the incomplete recovery generation.\n' >&2
-            result=2
-        elif ! move_recovery_directory "$previous_recovery" "$recovery_root"; then
-            printf 'Error: VoiceInk could not restore the prior recovery generation.\n' >&2
-            result=2
-        fi
+    for ((attempt = 0; attempt < parent_exit_timeout * 10; attempt++)); do
+        kill -0 "$launched_pid" 2>/dev/null || return
+        sleep 0.1
+    done
+    kill -KILL "$launched_pid" || candidate_stopped=false
+    for ((attempt = 0; attempt < parent_exit_timeout * 10; attempt++)); do
+        kill -0 "$launched_pid" 2>/dev/null || return
+        sleep 0.1
+    done
+    candidate_stopped=false
+    if [[ "$candidate_stopped" == false ]]; then
+        printf 'Error: VoiceInk could not stop the rejected candidate before rollback.\n' >&2
     fi
+}
 
-    if [[ "$result" -ne 0 && "$installed_after_failure" != "$approved_sha" && "$credential_snapshot_created" == true ]]; then
-        if ! delete_credential_snapshot "$credential_generation"; then
-            printf 'Error: VoiceInk could not remove the incomplete credential recovery generation.\n' >&2
-            result=2
-        fi
+run_automatic_rollback() {
+    rollback_bundle="$backup_bundle"
+    [[ "$recovery_published" == true ]] || rollback_bundle="$recovery_temporary/VoiceInk.app"
+    rollback_succeeded=false
+    if [[ "$candidate_stopped" == true && -d "$rollback_bundle" ]] \
+        && /bin/bash "$restoration_script" --automatic "$target_bundle" "$rollback_bundle"; then
+        rollback_succeeded=true
+        return
     fi
+    printf 'Error: Automatic rollback could not restore a consistent local state.\n' >&2
+    result=2
+}
 
+publish_recovered_pending_generation() {
+    [[ "$rollback_succeeded" == true && "$rollback_bundle" == "$recovery_temporary/VoiceInk.app" ]] || return
+    if [[ -d "$recovery_root" && ! -d "$previous_recovery" ]] \
+        && ! move_recovery_directory "$recovery_root" "$previous_recovery"; then
+        printf 'Error: VoiceInk could not preserve the prior recovery generation during rollback.\n' >&2
+        result=2
+        return
+    fi
+    if [[ ! -d "$recovery_root" ]] && ! move_recovery_directory "$recovery_temporary" "$recovery_root"; then
+        printf 'Error: VoiceInk could not publish the recovered generation after rollback.\n' >&2
+        result=2
+        return
+    fi
+    recovery_published=true
+}
+
+remove_previous_recovery_generation() {
+    [[ "$rollback_succeeded" == true && -d "$previous_recovery" ]] || return
+    if ! obsolete_generation="$(/usr/bin/plutil -extract credentialGeneration raw "$previous_recovery/recovery.plist" 2>/dev/null)" \
+        || ! delete_credential_snapshot "$obsolete_generation" \
+        || ! /bin/rm -rf "$previous_recovery"; then
+        printf 'Error: VoiceInk could not remove the superseded recovery generation.\n' >&2
+        result=2
+    fi
+}
+
+restore_previous_recovery_directory() {
+    [[ "$result" -ne 0 && "$installed_after_failure" != "$approved_sha" && -d "$previous_recovery" ]] || return
+    if { [[ -d "$recovery_root" ]] && ! /bin/rm -rf "$recovery_root"; } \
+        || ! move_recovery_directory "$previous_recovery" "$recovery_root"; then
+        printf 'Error: VoiceInk could not restore the prior recovery generation.\n' >&2
+        result=2
+    fi
+}
+
+cleanup_installation_artifacts() {
     if ! /bin/rm -rf "$candidate_temporary" "$retired_bundle"; then
         printf 'Error: VoiceInk could not clean up the failed installation transaction.\n' >&2
         result=2
@@ -298,7 +284,31 @@ finish_transaction() {
         printf 'Error: VoiceInk could not clean up the pending recovery generation.\n' >&2
         result=2
     fi
+}
 
+finish_transaction() {
+    result=$?
+    trap - EXIT
+    set +e
+    installed_after_failure="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null || true)"
+
+    if [[ "$result" -ne 0 && "$installed_after_failure" == "$approved_sha" ]]; then
+        stop_launched_candidate
+        run_automatic_rollback
+        publish_recovered_pending_generation
+        remove_previous_recovery_generation
+    elif [[ "$result" -ne 0 && "$parent_terminated" == true ]] && ! relaunch_previous; then
+        printf 'Error: VoiceInk could not relaunch the previous version after the failed update.\n' >&2
+        result=2
+    fi
+
+    restore_previous_recovery_directory
+    if [[ "$result" -ne 0 && "$installed_after_failure" != "$approved_sha" && "$credential_snapshot_created" == true ]] \
+        && ! delete_credential_snapshot "$credential_generation"; then
+        printf 'Error: VoiceInk could not remove the incomplete credential recovery generation.\n' >&2
+        result=2
+    fi
+    cleanup_installation_artifacts
     exit "$result"
 }
 trap finish_transaction EXIT
@@ -320,14 +330,25 @@ fi
     || fail "VoiceInk does not have sufficient disk space for a complete recovery snapshot."
 
 mkdir -p "$target_parent"
-[[ ! -e "$recovery_temporary" && ! -e "$previous_recovery" ]] \
-    || fail "VoiceInk has an unfinished recovery transaction. Relaunch VoiceInk before retrying the update."
+[[ -d "$recovery_temporary" && ! -e "$previous_recovery" ]] \
+    || fail "VoiceInk could not find the matching recovery intent. Relaunch VoiceInk before retrying the update."
+intent_previous_sha="$(/usr/bin/plutil -extract previousForkCommit raw "$recovery_temporary/recovery.plist" 2>/dev/null)" \
+    || fail "VoiceInk found an invalid recovery intent."
+intent_candidate_sha="$(/usr/bin/plutil -extract candidateForkCommit raw "$recovery_temporary/recovery.plist" 2>/dev/null)" \
+    || fail "VoiceInk found an invalid recovery intent."
+intent_credential_generation="$(/usr/bin/plutil -extract credentialGeneration raw "$recovery_temporary/recovery.plist" 2>/dev/null)" \
+    || fail "VoiceInk found an invalid recovery intent."
+previous_fork_sha="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null)" \
+    || fail "The installed VoiceInk bundle has no fork provenance."
+[[ "$intent_previous_sha" == "$previous_fork_sha" \
+    && "$intent_candidate_sha" == "$approved_sha" \
+    && "$intent_credential_generation" == "$credential_generation" ]] \
+    || fail "VoiceInk found a recovery intent for a different update generation."
 /usr/bin/ditto "$staged_bundle" "$candidate_temporary"
 codesign --verify --deep --strict "$candidate_temporary" \
     || fail "The installation copy failed signature validation."
 
 umask 077
-mkdir -p "$recovery_temporary"
 chmod 700 "$recovery_temporary"
 /usr/bin/ditto "$target_bundle" "$recovery_temporary/VoiceInk.app"
 
@@ -372,13 +393,6 @@ else
     /usr/bin/defaults export com.prakashjoshipax.VoiceInk "$recovery_temporary/Preferences.plist" >/dev/null \
         || fail "VoiceInk could not export a consistent preferences snapshot."
 fi
-
-previous_fork_sha="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null)" \
-    || fail "The installed VoiceInk bundle has no fork provenance."
-/usr/bin/plutil -create xml1 "$recovery_temporary/recovery.plist"
-/usr/bin/plutil -insert previousForkCommit -string "$previous_fork_sha" "$recovery_temporary/recovery.plist"
-/usr/bin/plutil -insert candidateForkCommit -string "$approved_sha" "$recovery_temporary/recovery.plist"
-/usr/bin/plutil -insert credentialGeneration -string "$credential_generation" "$recovery_temporary/recovery.plist"
 
 # Replace the bundle before publishing the new recovery. The fixed pending path
 # survives a helper crash and lets the next launch finish or unwind publication.
@@ -426,6 +440,9 @@ for ((attempt = 0; attempt < stability_seconds * 10; attempt++)); do
         || fail "The installed app exited during the stability window."
     sleep 0.1
 done
+
+/usr/bin/plutil -replace installInProgress -bool false "$recovery_root/recovery.plist" \
+    || fail "VoiceInk could not commit the successful installation state."
 
 /bin/rm -rf "$retired_bundle"
 if [[ -d "$previous_recovery" ]]; then
