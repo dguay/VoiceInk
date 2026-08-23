@@ -68,6 +68,7 @@ struct ForkUpdateInstallationRequest: Equatable {
     let targetBundleURL: URL
     let backupBundleURL: URL
     let parentProcessIdentifier: Int32
+    let credentialGeneration: String
 }
 
 protocol ForkUpdateInstalling {
@@ -88,6 +89,8 @@ protocol ForkUpdateRestoring {
 struct LocalUpdateRecoveryState: Codable, Equatable {
     let previousForkCommit: String
     let candidateForkCommit: String
+    let credentialGeneration: String
+    let suppressedForkCommit: String?
 }
 
 struct ForkUpdateError: LocalizedError {
@@ -170,7 +173,9 @@ struct ProcessForkUpdateInstallationRunner: ForkUpdateInstalling {
             ]
             process.standardOutput = output
             process.standardError = output
-            process.environment = ProcessInfo.processInfo.environment
+            var environment = ProcessInfo.processInfo.environment
+            environment["VOICEINK_UPDATE_CREDENTIAL_GENERATION"] = request.credentialGeneration
+            process.environment = environment
 
             try process.run()
             process.waitUntilExit()
@@ -373,22 +378,36 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             )
         }
 
-        try credentialSnapshotter.createSnapshot()
+        let credentialGeneration = UUID().uuidString.lowercased()
+        try credentialSnapshotter.createSnapshot(generationIdentifier: credentialGeneration)
 
-        let outcome = try await installationRunner.install(
-            ForkUpdateInstallationRequest(
-                scriptURL: installationScriptURL,
-                candidate: candidate,
-                manifestURL: manifestURL,
-                targetBundleURL: targetBundleURL,
-                backupBundleURL: backupBundleURL,
-                parentProcessIdentifier: parentProcessIdentifier
-            )
+        let request = ForkUpdateInstallationRequest(
+            scriptURL: installationScriptURL,
+            candidate: candidate,
+            manifestURL: manifestURL,
+            targetBundleURL: targetBundleURL,
+            backupBundleURL: backupBundleURL,
+            parentProcessIdentifier: parentProcessIdentifier,
+            credentialGeneration: credentialGeneration
         )
+        let outcome: ForkUpdateInstallationOutcome
+        do {
+            outcome = try await installationRunner.install(request)
+        } catch {
+            do {
+                try credentialSnapshotter.deleteSnapshot(generationIdentifier: credentialGeneration)
+            } catch {
+                throw ForkUpdateError(
+                    message: "VoiceInk could not install the update or remove its temporary credential snapshot."
+                )
+            }
+            throw error
+        }
         switch outcome {
         case .completed:
             return nil
         case .candidateStale:
+            try credentialSnapshotter.deleteSnapshot(generationIdentifier: credentialGeneration)
             return try await prepare(retryingSuppressedCandidate: false)
         }
     }

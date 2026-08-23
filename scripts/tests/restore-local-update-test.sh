@@ -16,6 +16,7 @@ trap cleanup EXIT
 
 candidate_sha="1111111111111111111111111111111111111111"
 previous_sha="2222222222222222222222222222222222222222"
+credential_generation="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 installed_bundle="$fixture_root/Applications/VoiceInk.app"
 recovery_root="$fixture_root/Recovery"
 backup_bundle="$recovery_root/VoiceInk.app"
@@ -46,6 +47,7 @@ printf 'previous-preferences\n' > "$recovery_root/Preferences.plist"
 /usr/bin/plutil -create xml1 "$recovery_root/recovery.plist"
 /usr/bin/plutil -insert previousForkCommit -string "$previous_sha" "$recovery_root/recovery.plist"
 /usr/bin/plutil -insert candidateForkCommit -string "$candidate_sha" "$recovery_root/recovery.plist"
+/usr/bin/plutil -insert credentialGeneration -string "$credential_generation" "$recovery_root/recovery.plist"
 
 cat > "$fake_bin/restore-preferences" <<'EOF'
 #!/usr/bin/env bash
@@ -62,7 +64,7 @@ EOF
 cat > "$fake_bin/restore-credentials" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'restored\n' > "$VOICEINK_TEST_CREDENTIAL_LOG"
+printf 'restored:%s\n' "$1" > "$VOICEINK_TEST_CREDENTIAL_LOG"
 EOF
 
 cat > "$fake_bin/fail-credentials" <<'EOF'
@@ -116,7 +118,7 @@ parent_pid=""
 [[ "$(< "$installed_bundle/Contents/version")" == "previous" ]]
 [[ "$(< "$application_support/state")" == "previous-data" ]]
 [[ "$(< "$preferences")" == "previous-preferences" ]]
-[[ "$(< "$credential_log")" == "restored" ]]
+[[ "$(< "$credential_log")" == "restored:$credential_generation" ]]
 [[ "$(< "$launch_log")" == "$installed_bundle" ]]
 [[ "$(/usr/bin/plutil -extract suppressedForkCommit raw "$recovery_root/recovery.plist")" == "$candidate_sha" ]]
 [[ -d "$backup_bundle" ]]

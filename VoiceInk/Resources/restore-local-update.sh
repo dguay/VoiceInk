@@ -48,6 +48,8 @@ candidate_sha="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle
     || fail "The installed VoiceInk bundle has no fork provenance."
 recorded_candidate="$(/usr/bin/plutil -extract candidateForkCommit raw "$recovery_state" 2>/dev/null)" \
     || fail "The recovery state has no candidate provenance."
+credential_generation="$(/usr/bin/plutil -extract credentialGeneration raw "$recovery_state" 2>/dev/null)" \
+    || fail "The recovery state has no credential generation."
 [[ "$candidate_sha" == "$recorded_candidate" ]] \
     || fail "The recovery state does not belong to the installed VoiceInk version."
 
@@ -183,11 +185,11 @@ fi
 
 credential_replacement_started=true
 if [[ -n "$credential_restorer" ]]; then
-    "$credential_restorer"
+    "$credential_restorer" "$credential_generation"
 else
     restored_executable="$target_bundle/Contents/MacOS/VoiceInk"
     [[ -x "$restored_executable" ]] || fail "The previous VoiceInk executable is missing."
-    "$restored_executable" --voiceink-restore-update-credentials
+    "$restored_executable" --voiceink-restore-update-credentials "$credential_generation"
 fi
 credential_replacement_started=false
 restore_complete=true

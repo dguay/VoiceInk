@@ -114,7 +114,7 @@ struct UpdaterViewModelTests {
     }
 
     @Test
-    func restartSnapshotsCredentialsBeforeStartingTheInstaller() async throws {
+    func restartCreatesThePreQuitCredentialGenerationBeforeStartingTheInstaller() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
@@ -128,45 +128,104 @@ struct UpdaterViewModelTests {
         )
         try PropertyListEncoder().encode(candidate).write(to: manifestURL, options: .atomic)
         let recorder = ForkUpdateRestartRecorder()
+        let credentialStore = ForkUpdateCredentialRestorerStub(recorder: recorder)
         let transaction = ForkUpdateTransaction(
             scriptURL: temporaryDirectory.appendingPathComponent("prepare-local-update.sh"),
             manifestURL: manifestURL,
             installationScriptURL: temporaryDirectory.appendingPathComponent("install-local-update.sh"),
             targetBundleURL: temporaryDirectory.appendingPathComponent("Installed.app"),
             backupBundleURL: temporaryDirectory.appendingPathComponent("Recovery/VoiceInk.app"),
-            credentialSnapshotter: ForkUpdateCredentialSnapshotterStub(recorder: recorder),
+            credentialSnapshotter: credentialStore,
             installationRunner: ForkUpdateInstallationRunnerStub(recorder: recorder)
         )
 
         _ = try await transaction.requestRestart(for: candidate)
 
         #expect(recorder.events == [.credentialsSnapshotted, .installerStarted])
+        #expect(credentialStore.createdGenerations.count == 1)
     }
 
     @Test
     func recoveryCommandRestoresTheKeychainSnapshotWithoutStartingTheApp() throws {
         let credentialStore = ForkUpdateCredentialRestorerStub()
+        let generation = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
 
         let handled = try LocalUpdateCredentialRecoveryCommand.runIfRequested(
-            arguments: ["VoiceInk", "--voiceink-restore-update-credentials"],
+            arguments: ["VoiceInk", "--voiceink-restore-update-credentials", generation],
             credentialStore: credentialStore
         )
 
         #expect(handled)
-        #expect(credentialStore.restoreCount == 1)
+        #expect(credentialStore.restoredGenerations == [generation.lowercased()])
     }
 
     @Test
-    func recoveryCommandCommitsThePendingKeychainSnapshotWithoutStartingTheApp() throws {
+    func recoveryCommandCreatesAGenerationBoundKeychainSnapshotWithoutStartingTheApp() throws {
         let credentialStore = ForkUpdateCredentialRestorerStub()
+        let generation = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
 
         let handled = try LocalUpdateCredentialRecoveryCommand.runIfRequested(
-            arguments: ["VoiceInk", "--voiceink-commit-update-credentials"],
+            arguments: ["VoiceInk", "--voiceink-create-update-credentials", generation],
             credentialStore: credentialStore
         )
 
         #expect(handled)
-        #expect(credentialStore.commitCount == 1)
+        #expect(credentialStore.createdGenerations == [generation.lowercased()])
+    }
+
+    @Test
+    func launchFinishesPublishingTheRecoveryGenerationThatMatchesTheInstalledCandidate() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let installedBundle = temporaryDirectory.appendingPathComponent("VoiceInk.app", isDirectory: true)
+        let recoveryRoot = temporaryDirectory.appendingPathComponent("Recovery", isDirectory: true)
+        let pendingRecovery = URL(fileURLWithPath: recoveryRoot.path + ".pending", isDirectory: true)
+        let installedCommit = "1111111111111111111111111111111111111111"
+        let previousCommit = "2222222222222222222222222222222222222222"
+        let currentGeneration = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        let pendingGeneration = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        try FileManager.default.createDirectory(
+            at: installedBundle.appendingPathComponent("Contents", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try PropertyListSerialization.data(
+            fromPropertyList: [SourceProvenance.forkCommitInfoKey: installedCommit],
+            format: .xml,
+            options: 0
+        ).write(to: installedBundle.appendingPathComponent("Contents/Info.plist"))
+        try writeRecoveryState(
+            LocalUpdateRecoveryState(
+                previousForkCommit: "3333333333333333333333333333333333333333",
+                candidateForkCommit: previousCommit,
+                credentialGeneration: currentGeneration,
+                suppressedForkCommit: nil
+            ),
+            marker: "current",
+            at: recoveryRoot
+        )
+        try writeRecoveryState(
+            LocalUpdateRecoveryState(
+                previousForkCommit: previousCommit,
+                candidateForkCommit: installedCommit,
+                credentialGeneration: pendingGeneration,
+                suppressedForkCommit: nil
+            ),
+            marker: "pending",
+            at: pendingRecovery
+        )
+        let credentialStore = ForkUpdateCredentialRestorerStub()
+
+        try LocalUpdateRecoveryReconciler(credentialStore: credentialStore).reconcile(
+            installedBundleURL: installedBundle,
+            recoveryRootURL: recoveryRoot
+        )
+
+        #expect(try String(contentsOf: recoveryRoot.appendingPathComponent("marker"), encoding: .utf8) == "pending")
+        #expect(!FileManager.default.fileExists(atPath: pendingRecovery.path))
+        #expect(!FileManager.default.fileExists(atPath: recoveryRoot.path + ".previous"))
+        #expect(credentialStore.deletedGenerations == [currentGeneration])
     }
 
     @Test
@@ -210,7 +269,9 @@ struct UpdaterViewModelTests {
         try PropertyListEncoder().encode(
             LocalUpdateRecoveryState(
                 previousForkCommit: "2222222222222222222222222222222222222222",
-                candidateForkCommit: candidateCommit
+                candidateForkCommit: candidateCommit,
+                credentialGeneration: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                suppressedForkCommit: nil
             )
         ).write(to: recoveryManifest)
         let restoreRunner = ForkUpdateRestoreRunnerStub()
@@ -460,25 +521,45 @@ private final class ForkUpdateRestartRecorder: @unchecked Sendable {
     var events: [Event] = []
 }
 
-private struct ForkUpdateCredentialSnapshotterStub: ForkUpdateCredentialSnapshotting {
-    let recorder: ForkUpdateRestartRecorder
+private final class ForkUpdateCredentialRestorerStub:
+    ForkUpdateCredentialSnapshotting,
+    ForkUpdateCredentialRestoring,
+    @unchecked Sendable
+{
+    private let recorder: ForkUpdateRestartRecorder?
+    private(set) var createdGenerations: [String] = []
+    private(set) var deletedGenerations: [String] = []
+    private(set) var restoredGenerations: [String] = []
 
-    func createSnapshot() throws {
-        recorder.events.append(.credentialsSnapshotted)
+    init(recorder: ForkUpdateRestartRecorder? = nil) {
+        self.recorder = recorder
+    }
+
+    func createSnapshot(generationIdentifier: String) throws {
+        createdGenerations.append(generationIdentifier)
+        recorder?.events.append(.credentialsSnapshotted)
+    }
+
+    func deleteSnapshot(generationIdentifier: String) throws {
+        deletedGenerations.append(generationIdentifier)
+    }
+
+    func restoreSnapshot(generationIdentifier: String) throws {
+        restoredGenerations.append(generationIdentifier)
     }
 }
 
-private final class ForkUpdateCredentialRestorerStub: ForkUpdateCredentialRestoring, @unchecked Sendable {
-    private(set) var restoreCount = 0
-    private(set) var commitCount = 0
-
-    func restoreSnapshot() throws {
-        restoreCount += 1
-    }
-
-    func commitSnapshot() throws {
-        commitCount += 1
-    }
+private func writeRecoveryState(
+    _ state: LocalUpdateRecoveryState,
+    marker: String,
+    at directory: URL
+) throws {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try PropertyListEncoder().encode(state).write(
+        to: directory.appendingPathComponent("recovery.plist"),
+        options: .atomic
+    )
+    try Data(marker.utf8).write(to: directory.appendingPathComponent("marker"))
 }
 
 private struct ForkUpdateInstallationRunnerStub: ForkUpdateInstalling {

@@ -7,6 +7,27 @@ import SwiftData
 import SwiftUI
 
 @main
+enum VoiceInkMain {
+    static func main() {
+        #if LOCAL_BUILD
+            do {
+                if try LocalUpdateCredentialRecoveryCommand.runIfRequested() {
+                    Darwin.exit(EXIT_SUCCESS)
+                }
+                if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+                    try LocalUpdateRecoveryReconciler().reconcile()
+                }
+            } catch {
+                let message = "VoiceInk could not prepare its updater recovery state: \(error.localizedDescription)\n"
+                FileHandle.standardError.write(Data(message.utf8))
+                Darwin.exit(EXIT_FAILURE)
+            }
+        #endif
+
+        VoiceInkApp.main()
+    }
+}
+
 struct VoiceInkApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     let container: ModelContainer
@@ -39,18 +60,6 @@ struct VoiceInkApp: App {
     @StateObject private var prewarmService: ModelPrewarmService
 
     init() {
-        #if LOCAL_BUILD
-            do {
-                if try LocalUpdateCredentialRecoveryCommand.runIfRequested() {
-                    Darwin.exit(EXIT_SUCCESS)
-                }
-            } catch {
-                let message = "VoiceInk could not restore its updater credential snapshot: \(error.localizedDescription)\n"
-                FileHandle.standardError.write(Data(message.utf8))
-                Darwin.exit(EXIT_FAILURE)
-            }
-        #endif
-
         // Disable HTTP response caching — prevents API responses from being stored in Cache.db
         URLCache.shared = URLCache(memoryCapacity: 0, diskCapacity: 0)
 
