@@ -54,18 +54,18 @@ struct UpdaterViewModelTests {
             bundleURL: URL(fileURLWithPath: "/tmp/VoiceInk.app"),
             preparedAt: Date(timeIntervalSince1970: 1_787_400_000)
         )
-        let preparer = ForkUpdatePreparerStub(stagedCandidate: candidate)
+        let transaction = ForkUpdateTransactionStub(stagedCandidate: candidate)
         let updater: any UpdaterModule = UpdaterViewModel(
             defaults: defaults,
-            adapter: ForkUpdaterAdapter(preparer: preparer)
+            adapter: ForkUpdaterAdapter(transaction: transaction)
         )
 
         updater.checkForUpdates()
         try await waitUntil { updater.state.stagedUpdate == candidate }
 
-        #expect(preparer.prepareCount == 1)
+        #expect(transaction.prepareCount == 1)
         #expect(updater.state.isPresentingStagedUpdate)
-        #expect(preparer.restartRequestCount == 0)
+        #expect(transaction.restartRequestCount == 0)
 
         updater.deferStagedUpdate()
         #expect(!updater.state.isPresentingStagedUpdate)
@@ -73,8 +73,8 @@ struct UpdaterViewModelTests {
 
         updater.showStagedUpdate()
         updater.restartAndUpdate()
-        try await waitUntil { preparer.restartRequestCount == 1 }
-        #expect(preparer.restartRequestCount == 1)
+        try await waitUntil { transaction.restartRequestCount == 1 }
+        #expect(transaction.restartRequestCount == 1)
         #expect(!updater.state.isPresentingStagedUpdate)
     }
 
@@ -95,13 +95,13 @@ struct UpdaterViewModelTests {
             bundleURL: URL(fileURLWithPath: "/tmp/replacement/VoiceInk.app"),
             preparedAt: Date(timeIntervalSince1970: 1_787_400_300)
         )
-        let preparer = ForkUpdatePreparerStub(
+        let transaction = ForkUpdateTransactionStub(
             stagedCandidate: approvedCandidate,
             restartResult: replacementCandidate
         )
         let updater: any UpdaterModule = UpdaterViewModel(
             defaults: defaults,
-            adapter: ForkUpdaterAdapter(preparer: preparer)
+            adapter: ForkUpdaterAdapter(transaction: transaction)
         )
 
         updater.checkForUpdates()
@@ -109,7 +109,7 @@ struct UpdaterViewModelTests {
         updater.restartAndUpdate()
         try await waitUntil { updater.state.stagedUpdate == replacementCandidate }
 
-        #expect(preparer.restartRequestCount == 1)
+        #expect(transaction.restartRequestCount == 1)
         #expect(updater.state.isPresentingStagedUpdate)
     }
 
@@ -130,7 +130,7 @@ struct UpdaterViewModelTests {
             preparedAt: Date(timeIntervalSince1970: 1_787_400_100)
         )
         try PropertyListEncoder().encode(candidate).write(to: manifestURL, options: .atomic)
-        let preparer = ForkUpdatePreparationService(
+        let transaction = ForkUpdateTransaction(
             scriptURL: temporaryDirectory.appendingPathComponent("prepare-local-update.sh"),
             manifestURL: manifestURL,
             commandRunner: ForkUpdateCommandRunnerStub()
@@ -138,7 +138,7 @@ struct UpdaterViewModelTests {
 
         let updater: any UpdaterModule = UpdaterViewModel(
             defaults: defaults,
-            adapter: ForkUpdaterAdapter(preparer: preparer)
+            adapter: ForkUpdaterAdapter(transaction: transaction)
         )
 
         #expect(updater.state.stagedUpdate == candidate)
@@ -295,7 +295,7 @@ struct UpdaterViewModelTests {
 }
 
 @MainActor
-private final class ForkUpdatePreparerStub: ForkUpdatePreparing {
+private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
     let stagedCandidate: StagedForkCandidate
     let restartResult: StagedForkCandidate?
     private(set) var prepareCount = 0

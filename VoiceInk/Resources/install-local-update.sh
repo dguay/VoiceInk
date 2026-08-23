@@ -179,6 +179,10 @@ if [[ -d "$backup_bundle" ]]; then
 fi
 mv "$backup_temporary" "$backup_bundle"
 
+# Close the fetch-to-install race while the approved app can still prepare a
+# replacement candidate when the fork advances.
+revalidate_fork
+
 kill -TERM "$parent_pid" || fail "VoiceInk could not be terminated for installation."
 for ((attempt = 0; attempt < parent_exit_timeout * 10; attempt++)); do
     if ! kill -0 "$parent_pid" 2>/dev/null; then
@@ -191,9 +195,6 @@ if kill -0 "$parent_pid" 2>/dev/null; then
 fi
 parent_terminated=true
 
-# Close the fetch-to-install race after the approved app has exited. A stale result
-# takes the EXIT trap's relaunch-only path because replacement has not started.
-revalidate_fork
 replace_bundle_atomically
 replacement_started=true
 

@@ -361,13 +361,12 @@ late_stale_status=$?
 set -e
 
 [[ "$late_stale_status" -eq 75 ]]
-if kill -0 "$parent_pid" >/dev/null 2>&1; then
-    printf 'install-local-update-test: approved parent survived late stale detection\n' >&2
+if ! kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: approved parent was terminated before late stale detection\n' >&2
     exit 1
 fi
-parent_pid=""
 [[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
-grep -Fqx "rollback:$installed_bundle" "$launch_log"
+[[ ! -s "$launch_log" ]]
 grep -Fq "origin/main changed after preparation" "$fixture_root/late-stale-output.log"
 
 printf 'install-local-update-test: PASS\n'
