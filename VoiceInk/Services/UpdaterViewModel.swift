@@ -38,6 +38,8 @@ struct UpdaterState: Equatable {
     var checksForUpdatesWhenDashboardAppears: Bool
     var availableUpdate: AvailableUpdate?
     var sourceProvenance: SourceProvenance?
+    var canRestorePreviousVersion: Bool
+    var isPresentingRestorePreviousVersion: Bool
     var stagedUpdate: StagedForkCandidate?
     var isPreparingUpdate: Bool
     var isPresentingStagedUpdate: Bool
@@ -54,6 +56,9 @@ protocol UpdaterModule: AnyObject {
     func showStagedUpdate()
     func deferStagedUpdate()
     func restartAndUpdate()
+    func showRestorePreviousVersion()
+    func cancelRestorePreviousVersion()
+    func restorePreviousVersion()
 }
 
 struct UpdaterAdapterState: Equatable {
@@ -83,15 +88,19 @@ enum UpdaterAdapterEvent: Equatable {
 protocol UpdaterAdapter: AnyObject {
     var state: UpdaterAdapterState { get }
     var onEvent: ((UpdaterAdapterEvent) -> Void)? { get set }
+    var canRestorePreviousVersion: Bool { get }
 
     func start()
     func checkForUpdateInformation()
     func checkForUpdates()
     func requestRestart(for candidate: StagedForkCandidate)
+    func restorePreviousVersion()
 }
 
 extension UpdaterAdapter {
+    var canRestorePreviousVersion: Bool { false }
     func requestRestart(for candidate: StagedForkCandidate) {}
+    func restorePreviousVersion() {}
 }
 
 @MainActor
@@ -144,6 +153,8 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             checksForUpdatesWhenDashboardAppears: Self.initialAutomaticCheckPreference(in: defaults),
             availableUpdate: nil,
             sourceProvenance: sourceProvenance,
+            canRestorePreviousVersion: adapter.canRestorePreviousVersion,
+            isPresentingRestorePreviousVersion: false,
             stagedUpdate: nil,
             isPreparingUpdate: adapter.state.sessionInProgress,
             isPresentingStagedUpdate: false,
@@ -216,6 +227,21 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         guard let candidate = state.stagedUpdate else { return }
         state.isPresentingStagedUpdate = false
         adapter.requestRestart(for: candidate)
+    }
+
+    func restorePreviousVersion() {
+        guard state.canRestorePreviousVersion else { return }
+        state.isPresentingRestorePreviousVersion = false
+        adapter.restorePreviousVersion()
+    }
+
+    func showRestorePreviousVersion() {
+        guard state.canRestorePreviousVersion else { return }
+        state.isPresentingRestorePreviousVersion = true
+    }
+
+    func cancelRestorePreviousVersion() {
+        state.isPresentingRestorePreviousVersion = false
     }
 
     private func handle(_ event: UpdaterAdapterEvent) {

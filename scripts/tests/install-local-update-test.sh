@@ -43,16 +43,27 @@ new_sha="$(git -C "$seed_clone" rev-parse HEAD)"
 installed_bundle="$fixture_root/Applications/VoiceInk.app"
 staged_bundle="$fixture_root/staging/candidates/$new_sha/VoiceInk.app"
 manifest_path="$fixture_root/staging/staged-candidate.plist"
-backup_bundle="$fixture_root/staging/previous/VoiceInk.app"
+recovery_root="$fixture_root/recovery"
+backup_bundle="$recovery_root/VoiceInk.app"
+application_support="$fixture_root/Library/Application Support/com.prakashjoshipax.VoiceInk"
+preferences="$fixture_root/Library/Preferences/com.prakashjoshipax.VoiceInk.plist"
 
 mkdir -p "$installed_bundle/Contents" "$staged_bundle/Contents"
+mkdir -p "$application_support" "$(dirname "$preferences")"
 printf 'installed-before-update\n' > "$installed_bundle/Contents/version"
 printf 'newer-candidate\n' > "$staged_bundle/Contents/version"
+printf 'state-before-update\n' > "$application_support/state"
+printf 'preferences-before-update\n' > "$preferences"
 
 /usr/bin/plutil -create xml1 "$staged_bundle/Contents/Info.plist"
 /usr/bin/plutil -insert VoiceInkForkCommit -string "$new_sha" "$staged_bundle/Contents/Info.plist"
 /usr/bin/plutil -insert VoiceInkUpstreamCommit -string "$upstream_sha" "$staged_bundle/Contents/Info.plist"
 /usr/bin/plutil -insert VoiceInkUpdaterKind -string fork "$staged_bundle/Contents/Info.plist"
+
+/usr/bin/plutil -create xml1 "$installed_bundle/Contents/Info.plist"
+/usr/bin/plutil -insert VoiceInkForkCommit -string "$old_sha" "$installed_bundle/Contents/Info.plist"
+/usr/bin/plutil -insert VoiceInkUpstreamCommit -string "$upstream_sha" "$installed_bundle/Contents/Info.plist"
+/usr/bin/plutil -insert VoiceInkUpdaterKind -string fork "$installed_bundle/Contents/Info.plist"
 
 /usr/bin/plutil -create xml1 "$manifest_path"
 /usr/bin/plutil -insert forkCommit -string "$new_sha" "$manifest_path"
@@ -140,6 +151,12 @@ fi
 if [[ -n "${VOICEINK_TEST_PID_LOG:-}" ]]; then
     printf '%s\n' "$app_pid" > "$VOICEINK_TEST_PID_LOG"
 fi
+if [[ -n "${VOICEINK_TEST_MUTATE_APPLICATION_SUPPORT:-}" ]]; then
+    printf 'candidate-data\n' > "$VOICEINK_TEST_MUTATE_APPLICATION_SUPPORT/state"
+fi
+if [[ -n "${VOICEINK_TEST_MUTATE_PREFERENCES:-}" ]]; then
+    printf 'candidate-preferences\n' > "$VOICEINK_TEST_MUTATE_PREFERENCES"
+fi
 printf '%s\n' "$bundle_path" >> "$VOICEINK_TEST_LAUNCH_LOG"
 printf '%s\n' "$app_pid"
 EOF
@@ -150,6 +167,24 @@ set -euo pipefail
 printf 'rollback:%s\n' "$1" >> "$VOICEINK_TEST_LAUNCH_LOG"
 EOF
 
+cat > "$fake_bin/fail-snapshot" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+EOF
+
+cat > "$fake_bin/restore-preferences" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+/bin/cp "$1" "$2"
+EOF
+
+cat > "$fake_bin/restore-credentials" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'restored\n' > "$VOICEINK_TEST_CREDENTIAL_LOG"
+EOF
+
 cat > "$fake_bin/mutate-then-fail-replacement" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -158,6 +193,13 @@ mv "$1" "$3"
 mv "$2" "$1"
 printf '%s\n' "$(< "$1/Contents/version")" > "$VOICEINK_TEST_MUTATION_LOG"
 exit 1
+EOF
+
+cat > "$fake_bin/replace-bundle" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+mv "$1" "$3"
+mv "$2" "$1"
 EOF
 
 cat > "$fake_bin/git-with-late-update" <<'EOF'
@@ -186,22 +228,87 @@ chmod +x \
     "$fake_bin/codesign" \
     "$fake_bin/launch-voiceink" \
     "$fake_bin/relaunch-voiceink" \
+    "$fake_bin/fail-snapshot" \
+    "$fake_bin/restore-preferences" \
+    "$fake_bin/restore-credentials" \
     "$fake_bin/mutate-then-fail-replacement" \
+    "$fake_bin/replace-bundle" \
     "$fake_bin/git-with-late-update"
+
+credential_log="$fixture_root/credential-restore.log"
+export VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support"
+export VOICEINK_UPDATE_PREFERENCES_PATH="$preferences"
+export VOICEINK_UPDATE_PREFERENCES_RESTORER="$fake_bin/restore-preferences"
+export VOICEINK_UPDATE_CREDENTIAL_RESTORER="$fake_bin/restore-credentials"
+export VOICEINK_TEST_CREDENTIAL_LOG="$credential_log"
 
 staged_bundle="$fixture_root/staging/candidates/$new_sha/VoiceInk.app"
 /usr/bin/plutil -replace forkCommit -string "$new_sha" "$manifest_path"
 /usr/bin/plutil -replace upstreamCommit -string "$upstream_sha" "$manifest_path"
 /usr/bin/plutil -replace bundlePath -string "$staged_bundle" "$manifest_path"
 
-kill "$parent_pid"
-wait "$parent_pid" 2>/dev/null || true
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+    VOICEINK_UPDATE_AVAILABLE_DISK_KIB=0 \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/disk-space-output.log" 2>&1
+disk_space_status=$?
+set -e
+
+[[ "$disk_space_status" -ne 0 ]]
+kill -0 "$parent_pid"
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+[[ ! -e "$recovery_root" ]]
+grep -Fq "disk space" "$fixture_root/disk-space-output.log"
+
+: > "$launch_log"
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+    VOICEINK_UPDATE_STATE_SNAPSHOTTER="$fake_bin/fail-snapshot" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/snapshot-output.log" 2>&1
+snapshot_status=$?
+set -e
+
+[[ "$snapshot_status" -ne 0 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: approved parent survived snapshot failure\n' >&2
+    exit 1
+fi
+parent_pid=""
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+[[ ! -e "$recovery_root" ]]
+grep -Fqx "rollback:$installed_bundle" "$launch_log"
+grep -Fq "snapshot" "$fixture_root/snapshot-output.log"
+
 sleep 30 &
 parent_pid=$!
+: > "$launch_log"
 
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
     VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
     VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
     VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
     VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
@@ -221,6 +328,10 @@ fi
 parent_pid=""
 [[ "$(< "$installed_bundle/Contents/version")" == "newer-candidate" ]]
 [[ "$(< "$backup_bundle/Contents/version")" == "installed-before-update" ]]
+[[ "$(< "$recovery_root/Application Support/state")" == "state-before-update" ]]
+[[ "$(< "$recovery_root/Preferences.plist")" == "preferences-before-update" ]]
+[[ "$(/usr/bin/plutil -extract previousForkCommit raw "$recovery_root/recovery.plist")" == "$old_sha" ]]
+[[ "$(/usr/bin/plutil -extract candidateForkCommit raw "$recovery_root/recovery.plist")" == "$new_sha" ]]
 [[ ! -e "$manifest_path" ]]
 [[ "$(< "$launch_log")" == "$installed_bundle" ]]
 launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path")"
@@ -234,6 +345,9 @@ launched_pid=""
 /usr/bin/plutil -insert upstreamCommit -string "$upstream_sha" "$manifest_path"
 /usr/bin/plutil -insert bundlePath -string "$staged_bundle" "$manifest_path"
 /usr/bin/plutil -insert preparedAt -date "2026-08-22T12:10:00Z" "$manifest_path"
+printf 'known-good-data\n' > "$application_support/state"
+printf 'known-good-preferences\n' > "$preferences"
+printf 'obsolete\n' > "$recovery_root/obsolete-state"
 : > "$launch_log"
 sleep 30 &
 parent_pid=$!
@@ -241,12 +355,20 @@ parent_pid=$!
 set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+    VOICEINK_UPDATE_PREFERENCES_RESTORER="$fake_bin/restore-preferences" \
+    VOICEINK_UPDATE_CREDENTIAL_RESTORER="$fake_bin/restore-credentials" \
     VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
     VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
     VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
     VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
     VOICEINK_UPDATE_STABILITY_SECONDS=1 \
     VOICEINK_TEST_HEALTH_FORK_OVERRIDE=ffffffffffffffffffffffffffffffffffffffff \
+    VOICEINK_TEST_MUTATE_APPLICATION_SUPPORT="$application_support" \
+    VOICEINK_TEST_MUTATE_PREFERENCES="$preferences" \
+    VOICEINK_TEST_CREDENTIAL_LOG="$credential_log" \
     VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
     /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
     "$new_sha" \
@@ -266,6 +388,11 @@ fi
 parent_pid=""
 [[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
 [[ "$(< "$backup_bundle/Contents/version")" == "installed-before-update" ]]
+[[ "$(< "$application_support/state")" == "known-good-data" ]]
+[[ "$(< "$preferences")" == "known-good-preferences" ]]
+[[ "$(< "$credential_log")" == "restored" ]]
+[[ "$(/usr/bin/plutil -extract suppressedForkCommit raw "$recovery_root/recovery.plist")" == "$new_sha" ]]
+[[ ! -e "$recovery_root/obsolete-state" ]]
 grep -Fqx "$installed_bundle" "$launch_log"
 grep -Fqx "rollback:$installed_bundle" "$launch_log"
 grep -Fq "wrong fork provenance" "$fixture_root/rollback-output.log"
@@ -281,6 +408,7 @@ set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
     VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
     VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
     VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
     VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=1 \

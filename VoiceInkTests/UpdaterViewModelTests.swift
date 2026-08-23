@@ -114,6 +114,109 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func restartSnapshotsCredentialsBeforeStartingTheInstaller() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let manifestURL = temporaryDirectory.appendingPathComponent("staged-candidate.plist")
+        let candidate = StagedForkCandidate(
+            forkCommit: "1111111111111111111111111111111111111111",
+            upstreamCommit: "2222222222222222222222222222222222222222",
+            bundleURL: temporaryDirectory.appendingPathComponent("VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_400)
+        )
+        try PropertyListEncoder().encode(candidate).write(to: manifestURL, options: .atomic)
+        let recorder = ForkUpdateRestartRecorder()
+        let transaction = ForkUpdateTransaction(
+            scriptURL: temporaryDirectory.appendingPathComponent("prepare-local-update.sh"),
+            manifestURL: manifestURL,
+            installationScriptURL: temporaryDirectory.appendingPathComponent("install-local-update.sh"),
+            targetBundleURL: temporaryDirectory.appendingPathComponent("Installed.app"),
+            backupBundleURL: temporaryDirectory.appendingPathComponent("Recovery/VoiceInk.app"),
+            credentialSnapshotter: ForkUpdateCredentialSnapshotterStub(recorder: recorder),
+            installationRunner: ForkUpdateInstallationRunnerStub(recorder: recorder)
+        )
+
+        _ = try await transaction.requestRestart(for: candidate)
+
+        #expect(recorder.events == [.credentialsSnapshotted, .installerStarted])
+    }
+
+    @Test
+    func recoveryCommandRestoresTheKeychainSnapshotWithoutStartingTheApp() throws {
+        let credentialStore = ForkUpdateCredentialRestorerStub()
+
+        let handled = try LocalUpdateCredentialRecoveryCommand.runIfRequested(
+            arguments: ["VoiceInk", "--voiceink-restore-update-credentials"],
+            credentialStore: credentialStore
+        )
+
+        #expect(handled)
+        #expect(credentialStore.restoreCount == 1)
+    }
+
+    @Test
+    func restorePreviousVersionFlowsThroughTheUpdaterInterface() {
+        let suiteName = "UpdaterViewModelTests.restore"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let adapter = OfficialUpdaterAdapterStub(canCheckForUpdates: true)
+        adapter.canRestorePreviousVersion = true
+        let updater: any UpdaterModule = UpdaterViewModel(defaults: defaults, adapter: adapter)
+
+        #expect(updater.state.canRestorePreviousVersion)
+        updater.showRestorePreviousVersion()
+        #expect(updater.state.isPresentingRestorePreviousVersion)
+        updater.cancelRestorePreviousVersion()
+        #expect(!updater.state.isPresentingRestorePreviousVersion)
+        updater.showRestorePreviousVersion()
+        updater.restorePreviousVersion()
+
+        #expect(adapter.restorePreviousVersionCount == 1)
+        #expect(!updater.state.isPresentingRestorePreviousVersion)
+    }
+
+    @Test
+    func manualRestoreUsesTheRetainedRecoveryTransaction() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let installedBundle = temporaryDirectory.appendingPathComponent("Installed.app", isDirectory: true)
+        let backupBundle = temporaryDirectory.appendingPathComponent("Recovery/VoiceInk.app", isDirectory: true)
+        let recoveryManifest = temporaryDirectory.appendingPathComponent("Recovery/recovery.plist")
+        try FileManager.default.createDirectory(
+            at: installedBundle.appendingPathComponent("Contents", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(at: backupBundle, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let candidateCommit = "1111111111111111111111111111111111111111"
+        let info: [String: Any] = [SourceProvenance.forkCommitInfoKey: candidateCommit]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: installedBundle.appendingPathComponent("Contents/Info.plist"))
+        try PropertyListEncoder().encode(
+            LocalUpdateRecoveryState(
+                previousForkCommit: "2222222222222222222222222222222222222222",
+                candidateForkCommit: candidateCommit
+            )
+        ).write(to: recoveryManifest)
+        let restoreRunner = ForkUpdateRestoreRunnerStub()
+        let transaction = ForkUpdateTransaction(
+            scriptURL: temporaryDirectory.appendingPathComponent("prepare-local-update.sh"),
+            manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+            restorationScriptURL: temporaryDirectory.appendingPathComponent("restore-local-update.sh"),
+            targetBundleURL: installedBundle,
+            backupBundleURL: backupBundle,
+            restorationRunner: restoreRunner
+        )
+
+        #expect(transaction.canRestorePreviousVersion)
+        try await transaction.restorePreviousVersion()
+
+        #expect(restoreRunner.restoreCount == 1)
+    }
+
+    @Test
     func stagedCandidateIsRestoredFromThePersistentManifest() throws {
         let suiteName = "UpdaterViewModelTests.restored-staging"
         let defaults = makeDefaults(suiteName: suiteName)
@@ -300,6 +403,8 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
     let restartResult: StagedForkCandidate?
     private(set) var prepareCount = 0
     private(set) var restartRequestCount = 0
+    var canRestorePreviousVersion = false
+    private(set) var restorePreviousVersionCount = 0
 
     init(stagedCandidate: StagedForkCandidate, restartResult: StagedForkCandidate? = nil) {
         self.stagedCandidate = stagedCandidate
@@ -319,10 +424,56 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
         restartRequestCount += 1
         return restartResult
     }
+
+    func restorePreviousVersion() async throws {
+        restorePreviousVersionCount += 1
+    }
 }
 
 private struct ForkUpdateCommandRunnerStub: ForkUpdateCommandRunning {
     func run(scriptURL: URL, manifestURL: URL) async throws {}
+}
+
+private final class ForkUpdateRestartRecorder: @unchecked Sendable {
+    enum Event: Equatable {
+        case credentialsSnapshotted
+        case installerStarted
+    }
+
+    var events: [Event] = []
+}
+
+private struct ForkUpdateCredentialSnapshotterStub: ForkUpdateCredentialSnapshotting {
+    let recorder: ForkUpdateRestartRecorder
+
+    func createSnapshot() throws {
+        recorder.events.append(.credentialsSnapshotted)
+    }
+}
+
+private final class ForkUpdateCredentialRestorerStub: ForkUpdateCredentialRestoring, @unchecked Sendable {
+    private(set) var restoreCount = 0
+
+    func restoreSnapshot() throws {
+        restoreCount += 1
+    }
+}
+
+private struct ForkUpdateInstallationRunnerStub: ForkUpdateInstalling {
+    let recorder: ForkUpdateRestartRecorder
+
+    func install(_ request: ForkUpdateInstallationRequest) async throws -> ForkUpdateInstallationOutcome {
+        recorder.events.append(.installerStarted)
+        return .completed
+    }
+}
+
+private final class ForkUpdateRestoreRunnerStub: ForkUpdateRestoring, @unchecked Sendable {
+    private(set) var restoreCount = 0
+
+    func restore(_ request: ForkUpdateRestorationRequest) async throws {
+        restoreCount += 1
+    }
 }
 
 @MainActor
@@ -332,6 +483,8 @@ private final class OfficialUpdaterAdapterStub: UpdaterAdapter {
     private(set) var startCount = 0
     private(set) var userInitiatedCheckCount = 0
     private(set) var informationCheckCount = 0
+    var canRestorePreviousVersion = false
+    private(set) var restorePreviousVersionCount = 0
 
     init(canCheckForUpdates: Bool) {
         state = UpdaterAdapterState(
@@ -352,6 +505,10 @@ private final class OfficialUpdaterAdapterStub: UpdaterAdapter {
 
     func checkForUpdates() {
         userInitiatedCheckCount += 1
+    }
+
+    func restorePreviousVersion() {
+        restorePreviousVersionCount += 1
     }
 
     func send(_ event: UpdaterAdapterEvent) {

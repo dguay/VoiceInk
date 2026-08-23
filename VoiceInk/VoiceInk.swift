@@ -1,5 +1,6 @@
 import AppIntents
 import AppKit
+import Darwin
 import FluidAudio
 import OSLog
 import SwiftData
@@ -38,6 +39,18 @@ struct VoiceInkApp: App {
     @StateObject private var prewarmService: ModelPrewarmService
 
     init() {
+        #if LOCAL_BUILD
+            do {
+                if try LocalUpdateCredentialRecoveryCommand.runIfRequested() {
+                    Darwin.exit(EXIT_SUCCESS)
+                }
+            } catch {
+                let message = "VoiceInk could not restore its updater credential snapshot: \(error.localizedDescription)\n"
+                FileHandle.standardError.write(Data(message.utf8))
+                Darwin.exit(EXIT_FAILURE)
+            }
+        #endif
+
         // Disable HTTP response caching — prevents API responses from being stored in Cache.db
         URLCache.shared = URLCache(memoryCapacity: 0, diskCapacity: 0)
 
@@ -381,6 +394,26 @@ struct VoiceInkApp: App {
             } message: { candidate in
                 Text("VoiceInk prepared fork commit \(candidate.forkCommit.prefix(12)).")
             }
+            .alert(
+                "Restore Previous Version?",
+                isPresented: Binding(
+                    get: { updaterViewModel.state.isPresentingRestorePreviousVersion },
+                    set: { isPresented in
+                        if !isPresented {
+                            updaterViewModel.cancelRestorePreviousVersion()
+                        }
+                    }
+                )
+            ) {
+                Button("Restore Previous Version", role: .destructive) {
+                    updaterViewModel.restorePreviousVersion()
+                }
+                Button("Cancel", role: .cancel) {
+                    updaterViewModel.cancelRestorePreviousVersion()
+                }
+            } message: {
+                Text("VoiceInk will quit and restore the previous app, data, preferences, and credentials.")
+            }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: AppWindowLayout.width, height: AppWindowLayout.minimumHeight)
@@ -390,6 +423,12 @@ struct VoiceInkApp: App {
 
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesView(updaterViewModel: updaterViewModel)
+                if updaterViewModel.state.canRestorePreviousVersion {
+                    Button("Restore Previous Version…") {
+                        updaterViewModel.showRestorePreviousVersion()
+                    }
+                    .disabled(updaterViewModel.state.isPreparingUpdate)
+                }
             }
         }
 

@@ -73,10 +73,15 @@ codesign --verify --deep --strict "$staged_bundle" \
 target_parent="$(dirname "$target_bundle")"
 backup_parent="$(dirname "$backup_bundle")"
 stage_root="$(dirname "$manifest_path")"
+recovery_root="$backup_parent"
+recovery_parent="$(dirname "$recovery_root")"
+application_support="${VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH:-$HOME/Library/Application Support/com.prakashjoshipax.VoiceInk}"
+preferences="${VOICEINK_UPDATE_PREFERENCES_PATH:-$HOME/Library/Preferences/com.prakashjoshipax.VoiceInk.plist}"
+restoration_script="${VOICEINK_UPDATE_RESTORATION_SCRIPT:-$(dirname "$0")/restore-local-update.sh}"
 candidate_temporary="$target_parent/.VoiceInk.install.$$"
 retired_bundle="$target_parent/.VoiceInk.retired.$$"
-backup_temporary="$backup_parent/.VoiceInk.backup.$$"
-previous_backup="$backup_bundle.replaced.$$"
+recovery_temporary="$recovery_root.pending.$$"
+previous_recovery="$recovery_root.replaced.$$"
 health_path="${VOICEINK_UPDATE_HEALTH_PATH:-$stage_root/install-health.plist}"
 failed_root="$stage_root/failed/$approved_sha-$$"
 launcher="${VOICEINK_UPDATE_LAUNCHER:-}"
@@ -88,6 +93,7 @@ parent_exit_timeout="${VOICEINK_UPDATE_PARENT_EXIT_TIMEOUT_SECONDS:-30}"
 replacement_started=false
 parent_terminated=false
 launched_pid=""
+recovery_committed=false
 
 launch_candidate() {
     if [[ -n "$launcher" ]]; then
@@ -135,51 +141,56 @@ finish_transaction() {
 
     # Once replacement begins, every failure path must stop the candidate, restore
     # the preserved app, and relaunch that known-good version.
-    if [[ "$result" -ne 0 && "$replacement_started" == true ]]; then
+    installed_after_failure="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null || true)"
+    if [[ "$result" -ne 0 && "$recovery_committed" == true && "$installed_after_failure" == "$approved_sha" ]]; then
         if [[ "$launched_pid" =~ ^[1-9][0-9]*$ ]]; then
             kill -TERM "$launched_pid" >/dev/null 2>&1 || true
+            for ((attempt = 0; attempt < parent_exit_timeout * 10; attempt++)); do
+                if ! kill -0 "$launched_pid" 2>/dev/null; then
+                    break
+                fi
+                sleep 0.1
+            done
+            if kill -0 "$launched_pid" 2>/dev/null; then
+                kill -KILL "$launched_pid" >/dev/null 2>&1 || true
+            fi
         fi
-        mkdir -p "$failed_root"
-        if [[ -d "$target_bundle" ]]; then
-            mv "$target_bundle" "$failed_root/VoiceInk.app" >/dev/null 2>&1 || true
-        fi
-        if [[ -d "$retired_bundle" ]]; then
-            mv "$retired_bundle" "$target_bundle" >/dev/null 2>&1 || true
-        elif [[ -d "$backup_bundle" ]]; then
-            /usr/bin/ditto "$backup_bundle" "$target_bundle" >/dev/null 2>&1 || true
-        fi
-        relaunch_previous >/dev/null 2>&1 || true
+        /bin/bash "$restoration_script" --automatic "$target_bundle" "$backup_bundle" || true
     elif [[ "$result" -ne 0 && "$parent_terminated" == true ]]; then
         # A failure between termination and replacement leaves the old bundle in
         # place but VoiceInk closed, so recovery still has to relaunch it.
         relaunch_previous >/dev/null 2>&1 || true
     fi
 
-    if [[ -d "$candidate_temporary" ]]; then
-        mkdir -p "$failed_root"
-        mv "$candidate_temporary" "$failed_root/uninstalled-VoiceInk.app" >/dev/null 2>&1 || true
-    fi
-    if [[ -d "$backup_temporary" ]]; then
-        mkdir -p "$failed_root"
-        mv "$backup_temporary" "$failed_root/incomplete-backup.app" >/dev/null 2>&1 || true
-    fi
-    if [[ -d "$previous_backup" ]]; then
-        /bin/rm -rf "$previous_backup"
-    fi
+    /bin/rm -rf "$candidate_temporary" "$recovery_temporary" "$previous_recovery" "$retired_bundle"
 
     exit "$result"
 }
 trap finish_transaction EXIT
 
-mkdir -p "$target_parent" "$backup_parent"
+required_disk_kib=0
+for snapshot_source in "$application_support" "$preferences" "$target_bundle" "$staged_bundle"; do
+    if [[ -e "$snapshot_source" ]]; then
+        source_kib="$(/usr/bin/du -sk "$snapshot_source" | /usr/bin/awk '{print $1}')"
+        required_disk_kib=$((required_disk_kib + source_kib))
+    fi
+done
+available_disk_kib="${VOICEINK_UPDATE_AVAILABLE_DISK_KIB:-}"
+if [[ -z "$available_disk_kib" ]]; then
+    available_disk_kib="$(/bin/df -Pk "$recovery_parent" | /usr/bin/awk 'NR == 2 {print $4}')"
+fi
+[[ "$available_disk_kib" =~ ^[0-9]+$ && "$available_disk_kib" -ge "$required_disk_kib" ]] \
+    || fail "VoiceInk does not have sufficient disk space for a complete recovery snapshot."
+
+mkdir -p "$target_parent"
 /usr/bin/ditto "$staged_bundle" "$candidate_temporary"
 codesign --verify --deep --strict "$candidate_temporary" \
     || fail "The installation copy failed signature validation."
-/usr/bin/ditto "$target_bundle" "$backup_temporary"
-if [[ -d "$backup_bundle" ]]; then
-    mv "$backup_bundle" "$previous_backup"
-fi
-mv "$backup_temporary" "$backup_bundle"
+
+umask 077
+mkdir -p "$recovery_temporary"
+chmod 700 "$recovery_temporary"
+/usr/bin/ditto "$target_bundle" "$recovery_temporary/VoiceInk.app"
 
 # Close the fetch-to-install race while the approved app can still prepare a
 # replacement candidate when the fork advances.
@@ -196,6 +207,37 @@ if kill -0 "$parent_pid" 2>/dev/null; then
     fail "VoiceInk did not terminate before the installation timeout."
 fi
 parent_terminated=true
+
+if [[ -n "${VOICEINK_UPDATE_STATE_SNAPSHOTTER:-}" ]]; then
+    "$VOICEINK_UPDATE_STATE_SNAPSHOTTER" \
+        "$application_support" \
+        "$recovery_temporary/Application Support" \
+        || fail "VoiceInk could not create a consistent copy-on-write state snapshot."
+else
+    /bin/cp -cRp "$application_support" "$recovery_temporary/Application Support" \
+        || fail "VoiceInk could not create a consistent copy-on-write state snapshot."
+fi
+
+if [[ -f "$preferences" ]]; then
+    /bin/cp -cp "$preferences" "$recovery_temporary/Preferences.plist" \
+        || fail "VoiceInk could not create a copy-on-write preferences snapshot."
+else
+    /usr/bin/defaults export com.prakashjoshipax.VoiceInk "$recovery_temporary/Preferences.plist" >/dev/null \
+        || fail "VoiceInk could not export a consistent preferences snapshot."
+fi
+
+previous_fork_sha="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null)" \
+    || fail "The installed VoiceInk bundle has no fork provenance."
+/usr/bin/plutil -create xml1 "$recovery_temporary/recovery.plist"
+/usr/bin/plutil -insert previousForkCommit -string "$previous_fork_sha" "$recovery_temporary/recovery.plist"
+/usr/bin/plutil -insert candidateForkCommit -string "$approved_sha" "$recovery_temporary/recovery.plist"
+
+if [[ -d "$recovery_root" ]]; then
+    mv "$recovery_root" "$previous_recovery"
+fi
+mv "$recovery_temporary" "$recovery_root"
+recovery_committed=true
+/bin/rm -rf "$previous_recovery"
 
 replacement_started=true
 replace_bundle_atomically
