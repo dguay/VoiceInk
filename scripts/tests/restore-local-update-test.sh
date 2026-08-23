@@ -86,6 +86,20 @@ set -euo pipefail
 exit 1
 EOF
 
+cat > "$fake_bin/fail-compensation-replace" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+count=0
+[[ ! -f "$VOICEINK_TEST_REPLACE_COUNT" ]] || count="$(< "$VOICEINK_TEST_REPLACE_COUNT")"
+if [[ "$count" -eq 0 ]]; then
+    /bin/mv "$1" "$3"
+    /bin/mv "$2" "$1"
+    printf '1\n' > "$VOICEINK_TEST_REPLACE_COUNT"
+    exit 0
+fi
+exit 1
+EOF
+
 cat > "$fake_bin/relaunch-voiceink" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -99,6 +113,7 @@ chmod +x \
     "$fake_bin/fail-credentials" \
     "$fake_bin/fail-snapshot" \
     "$fake_bin/fail-atomic-replace" \
+    "$fake_bin/fail-compensation-replace" \
     "$fake_bin/relaunch-voiceink"
 
 sleep 30 &
@@ -191,6 +206,34 @@ set -e
 [[ -d "$installed_bundle" ]]
 [[ "$(< "$installed_bundle/Contents/version")" == "candidate" ]]
 [[ "$(< "$launch_log")" == "$installed_bundle" ]]
+
+# If atomic compensation itself fails, the restored bundle must still occupy
+# the canonical path so the next launch can resume the durable restore journal.
+replace_count="$fixture_root/replace-count"
+: > "$launch_log"
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+    VOICEINK_UPDATE_PREFERENCES_RESTORER="$fake_bin/restore-preferences" \
+    VOICEINK_UPDATE_CREDENTIAL_RESTORER="$fake_bin/fail-credentials" \
+    VOICEINK_UPDATE_RESTORE_ATOMIC_REPLACER="$fake_bin/fail-compensation-replace" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    VOICEINK_TEST_REPLACE_COUNT="$replace_count" \
+    /bin/bash "$project_root/VoiceInk/Resources/restore-local-update.sh" \
+    --automatic \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    > "$fixture_root/failed-compensation-replacement.log" 2>&1
+compensation_replacement_status=$?
+set -e
+
+[[ "$compensation_replacement_status" -ne 0 ]]
+[[ -d "$installed_bundle" ]]
+[[ "$(< "$installed_bundle/Contents/version")" == "previous" ]]
+[[ ! -s "$launch_log" ]]
+grep -Fq "could not prove a consistent" "$fixture_root/failed-compensation-replacement.log"
 
 : > "$launch_log"
 set +e

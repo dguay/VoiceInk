@@ -77,6 +77,7 @@ restored_bundle="$(dirname "$target_bundle")/.VoiceInk.restore.$$"
 restored_application_support="$transaction_root/Application Support"
 rejected_bundle="$transaction_root/rejected-VoiceInk.app"
 rejected_bundle_sibling="$(dirname "$target_bundle")/.VoiceInk.rollback.$$"
+failed_restore_bundle_sibling="$(dirname "$target_bundle")/.VoiceInk.failed-restore.$$"
 rejected_application_support="$transaction_root/rejected-Application-Support"
 rejected_preferences="$transaction_root/rejected-Preferences.plist"
 rejected_recovery_state="$transaction_root/rejected-recovery.plist"
@@ -89,11 +90,13 @@ credential_replacement_started=false
 restore_complete=false
 
 replace_bundle_atomically() {
+    local replacement_bundle="$1"
+    local displaced_bundle="$2"
     if [[ -n "$atomic_replacer" ]]; then
-        "$atomic_replacer" "$target_bundle" "$restored_bundle" "$rejected_bundle_sibling"
+        "$atomic_replacer" "$target_bundle" "$replacement_bundle" "$displaced_bundle"
         return
     fi
-    /usr/bin/swift - "$target_bundle" "$restored_bundle" "$(basename "$rejected_bundle_sibling")" <<'SWIFT'
+    /usr/bin/swift - "$target_bundle" "$replacement_bundle" "$(basename "$displaced_bundle")" <<'SWIFT'
 import Foundation
 
 let arguments = CommandLine.arguments
@@ -121,8 +124,8 @@ finish_restore() {
     elif [[ "$result" -ne 0 && "$parent_terminated" == true && "$restore_complete" == false ]]; then
         compensation_failed=false
         if [[ "$bundle_replacement_started" == true && -d "$rejected_bundle" ]]; then
-            /bin/rm -rf "$target_bundle" || compensation_failed=true
-            mv "$rejected_bundle" "$target_bundle" || compensation_failed=true
+            replace_bundle_atomically "$rejected_bundle" "$failed_restore_bundle_sibling" \
+                || compensation_failed=true
         fi
         if [[ "$application_support_replacement_started" == true && -d "$rejected_application_support" ]]; then
             /bin/rm -rf "$application_support" || compensation_failed=true
@@ -153,7 +156,11 @@ finish_restore() {
         fi
     fi
 
-    /bin/rm -rf "$transaction_root" "$restored_bundle" "$rejected_bundle_sibling"
+    /bin/rm -rf \
+        "$transaction_root" \
+        "$restored_bundle" \
+        "$rejected_bundle_sibling" \
+        "$failed_restore_bundle_sibling"
     exit "$result"
 }
 trap finish_restore EXIT
@@ -225,7 +232,7 @@ else
     /usr/bin/defaults import com.prakashjoshipax.VoiceInk "$recovery_root/Preferences.plist" >/dev/null
 fi
 
-replace_bundle_atomically
+replace_bundle_atomically "$restored_bundle" "$rejected_bundle_sibling"
 bundle_replacement_started=true
 mv "$rejected_bundle_sibling" "$rejected_bundle"
 
