@@ -7,18 +7,26 @@ protocol ForkUpdateCredentialSnapshotting {
 
 protocol ForkUpdateCredentialRestoring {
     func restoreSnapshot() throws
+    func commitSnapshot() throws
 }
 
 enum LocalUpdateCredentialRecoveryCommand {
     static let argument = "--voiceink-restore-update-credentials"
+    static let commitArgument = "--voiceink-commit-update-credentials"
 
     static func runIfRequested(
         arguments: [String] = CommandLine.arguments,
         credentialStore: any ForkUpdateCredentialRestoring = LocalUpdateCredentialSnapshotStore()
     ) throws -> Bool {
-        guard arguments.contains(argument) else { return false }
-        try credentialStore.restoreSnapshot()
-        return true
+        if arguments.contains(argument) {
+            try credentialStore.restoreSnapshot()
+            return true
+        }
+        if arguments.contains(commitArgument) {
+            try credentialStore.commitSnapshot()
+            return true
+        }
+        return false
     }
 }
 
@@ -32,15 +40,31 @@ struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, For
     private static let credentialService = "com.prakashjoshipax.VoiceInk.Local"
     private static let snapshotService = "com.prakashjoshipax.VoiceInk.Local.UpdaterRecovery"
     private static let snapshotAccount = "last-known-good-credentials"
+    private static let pendingSnapshotAccount = "pending-credentials"
 
     func createSnapshot() throws {
         let records = try readRecords(service: Self.credentialService)
         let snapshot = try PropertyListEncoder().encode(records)
         try write(
             snapshot,
+            account: Self.pendingSnapshotAccount,
+            service: Self.snapshotService,
+            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String
+        )
+    }
+
+    func commitSnapshot() throws {
+        let pending = try read(account: Self.pendingSnapshotAccount, service: Self.snapshotService)
+        try write(
+            pending,
             account: Self.snapshotAccount,
             service: Self.snapshotService,
             accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String
+        )
+        // Promotion is complete once the committed item is atomically updated.
+        // A leftover pending item is harmless and the next attempt overwrites it.
+        _ = SecItemDelete(
+            query(account: Self.pendingSnapshotAccount, service: Self.snapshotService) as CFDictionary
         )
     }
 
@@ -51,11 +75,17 @@ struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, For
 
         do {
             try replaceCredentials(with: records)
-        } catch {
+        } catch let restorationError {
             // Keychain has no multi-item transaction. Restore the captured rejected
             // generation if any write or deletion in the replacement fails.
-            try? replaceCredentials(with: rejectedRecords)
-            throw error
+            do {
+                try replaceCredentials(with: rejectedRecords)
+            } catch {
+                throw ForkUpdateError(
+                    message: "VoiceInk could not restore credentials or compensate the partial Keychain update."
+                )
+            }
+            throw restorationError
         }
     }
 

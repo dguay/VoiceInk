@@ -71,6 +71,12 @@ set -euo pipefail
 exit 1
 EOF
 
+cat > "$fake_bin/fail-snapshot" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+EOF
+
 cat > "$fake_bin/relaunch-voiceink" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -82,6 +88,7 @@ chmod +x \
     "$fake_bin/restore-preferences" \
     "$fake_bin/restore-credentials" \
     "$fake_bin/fail-credentials" \
+    "$fake_bin/fail-snapshot" \
     "$fake_bin/relaunch-voiceink"
 
 sleep 30 &
@@ -148,6 +155,26 @@ parent_pid=""
 [[ "$(< "$installed_bundle/Contents/version")" == "candidate" ]]
 [[ "$(< "$application_support/state")" == "candidate-data" ]]
 [[ "$(< "$preferences")" == "candidate-preferences" ]]
+[[ ! -s "$launch_log" ]]
+grep -Fq "could not prove a consistent" "$fixture_root/failed-restore.log"
+
+: > "$launch_log"
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+    VOICEINK_UPDATE_STATE_SNAPSHOTTER="$fake_bin/fail-snapshot" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/restore-local-update.sh" \
+    --automatic \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    > "$fixture_root/failed-automatic-staging.log" 2>&1
+automatic_staging_status=$?
+set -e
+
+[[ "$automatic_staging_status" -ne 0 ]]
 [[ "$(< "$launch_log")" == "$installed_bundle" ]]
 
 printf 'restore-local-update-test: PASS\n'

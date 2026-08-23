@@ -58,10 +58,13 @@ restored_application_support="$transaction_root/Application Support"
 rejected_bundle="$transaction_root/rejected-VoiceInk.app"
 rejected_application_support="$transaction_root/rejected-Application-Support"
 rejected_preferences="$transaction_root/rejected-Preferences.plist"
-parent_terminated=false
+rejected_recovery_state="$transaction_root/rejected-recovery.plist"
+parent_terminated="$automatic"
 application_support_replacement_started=false
 preferences_replacement_started=false
 bundle_replacement_started=false
+recovery_state_mutation_started=false
+credential_replacement_started=false
 restore_complete=false
 
 finish_restore() {
@@ -72,25 +75,37 @@ finish_restore() {
     # A restore spans independent stores. If a later store fails, put every
     # filesystem store back on the rejected candidate generation before launch.
     if [[ "$result" -ne 0 && "$parent_terminated" == true && "$restore_complete" == false ]]; then
+        compensation_failed=false
         if [[ "$bundle_replacement_started" == true && -d "$rejected_bundle" ]]; then
-            /bin/rm -rf "$target_bundle"
-            mv "$rejected_bundle" "$target_bundle"
+            /bin/rm -rf "$target_bundle" || compensation_failed=true
+            mv "$rejected_bundle" "$target_bundle" || compensation_failed=true
         fi
         if [[ "$application_support_replacement_started" == true && -d "$rejected_application_support" ]]; then
-            /bin/rm -rf "$application_support"
-            mv "$rejected_application_support" "$application_support"
+            /bin/rm -rf "$application_support" || compensation_failed=true
+            mv "$rejected_application_support" "$application_support" || compensation_failed=true
         fi
         if [[ "$preferences_replacement_started" == true && -f "$rejected_preferences" ]]; then
             if [[ -n "$preferences_restorer" ]]; then
-                "$preferences_restorer" "$rejected_preferences" "$preferences" >/dev/null 2>&1 || true
+                "$preferences_restorer" "$rejected_preferences" "$preferences" >/dev/null 2>&1 \
+                    || compensation_failed=true
             else
-                /usr/bin/defaults import com.prakashjoshipax.VoiceInk "$rejected_preferences" >/dev/null 2>&1 || true
+                /usr/bin/defaults import com.prakashjoshipax.VoiceInk "$rejected_preferences" >/dev/null 2>&1 \
+                    || compensation_failed=true
             fi
         fi
-        if [[ -n "$relauncher" ]]; then
-            "$relauncher" "$target_bundle" >/dev/null 2>&1 || true
-        else
-            /usr/bin/open -n "$target_bundle" >/dev/null 2>&1 || true
+        if [[ "$recovery_state_mutation_started" == true && -f "$rejected_recovery_state" ]]; then
+            /bin/cp "$rejected_recovery_state" "$recovery_state" || compensation_failed=true
+        fi
+        if [[ "$compensation_failed" == false && "$credential_replacement_started" == false ]]; then
+            if [[ -n "$relauncher" ]]; then
+                "$relauncher" "$target_bundle" >/dev/null 2>&1 || compensation_failed=true
+            else
+                /usr/bin/open -n "$target_bundle" >/dev/null 2>&1 || compensation_failed=true
+            fi
+        fi
+        if [[ "$compensation_failed" == true || "$credential_replacement_started" == true ]]; then
+            printf 'Error: VoiceInk stopped because rollback compensation could not prove a consistent credential and filesystem generation.\n' >&2
+            result=2
         fi
     fi
 
@@ -158,6 +173,15 @@ mv "$target_bundle" "$rejected_bundle"
 bundle_replacement_started=true
 mv "$restored_bundle" "$target_bundle"
 
+/bin/cp "$recovery_state" "$rejected_recovery_state"
+recovery_state_mutation_started=true
+if /usr/bin/plutil -extract suppressedForkCommit raw "$recovery_state" >/dev/null 2>&1; then
+    /usr/bin/plutil -replace suppressedForkCommit -string "$candidate_sha" "$recovery_state"
+else
+    /usr/bin/plutil -insert suppressedForkCommit -string "$candidate_sha" "$recovery_state"
+fi
+
+credential_replacement_started=true
 if [[ -n "$credential_restorer" ]]; then
     "$credential_restorer"
 else
@@ -165,13 +189,7 @@ else
     [[ -x "$restored_executable" ]] || fail "The previous VoiceInk executable is missing."
     "$restored_executable" --voiceink-restore-update-credentials
 fi
-
-if /usr/bin/plutil -extract suppressedForkCommit raw "$recovery_state" >/dev/null 2>&1; then
-    /usr/bin/plutil -replace suppressedForkCommit -string "$candidate_sha" "$recovery_state"
-else
-    /usr/bin/plutil -insert suppressedForkCommit -string "$candidate_sha" "$recovery_state"
-fi
-
+credential_replacement_started=false
 restore_complete=true
 
 if [[ -n "$relauncher" ]]; then

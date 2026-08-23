@@ -185,6 +185,12 @@ set -euo pipefail
 printf 'restored\n' > "$VOICEINK_TEST_CREDENTIAL_LOG"
 EOF
 
+cat > "$fake_bin/commit-credentials" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'committed\n' > "$VOICEINK_TEST_CREDENTIAL_COMMIT_LOG"
+EOF
+
 cat > "$fake_bin/mutate-then-fail-replacement" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -200,6 +206,15 @@ cat > "$fake_bin/replace-bundle" <<'EOF'
 set -euo pipefail
 mv "$1" "$3"
 mv "$2" "$1"
+EOF
+
+cat > "$fake_bin/fail-pending-recovery-move" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == *.pending.* ]]; then
+    exit 1
+fi
+mv "$1" "$2"
 EOF
 
 cat > "$fake_bin/git-with-late-update" <<'EOF'
@@ -231,16 +246,21 @@ chmod +x \
     "$fake_bin/fail-snapshot" \
     "$fake_bin/restore-preferences" \
     "$fake_bin/restore-credentials" \
+    "$fake_bin/commit-credentials" \
     "$fake_bin/mutate-then-fail-replacement" \
     "$fake_bin/replace-bundle" \
+    "$fake_bin/fail-pending-recovery-move" \
     "$fake_bin/git-with-late-update"
 
 credential_log="$fixture_root/credential-restore.log"
+credential_commit_log="$fixture_root/credential-commit.log"
 export VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support"
 export VOICEINK_UPDATE_PREFERENCES_PATH="$preferences"
 export VOICEINK_UPDATE_PREFERENCES_RESTORER="$fake_bin/restore-preferences"
 export VOICEINK_UPDATE_CREDENTIAL_RESTORER="$fake_bin/restore-credentials"
 export VOICEINK_TEST_CREDENTIAL_LOG="$credential_log"
+export VOICEINK_UPDATE_CREDENTIAL_SNAPSHOT_COMMITTER="$fake_bin/commit-credentials"
+export VOICEINK_TEST_CREDENTIAL_COMMIT_LOG="$credential_commit_log"
 
 staged_bundle="$fixture_root/staging/candidates/$new_sha/VoiceInk.app"
 /usr/bin/plutil -replace forkCommit -string "$new_sha" "$manifest_path"
@@ -332,6 +352,7 @@ parent_pid=""
 [[ "$(< "$recovery_root/Preferences.plist")" == "preferences-before-update" ]]
 [[ "$(/usr/bin/plutil -extract previousForkCommit raw "$recovery_root/recovery.plist")" == "$old_sha" ]]
 [[ "$(/usr/bin/plutil -extract candidateForkCommit raw "$recovery_root/recovery.plist")" == "$new_sha" ]]
+[[ "$(< "$credential_commit_log")" == "committed" ]]
 [[ ! -e "$manifest_path" ]]
 [[ "$(< "$launch_log")" == "$installed_bundle" ]]
 launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path")"
@@ -348,6 +369,36 @@ launched_pid=""
 printf 'known-good-data\n' > "$application_support/state"
 printf 'known-good-preferences\n' > "$preferences"
 printf 'obsolete\n' > "$recovery_root/obsolete-state"
+: > "$launch_log"
+sleep 30 &
+parent_pid=$!
+
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_RECOVERY_MOVER="$fake_bin/fail-pending-recovery-move" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/recovery-publish-output.log" 2>&1
+recovery_publish_status=$?
+set -e
+
+[[ "$recovery_publish_status" -ne 0 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: approved parent survived recovery publish failure\n' >&2
+    exit 1
+fi
+parent_pid=""
+[[ -f "$recovery_root/obsolete-state" ]]
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+grep -Fqx "rollback:$installed_bundle" "$launch_log"
+
 : > "$launch_log"
 sleep 30 &
 parent_pid=$!

@@ -86,11 +86,14 @@ health_path="${VOICEINK_UPDATE_HEALTH_PATH:-$stage_root/install-health.plist}"
 launcher="${VOICEINK_UPDATE_LAUNCHER:-}"
 relauncher="${VOICEINK_UPDATE_RELAUNCHER:-}"
 atomic_replacer="${VOICEINK_UPDATE_ATOMIC_REPLACER:-}"
+credential_snapshot_committer="${VOICEINK_UPDATE_CREDENTIAL_SNAPSHOT_COMMITTER:-}"
+recovery_mover="${VOICEINK_UPDATE_RECOVERY_MOVER:-}"
 health_timeout="${VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS:-30}"
 stability_seconds="${VOICEINK_UPDATE_STABILITY_SECONDS:-10}"
 parent_exit_timeout="${VOICEINK_UPDATE_PARENT_EXIT_TIMEOUT_SECONDS:-30}"
 parent_terminated=false
 launched_pid=""
+recovery_published=false
 recovery_committed=false
 
 launch_candidate() {
@@ -132,10 +135,39 @@ relaunch_previous() {
     fi
 }
 
+commit_credential_snapshot() {
+    if [[ -n "$credential_snapshot_committer" ]]; then
+        "$credential_snapshot_committer"
+        return
+    fi
+    current_executable="$target_bundle/Contents/MacOS/VoiceInk"
+    [[ -x "$current_executable" ]] || fail "The installed VoiceInk executable is missing."
+    "$current_executable" --voiceink-commit-update-credentials
+}
+
+move_recovery_directory() {
+    if [[ -n "$recovery_mover" ]]; then
+        "$recovery_mover" "$1" "$2"
+    else
+        mv "$1" "$2"
+    fi
+}
+
 finish_transaction() {
     result=$?
     trap - EXIT
     set +e
+
+    # The credential snapshot and recovery directory commit as a pair. If
+    # credential promotion fails, restore the prior directory before relaunch.
+    if [[ "$result" -ne 0 && "$recovery_committed" == false ]]; then
+        if [[ -d "$previous_recovery" ]]; then
+            /bin/rm -rf "$recovery_root"
+            mv "$previous_recovery" "$recovery_root" || true
+        elif [[ "$recovery_published" == true ]]; then
+            /bin/rm -rf "$recovery_root"
+        fi
+    fi
 
     # Once replacement begins, every failure path must stop the candidate, restore
     # the preserved app, and relaunch that known-good version.
@@ -163,7 +195,7 @@ finish_transaction() {
         relaunch_previous >/dev/null 2>&1 || true
     fi
 
-    /bin/rm -rf "$candidate_temporary" "$recovery_temporary" "$previous_recovery" "$retired_bundle"
+    /bin/rm -rf "$candidate_temporary" "$recovery_temporary" "$retired_bundle"
 
     exit "$result"
 }
@@ -239,9 +271,12 @@ previous_fork_sha="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bu
 # Publish the complete app, state, preferences, and metadata as one recovery
 # directory. The prior generation remains available until this rename succeeds.
 if [[ -d "$recovery_root" ]]; then
-    mv "$recovery_root" "$previous_recovery"
+    move_recovery_directory "$recovery_root" "$previous_recovery"
 fi
-mv "$recovery_temporary" "$recovery_root"
+move_recovery_directory "$recovery_temporary" "$recovery_root"
+recovery_published=true
+commit_credential_snapshot \
+    || fail "VoiceInk could not commit the matching credential recovery snapshot."
 recovery_committed=true
 /bin/rm -rf "$previous_recovery"
 

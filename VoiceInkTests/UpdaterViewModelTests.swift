@@ -157,6 +157,19 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func recoveryCommandCommitsThePendingKeychainSnapshotWithoutStartingTheApp() throws {
+        let credentialStore = ForkUpdateCredentialRestorerStub()
+
+        let handled = try LocalUpdateCredentialRecoveryCommand.runIfRequested(
+            arguments: ["VoiceInk", "--voiceink-commit-update-credentials"],
+            credentialStore: credentialStore
+        )
+
+        #expect(handled)
+        #expect(credentialStore.commitCount == 1)
+    }
+
+    @Test
     func restorePreviousVersionFlowsThroughTheUpdaterInterface() {
         let suiteName = "UpdaterViewModelTests.restore"
         let defaults = makeDefaults(suiteName: suiteName)
@@ -457,9 +470,14 @@ private struct ForkUpdateCredentialSnapshotterStub: ForkUpdateCredentialSnapshot
 
 private final class ForkUpdateCredentialRestorerStub: ForkUpdateCredentialRestoring, @unchecked Sendable {
     private(set) var restoreCount = 0
+    private(set) var commitCount = 0
 
     func restoreSnapshot() throws {
         restoreCount += 1
+    }
+
+    func commitSnapshot() throws {
+        commitCount += 1
     }
 }
 
