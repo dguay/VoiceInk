@@ -150,8 +150,13 @@ set -euo pipefail
 printf 'rollback:%s\n' "$1" >> "$VOICEINK_TEST_LAUNCH_LOG"
 EOF
 
-cat > "$fake_bin/fail-replacement" <<'EOF'
+cat > "$fake_bin/mutate-then-fail-replacement" <<'EOF'
 #!/usr/bin/env bash
+set -euo pipefail
+
+mv "$1" "$3"
+mv "$2" "$1"
+printf '%s\n' "$(< "$1/Contents/version")" > "$VOICEINK_TEST_MUTATION_LOG"
 exit 1
 EOF
 
@@ -181,7 +186,7 @@ chmod +x \
     "$fake_bin/codesign" \
     "$fake_bin/launch-voiceink" \
     "$fake_bin/relaunch-voiceink" \
-    "$fake_bin/fail-replacement" \
+    "$fake_bin/mutate-then-fail-replacement" \
     "$fake_bin/git-with-late-update"
 
 staged_bundle="$fixture_root/staging/candidates/$new_sha/VoiceInk.app"
@@ -315,9 +320,10 @@ parent_pid=$!
 set +e
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
-    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/fail-replacement" \
+    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/mutate-then-fail-replacement" \
     VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
     VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    VOICEINK_TEST_MUTATION_LOG="$fixture_root/replacement-mutation.log" \
     /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
     "$new_sha" \
     "$manifest_path" \
@@ -329,12 +335,19 @@ replacement_status=$?
 set -e
 
 [[ "$replacement_status" -ne 0 ]]
+if [[ "$(< "$fixture_root/replacement-mutation.log")" != "newer-candidate" ]]; then
+    printf 'install-local-update-test: replacement fault did not mutate the installed bundle\n' >&2
+    exit 1
+fi
 if kill -0 "$parent_pid" >/dev/null 2>&1; then
     printf 'install-local-update-test: approved parent survived replacement failure\n' >&2
     exit 1
 fi
 parent_pid=""
-[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+if [[ "$(< "$installed_bundle/Contents/version")" != "installed-before-update" ]]; then
+    printf 'install-local-update-test: replacement failure did not restore the installed bundle\n' >&2
+    exit 1
+fi
 grep -Fqx "rollback:$installed_bundle" "$launch_log"
 
 : > "$launch_log"

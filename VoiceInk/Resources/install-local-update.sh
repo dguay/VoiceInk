@@ -133,8 +133,8 @@ finish_transaction() {
     trap - EXIT
     set +e
 
-    # Once replacement begins, every failure path must stop the candidate, put the
-    # retired bundle back at the original path, and relaunch that known-good app.
+    # Once replacement begins, every failure path must stop the candidate, restore
+    # the preserved app, and relaunch that known-good version.
     if [[ "$result" -ne 0 && "$replacement_started" == true ]]; then
         if [[ "$launched_pid" =~ ^[1-9][0-9]*$ ]]; then
             kill -TERM "$launched_pid" >/dev/null 2>&1 || true
@@ -145,6 +145,8 @@ finish_transaction() {
         fi
         if [[ -d "$retired_bundle" ]]; then
             mv "$retired_bundle" "$target_bundle" >/dev/null 2>&1 || true
+        elif [[ -d "$backup_bundle" ]]; then
+            /usr/bin/ditto "$backup_bundle" "$target_bundle" >/dev/null 2>&1 || true
         fi
         relaunch_previous >/dev/null 2>&1 || true
     elif [[ "$result" -ne 0 && "$parent_terminated" == true ]]; then
@@ -195,8 +197,8 @@ if kill -0 "$parent_pid" 2>/dev/null; then
 fi
 parent_terminated=true
 
-replace_bundle_atomically
 replacement_started=true
+replace_bundle_atomically
 
 /bin/rm -f "$health_path"
 launched_pid="$(launch_candidate)"
