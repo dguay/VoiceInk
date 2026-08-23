@@ -79,6 +79,13 @@ set -euo pipefail
 exit 1
 EOF
 
+cat > "$fake_bin/fail-atomic-replace" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -d "$1" && -d "$2" ]]
+exit 1
+EOF
+
 cat > "$fake_bin/relaunch-voiceink" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -91,6 +98,7 @@ chmod +x \
     "$fake_bin/restore-credentials" \
     "$fake_bin/fail-credentials" \
     "$fake_bin/fail-snapshot" \
+    "$fake_bin/fail-atomic-replace" \
     "$fake_bin/relaunch-voiceink"
 
 sleep 30 &
@@ -159,6 +167,30 @@ parent_pid=""
 [[ "$(< "$preferences")" == "candidate-preferences" ]]
 [[ ! -s "$launch_log" ]]
 grep -Fq "could not prove a consistent" "$fixture_root/failed-restore.log"
+
+# A failed atomic replacement must never remove the app at its canonical path.
+: > "$launch_log"
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+    VOICEINK_UPDATE_PREFERENCES_RESTORER="$fake_bin/restore-preferences" \
+    VOICEINK_UPDATE_CREDENTIAL_RESTORER="$fake_bin/restore-credentials" \
+    VOICEINK_UPDATE_RESTORE_ATOMIC_REPLACER="$fake_bin/fail-atomic-replace" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/restore-local-update.sh" \
+    --automatic \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    > "$fixture_root/failed-atomic-replacement.log" 2>&1
+atomic_replacement_status=$?
+set -e
+
+[[ "$atomic_replacement_status" -ne 0 ]]
+[[ -d "$installed_bundle" ]]
+[[ "$(< "$installed_bundle/Contents/version")" == "candidate" ]]
+[[ "$(< "$launch_log")" == "$installed_bundle" ]]
 
 : > "$launch_log"
 set +e

@@ -44,20 +44,32 @@ enum LocalUpdateCredentialRecoveryCommand {
     }
 }
 
-struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, ForkUpdateCredentialRestoring {
-    private struct Record: Codable {
-        let account: String
-        let data: Data
-        let accessibility: String?
-    }
+struct LocalUpdateCredentialRecord: Codable, Equatable {
+    let account: String
+    let data: Data
+    let accessibility: String?
+}
 
+protocol LocalUpdateCredentialPersisting {
+    func readRecords(service: String) throws -> [LocalUpdateCredentialRecord]
+    func read(account: String, service: String) throws -> Data
+    func write(_ data: Data, account: String, service: String, accessibility: String?) throws
+    func delete(account: String, service: String) throws
+}
+
+struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, ForkUpdateCredentialRestoring {
     private static let credentialService = "com.prakashjoshipax.VoiceInk.Local"
     private static let snapshotService = "com.prakashjoshipax.VoiceInk.Local.UpdaterRecovery"
     private static let snapshotAccountPrefix = "credentials."
+    private let persistence: any LocalUpdateCredentialPersisting
+
+    init(persistence: any LocalUpdateCredentialPersisting = SecurityLocalUpdateCredentialPersistence()) {
+        self.persistence = persistence
+    }
 
     func createSnapshot(generationIdentifier: String) throws {
-        let records = try readRecords(service: Self.credentialService)
-        try write(
+        let records = try persistence.readRecords(service: Self.credentialService)
+        try persistence.write(
             PropertyListEncoder().encode(records),
             account: snapshotAccount(generationIdentifier),
             service: Self.snapshotService,
@@ -66,24 +78,19 @@ struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, For
     }
 
     func deleteSnapshot(generationIdentifier: String) throws {
-        let status = SecItemDelete(
-            query(
-                account: snapshotAccount(generationIdentifier),
-                service: Self.snapshotService
-            ) as CFDictionary
-        )
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw error(operation: "delete an obsolete updater credential snapshot", status: status)
-        }
-    }
-
-    func restoreSnapshot(generationIdentifier: String) throws {
-        let snapshot = try read(
+        try persistence.delete(
             account: snapshotAccount(generationIdentifier),
             service: Self.snapshotService
         )
-        let records = try PropertyListDecoder().decode([Record].self, from: snapshot)
-        let rejectedRecords = try readRecords(service: Self.credentialService)
+    }
+
+    func restoreSnapshot(generationIdentifier: String) throws {
+        let snapshot = try persistence.read(
+            account: snapshotAccount(generationIdentifier),
+            service: Self.snapshotService
+        )
+        let records = try PropertyListDecoder().decode([LocalUpdateCredentialRecord].self, from: snapshot)
+        let rejectedRecords = try persistence.readRecords(service: Self.credentialService)
 
         do {
             try replaceCredentials(with: records)
@@ -103,26 +110,26 @@ struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, For
         Self.snapshotAccountPrefix + generationIdentifier.lowercased()
     }
 
-    private func replaceCredentials(with records: [Record]) throws {
+    private func replaceCredentials(with records: [LocalUpdateCredentialRecord]) throws {
         let restoredAccounts = Set(records.map(\.account))
 
         for record in records {
-            try write(
+            try persistence.write(
                 record.data,
                 account: record.account,
                 service: Self.credentialService,
                 accessibility: record.accessibility
             )
         }
-        for current in try readRecords(service: Self.credentialService) where !restoredAccounts.contains(current.account) {
-            let status = SecItemDelete(query(account: current.account, service: Self.credentialService) as CFDictionary)
-            guard status == errSecSuccess || status == errSecItemNotFound else {
-                throw error(operation: "remove credentials added by the rejected update", status: status)
-            }
+        for current in try persistence.readRecords(service: Self.credentialService)
+            where !restoredAccounts.contains(current.account) {
+            try persistence.delete(account: current.account, service: Self.credentialService)
         }
     }
+}
 
-    private func readRecords(service: String) throws -> [Record] {
+struct SecurityLocalUpdateCredentialPersistence: LocalUpdateCredentialPersisting {
+    func readRecords(service: String) throws -> [LocalUpdateCredentialRecord] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -146,7 +153,7 @@ struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, For
             else {
                 throw ForkUpdateError(message: "VoiceInk could not decode its credential snapshot.")
             }
-            return Record(
+            return LocalUpdateCredentialRecord(
                 account: account,
                 data: data,
                 accessibility: item[kSecAttrAccessible as String] as? String
@@ -154,7 +161,7 @@ struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, For
         }
     }
 
-    private func read(account: String, service: String) throws -> Data {
+    func read(account: String, service: String) throws -> Data {
         var query = query(account: account, service: service)
         query[kSecReturnData as String] = kCFBooleanTrue
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -167,7 +174,7 @@ struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, For
         return data
     }
 
-    private func write(
+    func write(
         _ data: Data,
         account: String,
         service: String,
@@ -190,6 +197,13 @@ struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, For
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
             throw error(operation: "store the credential snapshot", status: addStatus)
+        }
+    }
+
+    func delete(account: String, service: String) throws {
+        let status = SecItemDelete(query(account: account, service: service) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw error(operation: "delete a credential recovery item", status: status)
         }
     }
 
@@ -224,8 +238,15 @@ struct LocalUpdateRecoveryReconciler {
         recoveryRootURL: URL? = nil
     ) throws {
         let root = recoveryRootURL ?? defaultRecoveryRootURL()
+        let preparing = URL(fileURLWithPath: root.path + ".preparing", isDirectory: true)
         let pending = URL(fileURLWithPath: root.path + ".pending", isDirectory: true)
         let previous = URL(fileURLWithPath: root.path + ".previous", isDirectory: true)
+        // A preparing directory is never Keychain-addressable: it is renamed to
+        // pending before the credential snapshot is created. It is therefore
+        // always safe to discard after an interrupted intent write.
+        if fileManager.fileExists(atPath: preparing.path) {
+            try fileManager.removeItem(at: preparing)
+        }
         guard fileManager.fileExists(atPath: root.path)
                 || fileManager.fileExists(atPath: pending.path)
                 || fileManager.fileExists(atPath: previous.path)
@@ -375,8 +396,8 @@ struct LocalUpdateRestoreResumer {
         process.standardOutput = output
         process.standardError = output
         try process.run()
-        process.waitUntilExit()
         let outputData = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
         guard process.terminationStatus == 0 else {
             let detail = String(data: outputData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)

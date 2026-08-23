@@ -162,6 +162,54 @@ struct UpdaterViewModelTests {
         )
         #expect(intent.installInProgress == true)
         #expect(intent.credentialGeneration == credentialStore.createdGenerations[0])
+        #expect(!FileManager.default.fileExists(atPath: temporaryDirectory.appendingPathComponent("Recovery.preparing").path))
+    }
+
+    @Test
+    func restartRemovesTheIntentWhenCredentialSnapshotCreationFails() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let credentialStore = FailingForkUpdateCredentialStore()
+        let fixture = try makeRestartTransactionFixture(
+            at: temporaryDirectory,
+            credentialStore: credentialStore,
+            installationRunner: ForkUpdateInstallationRunnerStub(recorder: ForkUpdateRestartRecorder())
+        )
+
+        do {
+            _ = try await fixture.transaction.requestRestart(for: fixture.candidate)
+            Issue.record("Expected credential snapshot creation to fail")
+        } catch {
+            #expect(error.localizedDescription == "Injected credential snapshot failure.")
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: fixture.pendingRecovery.path))
+    }
+
+    @Test
+    func installerFailureIsNotMaskedWhenTheHelperAlreadyRemovedTheIntent() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let credentialStore = ForkUpdateCredentialRestorerStub()
+        let fixture = try makeRestartTransactionFixture(
+            at: temporaryDirectory,
+            credentialStore: credentialStore,
+            installationRunner: PrecleaningFailureInstallationRunner()
+        )
+
+        do {
+            _ = try await fixture.transaction.requestRestart(for: fixture.candidate)
+            Issue.record("Expected installation to fail")
+        } catch {
+            #expect(error.localizedDescription == "Injected installer failure.")
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: fixture.pendingRecovery.path))
+        #expect(credentialStore.deletedGenerations.count == 1)
     }
 
     @Test
@@ -190,6 +238,64 @@ struct UpdaterViewModelTests {
 
         #expect(handled)
         #expect(credentialStore.createdGenerations == [generation.lowercased()])
+    }
+
+    @Test
+    func credentialRestoreCompensatesAPartialKeychainReplacement() throws {
+        let rejectedRecord = LocalUpdateCredentialRecord(
+            account: "candidate",
+            data: Data("candidate-token".utf8),
+            accessibility: nil
+        )
+        let restoredRecords = [
+            LocalUpdateCredentialRecord(account: "previous-a", data: Data("a".utf8), accessibility: nil),
+            LocalUpdateCredentialRecord(account: "previous-b", data: Data("b".utf8), accessibility: nil),
+        ]
+        let persistence = LocalUpdateCredentialPersistenceStub(
+            currentRecords: [rejectedRecord],
+            snapshotRecords: restoredRecords,
+            remainingWriteFailures: ["previous-b": 1]
+        )
+
+        var restorationFailed = false
+        do {
+            try LocalUpdateCredentialSnapshotStore(persistence: persistence)
+                .restoreSnapshot(generationIdentifier: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        } catch {
+            restorationFailed = true
+        }
+
+        #expect(restorationFailed)
+        #expect(persistence.currentRecords == [rejectedRecord])
+    }
+
+    @Test
+    func credentialRestoreReportsWhenKeychainCompensationAlsoFails() throws {
+        let rejectedRecord = LocalUpdateCredentialRecord(
+            account: "candidate",
+            data: Data("candidate-token".utf8),
+            accessibility: nil
+        )
+        let restoredRecords = [
+            LocalUpdateCredentialRecord(account: "previous-a", data: Data("a".utf8), accessibility: nil),
+            LocalUpdateCredentialRecord(account: "previous-b", data: Data("b".utf8), accessibility: nil),
+        ]
+        let persistence = LocalUpdateCredentialPersistenceStub(
+            currentRecords: [rejectedRecord],
+            snapshotRecords: restoredRecords,
+            remainingWriteFailures: ["previous-b": 1, "candidate": 1]
+        )
+
+        do {
+            try LocalUpdateCredentialSnapshotStore(persistence: persistence)
+                .restoreSnapshot(generationIdentifier: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            Issue.record("Expected credential restoration to fail")
+        } catch {
+            #expect(
+                error.localizedDescription
+                    == "VoiceInk could not restore credentials or compensate the partial Keychain update."
+            )
+        }
     }
 
     @Test
@@ -292,6 +398,151 @@ struct UpdaterViewModelTests {
 
         #expect(!FileManager.default.fileExists(atPath: pendingRecovery.path))
         #expect(credentialStore.deletedGenerations == [generation])
+    }
+
+    @Test
+    func launchDiscardsAnInterruptedIntentPreparationWithoutReadingBundleState() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let recoveryRoot = temporaryDirectory.appendingPathComponent("Recovery", isDirectory: true)
+        let preparingRecovery = URL(fileURLWithPath: recoveryRoot.path + ".preparing", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        try FileManager.default.createDirectory(at: preparingRecovery, withIntermediateDirectories: true)
+        try Data("partial".utf8).write(to: preparingRecovery.appendingPathComponent("recovery.plist"))
+
+        try LocalUpdateRecoveryReconciler().reconcile(
+            installedBundleURL: temporaryDirectory.appendingPathComponent("Missing.app"),
+            recoveryRootURL: recoveryRoot
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: preparingRecovery.path))
+    }
+
+    @Test
+    func launchRejectsMalformedRecoveryMetadata() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let installedBundle = temporaryDirectory.appendingPathComponent("VoiceInk.app", isDirectory: true)
+        let pendingRecovery = temporaryDirectory.appendingPathComponent("Recovery.pending", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        try FileManager.default.createDirectory(at: pendingRecovery, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: installedBundle.appendingPathComponent("Contents", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try PropertyListSerialization.data(
+            fromPropertyList: [
+                SourceProvenance.forkCommitInfoKey: "1111111111111111111111111111111111111111",
+            ],
+            format: .xml,
+            options: 0
+        ).write(to: installedBundle.appendingPathComponent("Contents/Info.plist"))
+
+        do {
+            try LocalUpdateRecoveryReconciler().reconcile(
+                installedBundleURL: installedBundle,
+                recoveryRootURL: temporaryDirectory.appendingPathComponent("Recovery")
+            )
+            Issue.record("Expected malformed recovery metadata to stop launch")
+        } catch {
+            #expect(error.localizedDescription.contains("without valid metadata"))
+        }
+    }
+
+    @Test
+    func launchRecoversPreviousWhenPublicationMovedTheCurrentGenerationAside() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let installedBundle = temporaryDirectory.appendingPathComponent("VoiceInk.app", isDirectory: true)
+        let recoveryRoot = temporaryDirectory.appendingPathComponent("Recovery", isDirectory: true)
+        let previousRecovery = URL(fileURLWithPath: recoveryRoot.path + ".previous", isDirectory: true)
+        let installedCommit = "1111111111111111111111111111111111111111"
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        try FileManager.default.createDirectory(
+            at: installedBundle.appendingPathComponent("Contents", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try PropertyListSerialization.data(
+            fromPropertyList: [SourceProvenance.forkCommitInfoKey: installedCommit],
+            format: .xml,
+            options: 0
+        ).write(to: installedBundle.appendingPathComponent("Contents/Info.plist"))
+        try writeRecoveryState(
+            LocalUpdateRecoveryState(
+                previousForkCommit: "2222222222222222222222222222222222222222",
+                candidateForkCommit: "3333333333333333333333333333333333333333",
+                credentialGeneration: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                suppressedForkCommit: nil,
+                installInProgress: false,
+                restoreInProgress: false
+            ),
+            marker: "superseded",
+            at: recoveryRoot
+        )
+        try writeRecoveryState(
+            LocalUpdateRecoveryState(
+                previousForkCommit: "4444444444444444444444444444444444444444",
+                candidateForkCommit: installedCommit,
+                credentialGeneration: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                suppressedForkCommit: nil,
+                installInProgress: false,
+                restoreInProgress: false
+            ),
+            marker: "previous",
+            at: previousRecovery
+        )
+        let credentialStore = ForkUpdateCredentialRestorerStub()
+
+        try LocalUpdateRecoveryReconciler(credentialStore: credentialStore).reconcile(
+            installedBundleURL: installedBundle,
+            recoveryRootURL: recoveryRoot
+        )
+
+        #expect(try String(contentsOf: recoveryRoot.appendingPathComponent("marker"), encoding: .utf8) == "previous")
+        #expect(!FileManager.default.fileExists(atPath: previousRecovery.path))
+        #expect(credentialStore.deletedGenerations == ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"])
+    }
+
+    @Test
+    func launchRejectsRecoveryGenerationsThatDoNotMatchTheInstalledBundle() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let installedBundle = temporaryDirectory.appendingPathComponent("VoiceInk.app", isDirectory: true)
+        let recoveryRoot = temporaryDirectory.appendingPathComponent("Recovery", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        try FileManager.default.createDirectory(
+            at: installedBundle.appendingPathComponent("Contents", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try PropertyListSerialization.data(
+            fromPropertyList: [
+                SourceProvenance.forkCommitInfoKey: "1111111111111111111111111111111111111111",
+            ],
+            format: .xml,
+            options: 0
+        ).write(to: installedBundle.appendingPathComponent("Contents/Info.plist"))
+        try writeRecoveryState(
+            LocalUpdateRecoveryState(
+                previousForkCommit: "2222222222222222222222222222222222222222",
+                candidateForkCommit: "3333333333333333333333333333333333333333",
+                credentialGeneration: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                suppressedForkCommit: nil,
+                installInProgress: false,
+                restoreInProgress: false
+            ),
+            marker: "mismatch",
+            at: recoveryRoot
+        )
+
+        do {
+            try LocalUpdateRecoveryReconciler().reconcile(
+                installedBundleURL: installedBundle,
+                recoveryRootURL: recoveryRoot
+            )
+            Issue.record("Expected mismatched recovery generations to stop launch")
+        } catch {
+            #expect(error.localizedDescription.contains("does not match the installed app"))
+        }
     }
 
     @Test
@@ -511,6 +762,12 @@ struct UpdaterViewModelTests {
             processIdentifier: 4_321
         )
 
+        #expect(
+            LocalUpdateHealthReporter.isRequested(
+                arguments: ["VoiceInk", "--voiceink-update-health-path", healthURL.path]
+            )
+        )
+        #expect(!LocalUpdateHealthReporter.isRequested(arguments: ["VoiceInk"]))
         let report = try PropertyListDecoder().decode(
             LocalUpdateHealthReport.self,
             from: Data(contentsOf: healthURL)
@@ -669,6 +926,44 @@ private final class ForkUpdateCredentialRestorerStub:
     }
 }
 
+private final class LocalUpdateCredentialPersistenceStub: LocalUpdateCredentialPersisting {
+    private(set) var currentRecords: [LocalUpdateCredentialRecord]
+    private let snapshotData: Data
+    private var remainingWriteFailures: [String: Int]
+
+    init(
+        currentRecords: [LocalUpdateCredentialRecord],
+        snapshotRecords: [LocalUpdateCredentialRecord],
+        remainingWriteFailures: [String: Int]
+    ) {
+        self.currentRecords = currentRecords
+        snapshotData = try! PropertyListEncoder().encode(snapshotRecords)
+        self.remainingWriteFailures = remainingWriteFailures
+    }
+
+    func readRecords(service: String) throws -> [LocalUpdateCredentialRecord] {
+        currentRecords
+    }
+
+    func read(account: String, service: String) throws -> Data {
+        snapshotData
+    }
+
+    func write(_ data: Data, account: String, service: String, accessibility: String?) throws {
+        if let remaining = remainingWriteFailures[account], remaining > 0 {
+            remainingWriteFailures[account] = remaining - 1
+            throw ForkUpdateError(message: "Injected Keychain write failure for \(account).")
+        }
+        let record = LocalUpdateCredentialRecord(account: account, data: data, accessibility: accessibility)
+        currentRecords.removeAll { $0.account == account }
+        currentRecords.append(record)
+    }
+
+    func delete(account: String, service: String) throws {
+        currentRecords.removeAll { $0.account == account }
+    }
+}
+
 private func writeRecoveryState(
     _ state: LocalUpdateRecoveryState,
     marker: String,
@@ -689,6 +984,76 @@ private struct ForkUpdateInstallationRunnerStub: ForkUpdateInstalling {
         recorder.events.append(.installerStarted)
         return .completed
     }
+}
+
+private final class FailingForkUpdateCredentialStore:
+    ForkUpdateCredentialSnapshotting,
+    ForkUpdateCredentialRestoring
+{
+    func createSnapshot(generationIdentifier: String) throws {
+        throw ForkUpdateError(message: "Injected credential snapshot failure.")
+    }
+
+    func deleteSnapshot(generationIdentifier: String) throws {}
+    func restoreSnapshot(generationIdentifier: String) throws {}
+}
+
+private struct PrecleaningFailureInstallationRunner: ForkUpdateInstalling {
+    func install(_ request: ForkUpdateInstallationRequest) async throws -> ForkUpdateInstallationOutcome {
+        let pendingRecovery = URL(
+            fileURLWithPath: request.backupBundleURL.deletingLastPathComponent().path + ".pending",
+            isDirectory: true
+        )
+        try FileManager.default.removeItem(at: pendingRecovery)
+        throw ForkUpdateError(message: "Injected installer failure.")
+    }
+}
+
+@MainActor
+private func makeRestartTransactionFixture(
+    at temporaryDirectory: URL,
+    credentialStore: any ForkUpdateCredentialSnapshotting,
+    installationRunner: any ForkUpdateInstalling
+) throws -> (
+    transaction: ForkUpdateTransaction,
+    candidate: StagedForkCandidate,
+    pendingRecovery: URL
+) {
+    let manifestURL = temporaryDirectory.appendingPathComponent("staged-candidate.plist")
+    let installedBundle = temporaryDirectory.appendingPathComponent("Installed.app", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: installedBundle.appendingPathComponent("Contents", isDirectory: true),
+        withIntermediateDirectories: true
+    )
+    try PropertyListSerialization.data(
+        fromPropertyList: [
+            SourceProvenance.forkCommitInfoKey: "3333333333333333333333333333333333333333",
+        ],
+        format: .xml,
+        options: 0
+    ).write(to: installedBundle.appendingPathComponent("Contents/Info.plist"))
+    let candidate = StagedForkCandidate(
+        forkCommit: "1111111111111111111111111111111111111111",
+        upstreamCommit: "2222222222222222222222222222222222222222",
+        bundleURL: temporaryDirectory.appendingPathComponent("VoiceInk.app"),
+        preparedAt: Date(timeIntervalSince1970: 1_787_400_400)
+    )
+    try PropertyListEncoder().encode(candidate).write(to: manifestURL, options: .atomic)
+    let backupBundle = temporaryDirectory.appendingPathComponent("Recovery/VoiceInk.app")
+    let transaction = ForkUpdateTransaction(
+        scriptURL: temporaryDirectory.appendingPathComponent("prepare-local-update.sh"),
+        manifestURL: manifestURL,
+        installationScriptURL: temporaryDirectory.appendingPathComponent("install-local-update.sh"),
+        targetBundleURL: installedBundle,
+        backupBundleURL: backupBundle,
+        credentialSnapshotter: credentialStore,
+        installationRunner: installationRunner
+    )
+    return (
+        transaction,
+        candidate,
+        URL(fileURLWithPath: backupBundle.deletingLastPathComponent().path + ".pending", isDirectory: true)
+    )
 }
 
 private final class ForkUpdateRestoreRunnerStub: ForkUpdateRestoring, @unchecked Sendable {

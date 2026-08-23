@@ -40,6 +40,7 @@ parent_exit_timeout="${VOICEINK_UPDATE_PARENT_EXIT_TIMEOUT_SECONDS:-30}"
 relauncher="${VOICEINK_UPDATE_RELAUNCHER:-}"
 preferences_restorer="${VOICEINK_UPDATE_PREFERENCES_RESTORER:-}"
 credential_restorer="${VOICEINK_UPDATE_CREDENTIAL_RESTORER:-}"
+atomic_replacer="${VOICEINK_UPDATE_RESTORE_ATOMIC_REPLACER:-}"
 
 [[ -d "$target_bundle" ]] || fail "The installed VoiceInk bundle is missing."
 [[ -d "$backup_bundle" ]] || fail "The previous VoiceInk bundle is missing."
@@ -72,9 +73,10 @@ candidate_sha="$recorded_candidate"
 
 umask 077
 transaction_root="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-restore.XXXXXX")"
-restored_bundle="$transaction_root/VoiceInk.app"
+restored_bundle="$(dirname "$target_bundle")/.VoiceInk.restore.$$"
 restored_application_support="$transaction_root/Application Support"
 rejected_bundle="$transaction_root/rejected-VoiceInk.app"
+rejected_bundle_sibling="$(dirname "$target_bundle")/.VoiceInk.rollback.$$"
 rejected_application_support="$transaction_root/rejected-Application-Support"
 rejected_preferences="$transaction_root/rejected-Preferences.plist"
 rejected_recovery_state="$transaction_root/rejected-recovery.plist"
@@ -85,6 +87,26 @@ bundle_replacement_started=false
 recovery_state_mutation_started=false
 credential_replacement_started=false
 restore_complete=false
+
+replace_bundle_atomically() {
+    if [[ -n "$atomic_replacer" ]]; then
+        "$atomic_replacer" "$target_bundle" "$restored_bundle" "$rejected_bundle_sibling"
+        return
+    fi
+    /usr/bin/swift - "$target_bundle" "$restored_bundle" "$(basename "$rejected_bundle_sibling")" <<'SWIFT'
+import Foundation
+
+let arguments = CommandLine.arguments
+let target = URL(fileURLWithPath: arguments[1])
+let replacement = URL(fileURLWithPath: arguments[2])
+_ = try FileManager.default.replaceItemAt(
+    target,
+    withItemAt: replacement,
+    backupItemName: arguments[3],
+    options: [.withoutDeletingBackupItem]
+)
+SWIFT
+}
 
 finish_restore() {
     result=$?
@@ -131,7 +153,7 @@ finish_restore() {
         fi
     fi
 
-    /bin/rm -rf "$transaction_root"
+    /bin/rm -rf "$transaction_root" "$restored_bundle" "$rejected_bundle_sibling"
     exit "$result"
 }
 trap finish_restore EXIT
@@ -203,9 +225,9 @@ else
     /usr/bin/defaults import com.prakashjoshipax.VoiceInk "$recovery_root/Preferences.plist" >/dev/null
 fi
 
-mv "$target_bundle" "$rejected_bundle"
+replace_bundle_atomically
 bundle_replacement_started=true
-mv "$restored_bundle" "$target_bundle"
+mv "$rejected_bundle_sibling" "$rejected_bundle"
 
 /bin/cp "$recovery_state" "$rejected_recovery_state"
 recovery_state_mutation_started=true

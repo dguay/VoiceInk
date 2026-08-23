@@ -14,7 +14,8 @@ enum VoiceInkMain {
                 if try LocalUpdateCredentialRecoveryCommand.runIfRequested() {
                     Darwin.exit(EXIT_SUCCESS)
                 }
-                if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+                if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
+                   !LocalUpdateHealthReporter.isRequested() {
                     let recoveryRoot = FileManager.default.urls(
                         for: .applicationSupportDirectory,
                         in: .userDomainMask

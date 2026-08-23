@@ -391,7 +391,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             try credentialSnapshotter.createSnapshot(generationIdentifier: credentialGeneration)
         } catch {
             do {
-                try FileManager.default.removeItem(at: recoveryIntentURL)
+                try removeRecoveryIntentIfPresent(at: recoveryIntentURL)
             } catch {
                 throw ForkUpdateError(
                     message: "VoiceInk could not create the credential snapshot or remove its recovery intent."
@@ -415,7 +415,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         } catch {
             do {
                 try credentialSnapshotter.deleteSnapshot(generationIdentifier: credentialGeneration)
-                try FileManager.default.removeItem(at: recoveryIntentURL)
+                try removeRecoveryIntentIfPresent(at: recoveryIntentURL)
             } catch {
                 throw ForkUpdateError(
                     message: "VoiceInk could not install the update or remove its temporary recovery intent."
@@ -428,7 +428,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             return nil
         case .candidateStale:
             try credentialSnapshotter.deleteSnapshot(generationIdentifier: credentialGeneration)
-            try FileManager.default.removeItem(at: recoveryIntentURL)
+            try removeRecoveryIntentIfPresent(at: recoveryIntentURL)
             return try await prepare(retryingSuppressedCandidate: false)
         }
     }
@@ -484,14 +484,18 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
     ) throws -> URL {
         let recoveryRoot = backupBundleURL.deletingLastPathComponent()
         let pendingRecovery = URL(fileURLWithPath: recoveryRoot.path + ".pending", isDirectory: true)
+        let preparingRecovery = URL(fileURLWithPath: recoveryRoot.path + ".preparing", isDirectory: true)
         guard !FileManager.default.fileExists(atPath: pendingRecovery.path) else {
             throw ForkUpdateError(
                 message: "VoiceInk has an unfinished recovery transaction. Relaunch VoiceInk before retrying the update."
             )
         }
+        if FileManager.default.fileExists(atPath: preparingRecovery.path) {
+            try FileManager.default.removeItem(at: preparingRecovery)
+        }
 
         try FileManager.default.createDirectory(
-            at: pendingRecovery,
+            at: preparingRecovery,
             withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700]
         )
@@ -504,13 +508,16 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
                 installInProgress: true,
                 restoreInProgress: false
             )
-            let stateURL = pendingRecovery.appendingPathComponent("recovery.plist")
+            let stateURL = preparingRecovery.appendingPathComponent("recovery.plist")
             try PropertyListEncoder().encode(state).write(to: stateURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
+            try FileManager.default.moveItem(at: preparingRecovery, to: pendingRecovery)
             return pendingRecovery
         } catch let creationError {
             do {
-                try FileManager.default.removeItem(at: pendingRecovery)
+                if FileManager.default.fileExists(atPath: preparingRecovery.path) {
+                    try FileManager.default.removeItem(at: preparingRecovery)
+                }
             } catch {
                 throw ForkUpdateError(
                     message: "VoiceInk could not create or remove its temporary recovery intent."
@@ -518,6 +525,11 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             }
             throw creationError
         }
+    }
+
+    private func removeRecoveryIntentIfPresent(at recoveryIntentURL: URL) throws {
+        guard FileManager.default.fileExists(atPath: recoveryIntentURL.path) else { return }
+        try FileManager.default.removeItem(at: recoveryIntentURL)
     }
 }
 
