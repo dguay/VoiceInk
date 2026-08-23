@@ -25,6 +25,7 @@ fi
 recovery_root="$(dirname "$backup_bundle")"
 recovery_state="$recovery_root/recovery.plist"
 application_support="${VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH:-$HOME/Library/Application Support/com.prakashjoshipax.VoiceInk}"
+preferences_override="${VOICEINK_UPDATE_PREFERENCES_PATH:-}"
 preferences="${VOICEINK_UPDATE_PREFERENCES_PATH:-$HOME/Library/Preferences/com.prakashjoshipax.VoiceInk.plist}"
 parent_exit_timeout="${VOICEINK_UPDATE_PARENT_EXIT_TIMEOUT_SECONDS:-30}"
 relauncher="${VOICEINK_UPDATE_RELAUNCHER:-}"
@@ -54,12 +55,51 @@ umask 077
 transaction_root="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-restore.XXXXXX")"
 restored_bundle="$transaction_root/VoiceInk.app"
 restored_application_support="$transaction_root/Application Support"
+rejected_bundle="$transaction_root/rejected-VoiceInk.app"
+rejected_application_support="$transaction_root/rejected-Application-Support"
+rejected_preferences="$transaction_root/rejected-Preferences.plist"
+parent_terminated=false
+application_support_replacement_started=false
+preferences_replacement_started=false
+bundle_replacement_started=false
+restore_complete=false
 
-cleanup() {
-    rm -rf "$transaction_root"
+finish_restore() {
+    result=$?
+    trap - EXIT
+    set +e
+
+    # A restore spans independent stores. If a later store fails, put every
+    # filesystem store back on the rejected candidate generation before launch.
+    if [[ "$result" -ne 0 && "$parent_terminated" == true && "$restore_complete" == false ]]; then
+        if [[ "$bundle_replacement_started" == true && -d "$rejected_bundle" ]]; then
+            /bin/rm -rf "$target_bundle"
+            mv "$rejected_bundle" "$target_bundle"
+        fi
+        if [[ "$application_support_replacement_started" == true && -d "$rejected_application_support" ]]; then
+            /bin/rm -rf "$application_support"
+            mv "$rejected_application_support" "$application_support"
+        fi
+        if [[ "$preferences_replacement_started" == true && -f "$rejected_preferences" ]]; then
+            if [[ -n "$preferences_restorer" ]]; then
+                "$preferences_restorer" "$rejected_preferences" "$preferences" >/dev/null 2>&1 || true
+            else
+                /usr/bin/defaults import com.prakashjoshipax.VoiceInk "$rejected_preferences" >/dev/null 2>&1 || true
+            fi
+        fi
+        if [[ -n "$relauncher" ]]; then
+            "$relauncher" "$target_bundle" >/dev/null 2>&1 || true
+        else
+            /usr/bin/open -n "$target_bundle" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    /bin/rm -rf "$transaction_root"
+    exit "$result"
 }
-trap cleanup EXIT
+trap finish_restore EXIT
 
+# Stage every last-known-good filesystem copy before stopping the current app.
 /usr/bin/ditto "$backup_bundle" "$restored_bundle"
 codesign --verify --deep --strict "$restored_bundle" \
     || fail "The previous VoiceInk bundle failed signature validation."
@@ -85,25 +125,37 @@ if [[ "$automatic" == false ]]; then
     kill -0 "$parent_pid" 2>/dev/null \
         && fail "VoiceInk did not terminate before the restoration timeout."
 fi
+parent_terminated=true
+
+# Preserve the rejected generation so the EXIT trap can compensate if a later
+# store, including Keychain, cannot be restored.
+if [[ -n "$preferences_override" && -f "$preferences" ]]; then
+    /bin/cp -cp "$preferences" "$rejected_preferences" \
+        || fail "VoiceInk could not preserve the current preferences during restoration."
+elif [[ -z "$preferences_override" ]]; then
+    /usr/bin/defaults export com.prakashjoshipax.VoiceInk "$rejected_preferences" >/dev/null \
+        || fail "VoiceInk could not preserve the current preferences during restoration."
+fi
 
 application_support_parent="$(dirname "$application_support")"
 preferences_parent="$(dirname "$preferences")"
-failed_application_support="$transaction_root/rejected-Application-Support"
-failed_bundle="$transaction_root/rejected-VoiceInk.app"
 mkdir -p "$application_support_parent" "$preferences_parent"
 
 if [[ -e "$application_support" ]]; then
-    mv "$application_support" "$failed_application_support"
+    mv "$application_support" "$rejected_application_support"
 fi
+application_support_replacement_started=true
 mv "$restored_application_support" "$application_support"
 
+preferences_replacement_started=true
 if [[ -n "$preferences_restorer" ]]; then
     "$preferences_restorer" "$recovery_root/Preferences.plist" "$preferences"
 else
     /usr/bin/defaults import com.prakashjoshipax.VoiceInk "$recovery_root/Preferences.plist" >/dev/null
 fi
 
-mv "$target_bundle" "$failed_bundle"
+mv "$target_bundle" "$rejected_bundle"
+bundle_replacement_started=true
 mv "$restored_bundle" "$target_bundle"
 
 if [[ -n "$credential_restorer" ]]; then
@@ -119,6 +171,8 @@ if /usr/bin/plutil -extract suppressedForkCommit raw "$recovery_state" >/dev/nul
 else
     /usr/bin/plutil -insert suppressedForkCommit -string "$candidate_sha" "$recovery_state"
 fi
+
+restore_complete=true
 
 if [[ -n "$relauncher" ]]; then
     "$relauncher" "$target_bundle"

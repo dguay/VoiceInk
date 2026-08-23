@@ -431,7 +431,11 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
 }
 
 private struct ForkUpdateCommandRunnerStub: ForkUpdateCommandRunning {
-    func run(scriptURL: URL, manifestURL: URL) async throws {}
+    func run(
+        scriptURL: URL,
+        manifestURL: URL,
+        retrySuppressedCandidate: Bool
+    ) async throws {}
 }
 
 private final class ForkUpdateRestartRecorder: @unchecked Sendable {

@@ -83,14 +83,12 @@ retired_bundle="$target_parent/.VoiceInk.retired.$$"
 recovery_temporary="$recovery_root.pending.$$"
 previous_recovery="$recovery_root.replaced.$$"
 health_path="${VOICEINK_UPDATE_HEALTH_PATH:-$stage_root/install-health.plist}"
-failed_root="$stage_root/failed/$approved_sha-$$"
 launcher="${VOICEINK_UPDATE_LAUNCHER:-}"
 relauncher="${VOICEINK_UPDATE_RELAUNCHER:-}"
 atomic_replacer="${VOICEINK_UPDATE_ATOMIC_REPLACER:-}"
 health_timeout="${VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS:-30}"
 stability_seconds="${VOICEINK_UPDATE_STABILITY_SECONDS:-10}"
 parent_exit_timeout="${VOICEINK_UPDATE_PARENT_EXIT_TIMEOUT_SECONDS:-30}"
-replacement_started=false
 parent_terminated=false
 launched_pid=""
 recovery_committed=false
@@ -155,7 +153,10 @@ finish_transaction() {
                 kill -KILL "$launched_pid" >/dev/null 2>&1 || true
             fi
         fi
-        /bin/bash "$restoration_script" --automatic "$target_bundle" "$backup_bundle" || true
+        if ! /bin/bash "$restoration_script" --automatic "$target_bundle" "$backup_bundle"; then
+            printf 'Error: Automatic rollback could not restore a consistent local state.\n' >&2
+            result=2
+        fi
     elif [[ "$result" -ne 0 && "$parent_terminated" == true ]]; then
         # A failure between termination and replacement leaves the old bundle in
         # place but VoiceInk closed, so recovery still has to relaunch it.
@@ -168,6 +169,8 @@ finish_transaction() {
 }
 trap finish_transaction EXIT
 
+# Reserve enough logical capacity for the app and mutable state even though APFS
+# clones initially share blocks. Later writes must not exhaust the recovery volume.
 required_disk_kib=0
 for snapshot_source in "$application_support" "$preferences" "$target_bundle" "$staged_bundle"; do
     if [[ -e "$snapshot_source" ]]; then
@@ -208,6 +211,7 @@ if kill -0 "$parent_pid" 2>/dev/null; then
 fi
 parent_terminated=true
 
+# VoiceInk is now stopped, so these two clones describe one consistent generation.
 if [[ -n "${VOICEINK_UPDATE_STATE_SNAPSHOTTER:-}" ]]; then
     "$VOICEINK_UPDATE_STATE_SNAPSHOTTER" \
         "$application_support" \
@@ -232,6 +236,8 @@ previous_fork_sha="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bu
 /usr/bin/plutil -insert previousForkCommit -string "$previous_fork_sha" "$recovery_temporary/recovery.plist"
 /usr/bin/plutil -insert candidateForkCommit -string "$approved_sha" "$recovery_temporary/recovery.plist"
 
+# Publish the complete app, state, preferences, and metadata as one recovery
+# directory. The prior generation remains available until this rename succeeds.
 if [[ -d "$recovery_root" ]]; then
     mv "$recovery_root" "$previous_recovery"
 fi
@@ -239,7 +245,6 @@ mv "$recovery_temporary" "$recovery_root"
 recovery_committed=true
 /bin/rm -rf "$previous_recovery"
 
-replacement_started=true
 replace_bundle_atomically
 
 /bin/rm -f "$health_path"

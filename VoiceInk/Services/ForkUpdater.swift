@@ -49,7 +49,11 @@ protocol ForkUpdateTransacting: AnyObject {
 }
 
 protocol ForkUpdateCommandRunning {
-    func run(scriptURL: URL, manifestURL: URL) async throws
+    func run(
+        scriptURL: URL,
+        manifestURL: URL,
+        retrySuppressedCandidate: Bool
+    ) async throws
 }
 
 enum ForkUpdateInstallationOutcome: Equatable {
@@ -93,7 +97,11 @@ struct ForkUpdateError: LocalizedError {
 }
 
 struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
-    func run(scriptURL: URL, manifestURL: URL) async throws {
+    func run(
+        scriptURL: URL,
+        manifestURL: URL,
+        retrySuppressedCandidate: Bool
+    ) async throws {
         try await Task.detached {
             let process = Process()
             let outputURL = FileManager.default.temporaryDirectory
@@ -110,7 +118,11 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
             process.standardError = output
             var environment = ProcessInfo.processInfo.environment
             environment["VOICEINK_UPDATE_MANIFEST_PATH"] = manifestURL.path
-            environment["VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE"] = "1"
+            if retrySuppressedCandidate {
+                environment["VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE"] = "1"
+            } else {
+                environment.removeValue(forKey: "VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE")
+            }
             process.environment = environment
 
             try process.run()
@@ -329,7 +341,17 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
     }
 
     func prepare() async throws -> StagedForkCandidate {
-        try await commandRunner.run(scriptURL: scriptURL, manifestURL: manifestURL)
+        // The adapter calls this only for an explicit user check, which is the
+        // issue's opt-in retry boundary for a locally suppressed candidate.
+        try await prepare(retryingSuppressedCandidate: true)
+    }
+
+    private func prepare(retryingSuppressedCandidate: Bool) async throws -> StagedForkCandidate {
+        try await commandRunner.run(
+            scriptURL: scriptURL,
+            manifestURL: manifestURL,
+            retrySuppressedCandidate: retryingSuppressedCandidate
+        )
         guard let candidate = try loadStagedCandidate() else {
             throw ForkUpdateError(
                 message: "The local updater finished without staging a candidate."
@@ -340,7 +362,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
 
     func requestRestart(for candidate: StagedForkCandidate) async throws -> StagedForkCandidate? {
         guard let stagedCandidate = try loadStagedCandidate() else {
-            return try await prepare()
+            return try await prepare(retryingSuppressedCandidate: false)
         }
         guard stagedCandidate == candidate else {
             return stagedCandidate
@@ -367,7 +389,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         case .completed:
             return nil
         case .candidateStale:
-            return try await prepare()
+            return try await prepare(retryingSuppressedCandidate: false)
         }
     }
 

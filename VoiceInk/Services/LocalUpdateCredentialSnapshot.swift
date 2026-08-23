@@ -47,6 +47,19 @@ struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, For
     func restoreSnapshot() throws {
         let snapshot = try read(account: Self.snapshotAccount, service: Self.snapshotService)
         let records = try PropertyListDecoder().decode([Record].self, from: snapshot)
+        let rejectedRecords = try readRecords(service: Self.credentialService)
+
+        do {
+            try replaceCredentials(with: records)
+        } catch {
+            // Keychain has no multi-item transaction. Restore the captured rejected
+            // generation if any write or deletion in the replacement fails.
+            try? replaceCredentials(with: rejectedRecords)
+            throw error
+        }
+    }
+
+    private func replaceCredentials(with records: [Record]) throws {
         let restoredAccounts = Set(records.map(\.account))
 
         for record in records {
@@ -57,20 +70,12 @@ struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, For
                 accessibility: record.accessibility
             )
         }
-
-        for current in try readRecords(service: Self.credentialService)
-        where !restoredAccounts.contains(current.account) {
+        for current in try readRecords(service: Self.credentialService) where !restoredAccounts.contains(current.account) {
             let status = SecItemDelete(query(account: current.account, service: Self.credentialService) as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else {
                 throw error(operation: "remove credentials added by the rejected update", status: status)
             }
         }
-    }
-
-    func hasSnapshot() -> Bool {
-        var query = query(account: Self.snapshotAccount, service: Self.snapshotService)
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
     }
 
     private func readRecords(service: String) throws -> [Record] {

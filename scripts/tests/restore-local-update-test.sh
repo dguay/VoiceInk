@@ -65,6 +65,12 @@ set -euo pipefail
 printf 'restored\n' > "$VOICEINK_TEST_CREDENTIAL_LOG"
 EOF
 
+cat > "$fake_bin/fail-credentials" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+EOF
+
 cat > "$fake_bin/relaunch-voiceink" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -75,6 +81,7 @@ chmod +x \
     "$fake_bin/codesign" \
     "$fake_bin/restore-preferences" \
     "$fake_bin/restore-credentials" \
+    "$fake_bin/fail-credentials" \
     "$fake_bin/relaunch-voiceink"
 
 sleep 30 &
@@ -107,5 +114,40 @@ parent_pid=""
 [[ "$(/usr/bin/plutil -extract suppressedForkCommit raw "$recovery_root/recovery.plist")" == "$candidate_sha" ]]
 [[ -d "$backup_bundle" ]]
 [[ -d "$recovery_root/Application Support" ]]
+
+printf 'candidate\n' > "$installed_bundle/Contents/version"
+/usr/bin/plutil -replace VoiceInkForkCommit -string "$candidate_sha" "$installed_bundle/Contents/Info.plist"
+printf 'candidate-data\n' > "$application_support/state"
+printf 'candidate-preferences\n' > "$preferences"
+: > "$launch_log"
+sleep 30 &
+parent_pid=$!
+
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+    VOICEINK_UPDATE_PREFERENCES_RESTORER="$fake_bin/restore-preferences" \
+    VOICEINK_UPDATE_CREDENTIAL_RESTORER="$fake_bin/fail-credentials" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/restore-local-update.sh" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/failed-restore.log" 2>&1
+failed_restore_status=$?
+set -e
+
+[[ "$failed_restore_status" -ne 0 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'restore-local-update-test: VoiceInk remained running during failed restore\n' >&2
+    exit 1
+fi
+parent_pid=""
+[[ "$(< "$installed_bundle/Contents/version")" == "candidate" ]]
+[[ "$(< "$application_support/state")" == "candidate-data" ]]
+[[ "$(< "$preferences")" == "candidate-preferences" ]]
+[[ "$(< "$launch_log")" == "$installed_bundle" ]]
 
 printf 'restore-local-update-test: PASS\n'
