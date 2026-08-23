@@ -10,6 +10,10 @@ struct LocalUpdateHealthReport: Codable, Equatable {
 enum LocalUpdateHealthReporter {
     private static let healthPathArgument = "--voiceink-update-health-path"
 
+    static func isRequested(arguments: [String] = CommandLine.arguments) -> Bool {
+        arguments.firstIndex(of: healthPathArgument).map { arguments.indices.contains($0 + 1) } == true
+    }
+
     static func reportIfRequested(
         arguments: [String] = CommandLine.arguments,
         bundle: Bundle = .main,

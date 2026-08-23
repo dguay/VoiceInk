@@ -270,6 +270,13 @@ struct SettingsView: View {
                             || updaterViewModel.state.isPreparingUpdate
                     )
 
+                    if updaterViewModel.state.canRestorePreviousVersion {
+                        Button("Restore Previous Version…") {
+                            updaterViewModel.showRestorePreviousVersion()
+                        }
+                        .disabled(updaterViewModel.state.isPreparingUpdate)
+                    }
+
                     Button("Reset Onboarding") {
                         showResetOnboardingAlert = true
                     }

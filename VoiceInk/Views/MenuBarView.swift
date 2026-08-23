@@ -170,6 +170,14 @@ struct MenuBarView: View {
                 }
             }
 
+            if updaterViewModel.state.canRestorePreviousVersion {
+                Button("Restore Previous Version…") {
+                    showMainWindow()
+                    updaterViewModel.showRestorePreviousVersion()
+                }
+                .disabled(updaterViewModel.state.isPreparingUpdate)
+            }
+
             Button("Quit VoiceInk") {
                 NSApplication.shared.terminate(nil)
             }

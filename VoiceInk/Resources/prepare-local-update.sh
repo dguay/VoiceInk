@@ -44,6 +44,21 @@ upstream_commit="$(
     git -C "$repository_path" merge-base "$fork_commit" refs/remotes/upstream/main
 )" || fail "The fetched fork does not share history with upstream/main."
 
+recovery_state="${VOICEINK_UPDATE_RECOVERY_STATE_PATH:-$HOME/Library/Application Support/com.prakashjoshipax.VoiceInk.UpdaterRecovery/recovery.plist}"
+if [[ -f "$recovery_state" ]]; then
+    suppressed_fork_commit="$(/usr/bin/plutil -extract suppressedForkCommit raw "$recovery_state" 2>/dev/null || true)"
+    if [[ -n "$suppressed_fork_commit" ]]; then
+        if [[ "$suppressed_fork_commit" == "$fork_commit" \
+            && "${VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE:-0}" != 1 \
+            && "${VOICEINK_UPDATE_CLEAR_SUPPRESSION:-0}" != 1 ]]
+        then
+            fail "Candidate $fork_commit is suppressed on this Mac after rollback. Retry it explicitly or wait for the fork to change."
+        fi
+        /usr/bin/plutil -remove suppressedForkCommit "$recovery_state" \
+            || fail "VoiceInk could not clear the obsolete candidate suppression."
+    fi
+fi
+
 git -C "$repository_path" worktree add --detach "$candidate_worktree" "$fork_commit"
 worktree_added=true
 

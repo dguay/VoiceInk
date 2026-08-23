@@ -1,11 +1,54 @@
 import AppIntents
 import AppKit
+import Darwin
 import FluidAudio
 import OSLog
 import SwiftData
 import SwiftUI
 
 @main
+enum VoiceInkMain {
+    static func main() {
+        #if LOCAL_BUILD
+            do {
+                if try LocalUpdateCredentialRecoveryCommand.runIfRequested() {
+                    Darwin.exit(EXIT_SUCCESS)
+                }
+                if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
+                   !LocalUpdateHealthReporter.isRequested() {
+                    let recoveryRoot = FileManager.default.urls(
+                        for: .applicationSupportDirectory,
+                        in: .userDomainMask
+                    )[0].appendingPathComponent(
+                        "com.prakashjoshipax.VoiceInk.UpdaterRecovery",
+                        isDirectory: true
+                    )
+                    let resumer = LocalUpdateRestoreResumer()
+                    let resumed = try resumer.resumeIfNeeded(recoveryRootURL: recoveryRoot)
+                    try LocalUpdateRecoveryReconciler().reconcile(recoveryRootURL: recoveryRoot)
+                    if resumed {
+                        let relaunch = Process()
+                        relaunch.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                        relaunch.arguments = ["-n", Bundle.main.bundleURL.path]
+                        try relaunch.run()
+                        relaunch.waitUntilExit()
+                        guard relaunch.terminationStatus == 0 else {
+                            throw ForkUpdateError(message: "VoiceInk could not relaunch after resuming rollback.")
+                        }
+                        Darwin.exit(EXIT_SUCCESS)
+                    }
+                }
+            } catch {
+                let message = "VoiceInk could not prepare its updater recovery state: \(error.localizedDescription)\n"
+                FileHandle.standardError.write(Data(message.utf8))
+                Darwin.exit(EXIT_FAILURE)
+            }
+        #endif
+
+        VoiceInkApp.main()
+    }
+}
+
 struct VoiceInkApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     let container: ModelContainer
@@ -381,6 +424,26 @@ struct VoiceInkApp: App {
             } message: { candidate in
                 Text("VoiceInk prepared fork commit \(candidate.forkCommit.prefix(12)).")
             }
+            .alert(
+                "Restore Previous Version?",
+                isPresented: Binding(
+                    get: { updaterViewModel.state.isPresentingRestorePreviousVersion },
+                    set: { isPresented in
+                        if !isPresented {
+                            updaterViewModel.cancelRestorePreviousVersion()
+                        }
+                    }
+                )
+            ) {
+                Button("Restore Previous Version", role: .destructive) {
+                    updaterViewModel.restorePreviousVersion()
+                }
+                Button("Cancel", role: .cancel) {
+                    updaterViewModel.cancelRestorePreviousVersion()
+                }
+            } message: {
+                Text("VoiceInk will quit and restore the previous app, data, preferences, and credentials.")
+            }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: AppWindowLayout.width, height: AppWindowLayout.minimumHeight)
@@ -390,6 +453,12 @@ struct VoiceInkApp: App {
 
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesView(updaterViewModel: updaterViewModel)
+                if updaterViewModel.state.canRestorePreviousVersion {
+                    Button("Restore Previous Version…") {
+                        updaterViewModel.showRestorePreviousVersion()
+                    }
+                    .disabled(updaterViewModel.state.isPreparingUpdate)
+                }
             }
         }
 

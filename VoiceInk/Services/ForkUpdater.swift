@@ -41,13 +41,19 @@ struct StagedForkCandidate: Codable, Equatable {
 
 @MainActor
 protocol ForkUpdateTransacting: AnyObject {
+    var canRestorePreviousVersion: Bool { get }
     func loadStagedCandidate() throws -> StagedForkCandidate?
     func prepare() async throws -> StagedForkCandidate
     func requestRestart(for candidate: StagedForkCandidate) async throws -> StagedForkCandidate?
+    func restorePreviousVersion() async throws
 }
 
 protocol ForkUpdateCommandRunning {
-    func run(scriptURL: URL, manifestURL: URL) async throws
+    func run(
+        scriptURL: URL,
+        manifestURL: URL,
+        retrySuppressedCandidate: Bool
+    ) async throws
 }
 
 enum ForkUpdateInstallationOutcome: Equatable {
@@ -62,10 +68,31 @@ struct ForkUpdateInstallationRequest: Equatable {
     let targetBundleURL: URL
     let backupBundleURL: URL
     let parentProcessIdentifier: Int32
+    let credentialGeneration: String
 }
 
 protocol ForkUpdateInstalling {
     func install(_ request: ForkUpdateInstallationRequest) async throws -> ForkUpdateInstallationOutcome
+}
+
+struct ForkUpdateRestorationRequest: Equatable {
+    let scriptURL: URL
+    let targetBundleURL: URL
+    let backupBundleURL: URL
+    let parentProcessIdentifier: Int32
+}
+
+protocol ForkUpdateRestoring {
+    func restore(_ request: ForkUpdateRestorationRequest) async throws
+}
+
+struct LocalUpdateRecoveryState: Codable, Equatable {
+    let previousForkCommit: String
+    let candidateForkCommit: String
+    let credentialGeneration: String
+    let suppressedForkCommit: String?
+    let installInProgress: Bool?
+    let restoreInProgress: Bool?
 }
 
 struct ForkUpdateError: LocalizedError {
@@ -75,7 +102,11 @@ struct ForkUpdateError: LocalizedError {
 }
 
 struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
-    func run(scriptURL: URL, manifestURL: URL) async throws {
+    func run(
+        scriptURL: URL,
+        manifestURL: URL,
+        retrySuppressedCandidate: Bool
+    ) async throws {
         try await Task.detached {
             let process = Process()
             let outputURL = FileManager.default.temporaryDirectory
@@ -92,6 +123,11 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
             process.standardError = output
             var environment = ProcessInfo.processInfo.environment
             environment["VOICEINK_UPDATE_MANIFEST_PATH"] = manifestURL.path
+            if retrySuppressedCandidate {
+                environment["VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE"] = "1"
+            } else {
+                environment.removeValue(forKey: "VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE")
+            }
             process.environment = environment
 
             try process.run()
@@ -139,7 +175,9 @@ struct ProcessForkUpdateInstallationRunner: ForkUpdateInstalling {
             ]
             process.standardOutput = output
             process.standardError = output
-            process.environment = ProcessInfo.processInfo.environment
+            var environment = ProcessInfo.processInfo.environment
+            environment["VOICEINK_UPDATE_CREDENTIAL_GENERATION"] = request.credentialGeneration
+            process.environment = environment
 
             try process.run()
             process.waitUntilExit()
@@ -167,35 +205,88 @@ struct ProcessForkUpdateInstallationRunner: ForkUpdateInstalling {
     }
 }
 
+struct ProcessForkUpdateRestorationRunner: ForkUpdateRestoring {
+    func restore(_ request: ForkUpdateRestorationRequest) async throws {
+        try await Task.detached {
+            let process = Process()
+            let outputURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("voiceink-restore-\(UUID().uuidString).log")
+            _ = FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+            let output = try FileHandle(forWritingTo: outputURL)
+            defer {
+                try? output.close()
+                try? FileManager.default.removeItem(at: outputURL)
+            }
+
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = [
+                request.scriptURL.path,
+                request.targetBundleURL.path,
+                request.backupBundleURL.path,
+                String(request.parentProcessIdentifier),
+            ]
+            process.standardOutput = output
+            process.standardError = output
+            process.environment = ProcessInfo.processInfo.environment
+
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                try output.synchronize()
+                let reader = try FileHandle(forReadingFrom: outputURL)
+                defer { try? reader.close() }
+                let outputSize = try reader.seekToEnd()
+                try reader.seek(toOffset: outputSize > 16_384 ? outputSize - 16_384 : 0)
+                let outputData = try reader.readToEnd() ?? Data()
+                let message = String(data: outputData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                throw ForkUpdateError(
+                    message: message.flatMap { $0.isEmpty ? nil : $0 }
+                        ?? "VoiceInk could not restore the previous version."
+                )
+            }
+        }.value
+    }
+}
+
 @MainActor
 final class ForkUpdateTransaction: ForkUpdateTransacting {
     private let scriptURL: URL
     private let manifestURL: URL
     private let commandRunner: any ForkUpdateCommandRunning
     private let installationScriptURL: URL?
+    private let restorationScriptURL: URL?
     private let targetBundleURL: URL?
     private let backupBundleURL: URL?
     private let parentProcessIdentifier: Int32
+    private let credentialSnapshotter: any ForkUpdateCredentialSnapshotting
     private let installationRunner: any ForkUpdateInstalling
+    private let restorationRunner: any ForkUpdateRestoring
 
     init(
         scriptURL: URL,
         manifestURL: URL,
         commandRunner: any ForkUpdateCommandRunning = ProcessForkUpdateCommandRunner(),
         installationScriptURL: URL? = nil,
+        restorationScriptURL: URL? = nil,
         targetBundleURL: URL? = nil,
         backupBundleURL: URL? = nil,
         parentProcessIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier,
-        installationRunner: any ForkUpdateInstalling = ProcessForkUpdateInstallationRunner()
+        credentialSnapshotter: any ForkUpdateCredentialSnapshotting = LocalUpdateCredentialSnapshotStore(),
+        installationRunner: any ForkUpdateInstalling = ProcessForkUpdateInstallationRunner(),
+        restorationRunner: any ForkUpdateRestoring = ProcessForkUpdateRestorationRunner()
     ) {
         self.scriptURL = scriptURL
         self.manifestURL = manifestURL
         self.commandRunner = commandRunner
         self.installationScriptURL = installationScriptURL
+        self.restorationScriptURL = restorationScriptURL
         self.targetBundleURL = targetBundleURL
         self.backupBundleURL = backupBundleURL
         self.parentProcessIdentifier = parentProcessIdentifier
+        self.credentialSnapshotter = credentialSnapshotter
         self.installationRunner = installationRunner
+        self.restorationRunner = restorationRunner
     }
 
     static func production(
@@ -207,6 +298,9 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             withExtension: "sh"
         ), let installationScriptURL = bundle.url(
             forResource: "install-local-update",
+            withExtension: "sh"
+        ), let restorationScriptURL = bundle.url(
+            forResource: "restore-local-update",
             withExtension: "sh"
         ) else {
             return nil
@@ -223,12 +317,28 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             scriptURL: scriptURL,
             manifestURL: manifestURL,
             installationScriptURL: installationScriptURL,
+            restorationScriptURL: restorationScriptURL,
             targetBundleURL: bundle.bundleURL,
-            backupBundleURL: manifestURL
-                .deletingLastPathComponent()
-                .appendingPathComponent("previous", isDirectory: true)
+            backupBundleURL: applicationSupport
+                .appendingPathComponent(
+                    "com.prakashjoshipax.VoiceInk.UpdaterRecovery",
+                    isDirectory: true
+                )
                 .appendingPathComponent("VoiceInk.app", isDirectory: true)
         )
+    }
+
+    var canRestorePreviousVersion: Bool {
+        guard
+            let targetBundleURL,
+            let backupBundleURL,
+            FileManager.default.fileExists(atPath: backupBundleURL.path),
+            let recoveryState = try? loadRecoveryState(backupBundleURL: backupBundleURL),
+            let currentForkCommit = try? installedForkCommit(at: targetBundleURL)
+        else {
+            return false
+        }
+        return currentForkCommit == recoveryState.candidateForkCommit
     }
 
     func loadStagedCandidate() throws -> StagedForkCandidate? {
@@ -238,7 +348,17 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
     }
 
     func prepare() async throws -> StagedForkCandidate {
-        try await commandRunner.run(scriptURL: scriptURL, manifestURL: manifestURL)
+        // The adapter calls this only for an explicit user check, which is the
+        // issue's opt-in retry boundary for a locally suppressed candidate.
+        try await prepare(retryingSuppressedCandidate: true)
+    }
+
+    private func prepare(retryingSuppressedCandidate: Bool) async throws -> StagedForkCandidate {
+        try await commandRunner.run(
+            scriptURL: scriptURL,
+            manifestURL: manifestURL,
+            retrySuppressedCandidate: retryingSuppressedCandidate
+        )
         guard let candidate = try loadStagedCandidate() else {
             throw ForkUpdateError(
                 message: "The local updater finished without staging a candidate."
@@ -249,7 +369,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
 
     func requestRestart(for candidate: StagedForkCandidate) async throws -> StagedForkCandidate? {
         guard let stagedCandidate = try loadStagedCandidate() else {
-            return try await prepare()
+            return try await prepare(retryingSuppressedCandidate: false)
         }
         guard stagedCandidate == candidate else {
             return stagedCandidate
@@ -260,22 +380,156 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             )
         }
 
-        let outcome = try await installationRunner.install(
-            ForkUpdateInstallationRequest(
-                scriptURL: installationScriptURL,
-                candidate: candidate,
-                manifestURL: manifestURL,
+        let credentialGeneration = UUID().uuidString.lowercased()
+        let recoveryIntentURL = try createRecoveryIntent(
+            candidate: candidate,
+            targetBundleURL: targetBundleURL,
+            backupBundleURL: backupBundleURL,
+            credentialGeneration: credentialGeneration
+        )
+        do {
+            try credentialSnapshotter.createSnapshot(generationIdentifier: credentialGeneration)
+        } catch {
+            do {
+                try removeRecoveryIntentIfPresent(at: recoveryIntentURL)
+            } catch {
+                throw ForkUpdateError(
+                    message: "VoiceInk could not create the credential snapshot or remove its recovery intent."
+                )
+            }
+            throw error
+        }
+
+        let request = ForkUpdateInstallationRequest(
+            scriptURL: installationScriptURL,
+            candidate: candidate,
+            manifestURL: manifestURL,
+            targetBundleURL: targetBundleURL,
+            backupBundleURL: backupBundleURL,
+            parentProcessIdentifier: parentProcessIdentifier,
+            credentialGeneration: credentialGeneration
+        )
+        let outcome: ForkUpdateInstallationOutcome
+        do {
+            outcome = try await installationRunner.install(request)
+        } catch {
+            do {
+                try credentialSnapshotter.deleteSnapshot(generationIdentifier: credentialGeneration)
+                try removeRecoveryIntentIfPresent(at: recoveryIntentURL)
+            } catch {
+                throw ForkUpdateError(
+                    message: "VoiceInk could not install the update or remove its temporary recovery intent."
+                )
+            }
+            throw error
+        }
+        switch outcome {
+        case .completed:
+            return nil
+        case .candidateStale:
+            try credentialSnapshotter.deleteSnapshot(generationIdentifier: credentialGeneration)
+            try removeRecoveryIntentIfPresent(at: recoveryIntentURL)
+            return try await prepare(retryingSuppressedCandidate: false)
+        }
+    }
+
+    func restorePreviousVersion() async throws {
+        guard
+            canRestorePreviousVersion,
+            let restorationScriptURL,
+            let targetBundleURL,
+            let backupBundleURL
+        else {
+            throw ForkUpdateError(message: "VoiceInk does not have a previous version to restore.")
+        }
+        try await restorationRunner.restore(
+            ForkUpdateRestorationRequest(
+                scriptURL: restorationScriptURL,
                 targetBundleURL: targetBundleURL,
                 backupBundleURL: backupBundleURL,
                 parentProcessIdentifier: parentProcessIdentifier
             )
         )
-        switch outcome {
-        case .completed:
-            return nil
-        case .candidateStale:
-            return try await prepare()
+    }
+
+    private func loadRecoveryState(backupBundleURL: URL) throws -> LocalUpdateRecoveryState {
+        let stateURL = backupBundleURL.deletingLastPathComponent().appendingPathComponent("recovery.plist")
+        return try PropertyListDecoder().decode(
+            LocalUpdateRecoveryState.self,
+            from: Data(contentsOf: stateURL)
+        )
+    }
+
+    private func installedForkCommit(at bundleURL: URL) throws -> String {
+        let infoURL = bundleURL.appendingPathComponent("Contents/Info.plist")
+        let info = try PropertyListSerialization.propertyList(
+            from: Data(contentsOf: infoURL),
+            options: [],
+            format: nil
+        )
+        guard
+            let dictionary = info as? [String: Any],
+            let forkCommit = dictionary[SourceProvenance.forkCommitInfoKey] as? String
+        else {
+            throw ForkUpdateError(message: "VoiceInk could not read the installed source revision.")
         }
+        return forkCommit
+    }
+
+    private func createRecoveryIntent(
+        candidate: StagedForkCandidate,
+        targetBundleURL: URL,
+        backupBundleURL: URL,
+        credentialGeneration: String
+    ) throws -> URL {
+        let recoveryRoot = backupBundleURL.deletingLastPathComponent()
+        let pendingRecovery = URL(fileURLWithPath: recoveryRoot.path + ".pending", isDirectory: true)
+        let preparingRecovery = URL(fileURLWithPath: recoveryRoot.path + ".preparing", isDirectory: true)
+        guard !FileManager.default.fileExists(atPath: pendingRecovery.path) else {
+            throw ForkUpdateError(
+                message: "VoiceInk has an unfinished recovery transaction. Relaunch VoiceInk before retrying the update."
+            )
+        }
+        if FileManager.default.fileExists(atPath: preparingRecovery.path) {
+            try FileManager.default.removeItem(at: preparingRecovery)
+        }
+
+        try FileManager.default.createDirectory(
+            at: preparingRecovery,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        do {
+            let state = LocalUpdateRecoveryState(
+                previousForkCommit: try installedForkCommit(at: targetBundleURL),
+                candidateForkCommit: candidate.forkCommit,
+                credentialGeneration: credentialGeneration,
+                suppressedForkCommit: nil,
+                installInProgress: true,
+                restoreInProgress: false
+            )
+            let stateURL = preparingRecovery.appendingPathComponent("recovery.plist")
+            try PropertyListEncoder().encode(state).write(to: stateURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
+            try FileManager.default.moveItem(at: preparingRecovery, to: pendingRecovery)
+            return pendingRecovery
+        } catch let creationError {
+            do {
+                if FileManager.default.fileExists(atPath: preparingRecovery.path) {
+                    try FileManager.default.removeItem(at: preparingRecovery)
+                }
+            } catch {
+                throw ForkUpdateError(
+                    message: "VoiceInk could not create or remove its temporary recovery intent."
+                )
+            }
+            throw creationError
+        }
+    }
+
+    private func removeRecoveryIntentIfPresent(at recoveryIntentURL: URL) throws {
+        guard FileManager.default.fileExists(atPath: recoveryIntentURL.path) else { return }
+        try FileManager.default.removeItem(at: recoveryIntentURL)
     }
 }
 
@@ -300,6 +554,10 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
             lastUpdateCheckDate: nil,
             updateCheckInterval: 0
         )
+    }
+
+    var canRestorePreviousVersion: Bool {
+        transaction?.canRestorePreviousVersion == true
     }
 
     func start() {
@@ -351,6 +609,27 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
                     self?.stagedCandidate = replacement
                     self?.onEvent?(.stagedCandidate(replacement))
                 }
+            } catch {
+                self?.onEvent?(.preparationFailed(error.localizedDescription))
+            }
+            self?.finishUpdateCycle()
+        }
+    }
+
+    func restorePreviousVersion() {
+        guard let transaction, transaction.canRestorePreviousVersion, !state.sessionInProgress else { return }
+
+        state = UpdaterAdapterState(
+            canCheckForUpdates: state.canCheckForUpdates,
+            sessionInProgress: true,
+            lastUpdateCheckDate: state.lastUpdateCheckDate,
+            updateCheckInterval: state.updateCheckInterval
+        )
+        onEvent?(.stateChanged(state))
+
+        Task { [weak self] in
+            do {
+                try await transaction.restorePreviousVersion()
             } catch {
                 self?.onEvent?(.preparationFailed(error.localizedDescription))
             }

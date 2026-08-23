@@ -11,6 +11,7 @@ upstream_bare="$fixture_root/upstream.git"
 seed_clone="$fixture_root/seed"
 canonical_clone="$fixture_root/canonical"
 manifest_path="$fixture_root/staging/staged-candidate.plist"
+recovery_state="$fixture_root/recovery/recovery.plist"
 
 git init --bare --initial-branch=main "$fork_bare" >/dev/null
 git init --bare --initial-branch=main "$upstream_bare" >/dev/null
@@ -101,11 +102,34 @@ EOF
 
 chmod +x "$fake_bin/xcodebuild" "$fake_bin/codesign"
 
+mkdir -p "$(dirname "$recovery_state")"
+/usr/bin/plutil -create xml1 "$recovery_state"
+/usr/bin/plutil -insert previousForkCommit -string "$upstream_sha" "$recovery_state"
+/usr/bin/plutil -insert candidateForkCommit -string "$candidate_sha" "$recovery_state"
+/usr/bin/plutil -insert suppressedForkCommit -string "$candidate_sha" "$recovery_state"
+
+if PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$manifest_path" \
+    VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/suppressed-output.log" 2>&1
+then
+    printf 'prepare-local-update-test: rolled-back candidate was prepared again\n' >&2
+    exit 1
+fi
+[[ ! -e "$manifest_path" ]]
+grep -Fq "suppressed" "$fixture_root/suppressed-output.log"
+
 PATH="$fake_bin:$PATH" \
     CANONICAL_PATH="$canonical_clone" \
     XCODE_LOG="$xcode_log" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
     VOICEINK_UPDATE_MANIFEST_PATH="$manifest_path" \
+    VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+    VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE=1 \
     /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
 
 [[ "$(git -C "$canonical_clone" rev-parse HEAD)" == "$before_head" ]]
@@ -113,6 +137,10 @@ PATH="$fake_bin:$PATH" \
 [[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
 [[ "$(/usr/bin/plutil -extract forkCommit raw "$manifest_path")" == "$candidate_sha" ]]
 [[ "$(/usr/bin/plutil -extract upstreamCommit raw "$manifest_path")" == "$upstream_sha" ]]
+if /usr/bin/plutil -extract suppressedForkCommit raw "$recovery_state" >/dev/null 2>&1; then
+    printf 'prepare-local-update-test: explicit retry did not clear candidate suppression\n' >&2
+    exit 1
+fi
 staged_bundle="$(/usr/bin/plutil -extract bundlePath raw "$manifest_path")"
 [[ -d "$staged_bundle" ]]
 grep -Fq -- '-only-testing:VoiceInkTests/UpdaterViewModelTests' "$xcode_log"
