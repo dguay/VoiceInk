@@ -75,7 +75,6 @@ umask 077
 transaction_root="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-restore.XXXXXX")"
 restored_bundle="$(dirname "$target_bundle")/.VoiceInk.restore.$$"
 restored_application_support="$transaction_root/Application Support"
-rejected_bundle="$transaction_root/rejected-VoiceInk.app"
 rejected_bundle_sibling="$(dirname "$target_bundle")/.VoiceInk.rollback.$$"
 failed_restore_bundle_sibling="$(dirname "$target_bundle")/.VoiceInk.failed-restore.$$"
 rejected_application_support="$transaction_root/rejected-Application-Support"
@@ -123,8 +122,8 @@ finish_restore() {
         result=2
     elif [[ "$result" -ne 0 && "$parent_terminated" == true && "$restore_complete" == false ]]; then
         compensation_failed=false
-        if [[ "$bundle_replacement_started" == true && -d "$rejected_bundle" ]]; then
-            replace_bundle_atomically "$rejected_bundle" "$failed_restore_bundle_sibling" \
+        if [[ "$bundle_replacement_started" == true && -d "$rejected_bundle_sibling" ]]; then
+            replace_bundle_atomically "$rejected_bundle_sibling" "$failed_restore_bundle_sibling" \
                 || compensation_failed=true
         fi
         if [[ "$application_support_replacement_started" == true && -d "$rejected_application_support" ]]; then
@@ -232,9 +231,10 @@ else
     /usr/bin/defaults import com.prakashjoshipax.VoiceInk "$recovery_root/Preferences.plist" >/dev/null
 fi
 
+# Keep both sides of forward and compensating swaps beside the target. Atomic
+# replacement must not depend on TMPDIR sharing the installed app's volume.
 replace_bundle_atomically "$restored_bundle" "$rejected_bundle_sibling"
 bundle_replacement_started=true
-mv "$rejected_bundle_sibling" "$rejected_bundle"
 
 /bin/cp "$recovery_state" "$rejected_recovery_state"
 recovery_state_mutation_started=true
