@@ -8,6 +8,35 @@ struct RecordingContextSnapshot {
     var screenText: String?
 }
 
+struct RecordingContextCapturePlan: Equatable {
+    enum Source: Hashable {
+        case clipboard
+        case selectedText
+        case screen
+    }
+
+    let sources: Set<Source>
+
+    init(configuration: EnhancementRuntimeConfiguration?) {
+        guard let configuration, configuration.isEnabled else {
+            sources = []
+            return
+        }
+
+        var enabledSources = Set<Source>()
+        if configuration.useClipboardContext {
+            enabledSources.insert(.clipboard)
+        }
+        if configuration.useSelectedTextContext {
+            enabledSources.insert(.selectedText)
+        }
+        if configuration.useScreenCaptureContext {
+            enabledSources.insert(.screen)
+        }
+        sources = enabledSources
+    }
+}
+
 @MainActor
 final class RecordingContextSnapshotStore {
     private(set) var snapshot = RecordingContextSnapshot()
@@ -33,24 +62,35 @@ final class RecordingContextSnapshotStore {
 
 @MainActor
 enum RecordingContextCaptureService {
-    static func startCapture(into store: RecordingContextSnapshotStore) -> [Task<Void, Never>] {
-        [
-            Task { @MainActor in
+    static func startCapture(
+        into store: RecordingContextSnapshotStore,
+        plan: RecordingContextCapturePlan
+    ) -> [Task<Void, Never>] {
+        var tasks: [Task<Void, Never>] = []
+
+        if plan.sources.contains(.clipboard) {
+            tasks.append(Task { @MainActor in
                 store.updateClipboardText(NSPasteboard.general.string(forType: .string))
-            },
-            Task { @MainActor in
+            })
+        }
+        if plan.sources.contains(.selectedText) {
+            tasks.append(Task { @MainActor in
                 guard !Task.isCancelled else { return }
                 let selectedText = await SelectedTextService.fetchSelectedText()
                 guard !Task.isCancelled else { return }
                 store.updateSelectedText(selectedText)
-            },
-            Task { @MainActor in
+            })
+        }
+        if plan.sources.contains(.screen) {
+            tasks.append(Task { @MainActor in
                 guard CGPreflightScreenCaptureAccess(), !Task.isCancelled else { return }
                 let screenCaptureService = ScreenCaptureService()
                 let screenText = await screenCaptureService.captureAndExtractText()
                 guard !Task.isCancelled else { return }
                 store.updateScreenText(screenText)
-            },
-        ]
+            })
+        }
+
+        return tasks
     }
 }
