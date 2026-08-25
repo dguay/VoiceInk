@@ -511,8 +511,23 @@ class VoiceInkEngine: NSObject, ObservableObject {
         clearActiveRecordingContext()
 
         let store = RecordingContextSnapshotStore()
+        let enhancementConfiguration: EnhancementRuntimeConfiguration?
+        if let enhancementService,
+            let aiService = enhancementService.getAIService()
+        {
+            enhancementConfiguration = ModeRuntimeResolver.currentEnhancementConfiguration(
+                enhancementService: enhancementService,
+                aiService: aiService
+            )
+        } else {
+            enhancementConfiguration = nil
+        }
+        let capturePlan = RecordingContextCapturePlan(configuration: enhancementConfiguration)
         activeRecordingContextStore = store
-        activeRecordingContextTasks = RecordingContextCaptureService.startCapture(into: store)
+        activeRecordingContextTasks = RecordingContextCaptureService.startCapture(
+            into: store,
+            plan: capturePlan
+        )
     }
 
     private func clearActiveRecordingContext() {

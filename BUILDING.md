@@ -31,6 +31,14 @@ Choose an identity explicitly:
 make local LOCAL_CODESIGN_IDENTITY="<SHA or name>"
 ```
 
+Persist an identity for both manual builds and in-app updates:
+
+```bash
+git config --global voiceink.localCodesignIdentity "<SHA or name>"
+```
+
+`LOCAL_CODESIGN_IDENTITY` takes precedence over the persisted setting.
+
 Force ad-hoc signing:
 
 ```bash

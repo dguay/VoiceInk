@@ -147,6 +147,23 @@ grep -Fq -- '-only-testing:VoiceInkTests/UpdaterViewModelTests' "$xcode_log"
 grep -Fq -- '-only-testing:VoiceInkTests test' "$xcode_log"
 grep -Fq -- ' build' "$xcode_log"
 
+stable_signing_config="$fixture_root/stable-signing.gitconfig"
+stable_signing_manifest="$fixture_root/stable-signing/staged-candidate.plist"
+stable_signing_xcode_log="$fixture_root/stable-signing-xcodebuild.log"
+git config --file "$stable_signing_config" voiceink.localCodesignIdentity "VoiceInk Local Development"
+
+PATH="$fake_bin:$PATH" \
+    GIT_CONFIG_GLOBAL="$stable_signing_config" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$stable_signing_xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$stable_signing_manifest" \
+    VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+
+grep -Fq -- 'VOICEINK_LOCAL_CODESIGN_IDENTITY=VoiceInk Local Development' "$stable_signing_xcode_log"
+grep -Fq -- 'CODE_SIGNING_REQUIRED=YES' "$stable_signing_xcode_log"
+
 signature_manifest="$fixture_root/rejected-signature/staged-candidate.plist"
 if PATH="$fake_bin:$PATH" \
     CANONICAL_PATH="$canonical_clone" \

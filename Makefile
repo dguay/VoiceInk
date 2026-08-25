@@ -3,7 +3,7 @@ DEPS_DIR := $(HOME)/VoiceInk-Dependencies
 WHISPER_CPP_DIR := $(DEPS_DIR)/whisper.cpp
 FRAMEWORK_PATH := $(WHISPER_CPP_DIR)/build-apple/whisper.xcframework
 LOCAL_DERIVED_DATA := $(CURDIR)/.local-build
-LOCAL_CODESIGN_IDENTITY ?=
+LOCAL_CODESIGN_IDENTITY ?= $(shell git config --global --get voiceink.localCodesignIdentity 2>/dev/null)
 VOICEINK_FORK_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
 VOICEINK_UPSTREAM_COMMIT ?= $(shell git merge-base HEAD refs/remotes/upstream/main 2>/dev/null)
 
@@ -80,7 +80,7 @@ local: check setup
 	xcodebuild -project VoiceInk.xcodeproj -scheme VoiceInk -configuration Debug \
 		-derivedDataPath "$(LOCAL_DERIVED_DATA)" \
 		-xcconfig LocalBuild.xcconfig \
-		CODE_SIGN_IDENTITY="$$SIGNING_IDENTITY" \
+		VOICEINK_LOCAL_CODESIGN_IDENTITY="$$SIGNING_IDENTITY" \
 		CODE_SIGNING_REQUIRED="$$SIGNING_REQUIRED" \
 		CODE_SIGNING_ALLOWED=YES \
 		DEVELOPMENT_TEAM="" \
