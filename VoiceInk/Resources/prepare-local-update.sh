@@ -81,7 +81,7 @@ xcode_arguments=(
     -xcconfig LocalBuild.xcconfig
     -skipPackagePluginValidation
     -skipMacroValidation
-    "CODE_SIGN_IDENTITY=$signing_identity"
+    "VOICEINK_LOCAL_CODESIGN_IDENTITY=$signing_identity"
     "CODE_SIGNING_REQUIRED=$signing_required"
     CODE_SIGNING_ALLOWED=YES
     DEVELOPMENT_TEAM=

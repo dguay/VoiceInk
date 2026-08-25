@@ -161,7 +161,7 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
     /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
 
-grep -Fq -- 'CODE_SIGN_IDENTITY=VoiceInk Local Development' "$stable_signing_xcode_log"
+grep -Fq -- 'VOICEINK_LOCAL_CODESIGN_IDENTITY=VoiceInk Local Development' "$stable_signing_xcode_log"
 grep -Fq -- 'CODE_SIGNING_REQUIRED=YES' "$stable_signing_xcode_log"
 
 signature_manifest="$fixture_root/rejected-signature/staged-candidate.plist"
