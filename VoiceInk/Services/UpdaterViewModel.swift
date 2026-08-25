@@ -259,6 +259,8 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.isPresentingStagedUpdate = true
             state.preparationError = nil
         case .preparationFailed(let message):
+            state.stagedUpdate = nil
+            state.isPresentingStagedUpdate = false
             state.preparationError = message
         }
     }

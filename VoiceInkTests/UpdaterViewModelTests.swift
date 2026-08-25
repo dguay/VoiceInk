@@ -79,6 +79,28 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func localUpdateFailureReplacesTheStagedActionWithItsError() {
+        let suiteName = "UpdaterViewModelTests.local-update-failure"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let adapter = OfficialUpdaterAdapterStub(canCheckForUpdates: false)
+        let updater: any UpdaterModule = UpdaterViewModel(defaults: defaults, adapter: adapter)
+        let candidate = StagedForkCandidate(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
+            bundleURL: URL(fileURLWithPath: "/tmp/VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_000)
+        )
+
+        adapter.send(.stagedCandidate(candidate))
+        adapter.send(.preparationFailed("VoiceInk could not read credentials."))
+
+        #expect(updater.state.stagedUpdate == nil)
+        #expect(!updater.state.isPresentingStagedUpdate)
+        #expect(updater.state.preparationError == "VoiceInk could not read credentials.")
+    }
+
+    @Test
     func staleRestartApprovalReturnsToPreparationForTheNewCandidate() async throws {
         let suiteName = "UpdaterViewModelTests.stale-restart"
         let defaults = makeDefaults(suiteName: suiteName)
@@ -163,6 +185,22 @@ struct UpdaterViewModelTests {
         #expect(intent.installInProgress == true)
         #expect(intent.credentialGeneration == credentialStore.createdGenerations[0])
         #expect(!FileManager.default.fileExists(atPath: temporaryDirectory.appendingPathComponent("Recovery.preparing").path))
+    }
+
+    @Test
+    func credentialSnapshotQueryReadsAServiceWithLocalCredentials() throws {
+        let persistence = SecurityLocalUpdateCredentialPersistence()
+        let service = "UpdaterViewModelTests.credentials.\(UUID().uuidString)"
+        let account = "candidate"
+        let data = Data("secret".utf8)
+        defer { try? persistence.delete(account: account, service: service) }
+
+        try persistence.write(data, account: account, service: service, accessibility: nil)
+
+        let records = try persistence.readRecords(service: service)
+
+        #expect(records.map(\.account) == [account])
+        #expect(records.map(\.data) == [data])
     }
 
     @Test
