@@ -9,6 +9,9 @@ CODE_SIGN_STYLE = Manual
 DEVELOPMENT_TEAM =
 PROVISIONING_PROFILE_SPECIFIER =
 
+// A self-signed local identity has no Apple Team ID, so the Debug launcher cannot load a separately signed debug dylib.
+ENABLE_DEBUG_DYLIB = NO
+
 // Entitlements are set via absolute path in the Makefile command line
 // (relative paths break SPM package targets that resolve from their own source root)
 
