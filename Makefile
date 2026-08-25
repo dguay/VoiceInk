@@ -3,7 +3,7 @@ DEPS_DIR := $(HOME)/VoiceInk-Dependencies
 WHISPER_CPP_DIR := $(DEPS_DIR)/whisper.cpp
 FRAMEWORK_PATH := $(WHISPER_CPP_DIR)/build-apple/whisper.xcframework
 LOCAL_DERIVED_DATA := $(CURDIR)/.local-build
-LOCAL_CODESIGN_IDENTITY ?=
+LOCAL_CODESIGN_IDENTITY ?= $(shell git config --global --get voiceink.localCodesignIdentity 2>/dev/null)
 VOICEINK_FORK_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
 VOICEINK_UPSTREAM_COMMIT ?= $(shell git merge-base HEAD refs/remotes/upstream/main 2>/dev/null)
 

@@ -62,7 +62,11 @@ fi
 git -C "$repository_path" worktree add --detach "$candidate_worktree" "$fork_commit"
 worktree_added=true
 
-signing_identity="${LOCAL_CODESIGN_IDENTITY:--}"
+signing_identity="${LOCAL_CODESIGN_IDENTITY:-}"
+if [[ -z "$signing_identity" ]]; then
+    signing_identity="$(git config --global --get voiceink.localCodesignIdentity 2>/dev/null || true)"
+fi
+signing_identity="${signing_identity:--}"
 if [[ "$signing_identity" == "-" ]]; then
     signing_required=NO
 else
