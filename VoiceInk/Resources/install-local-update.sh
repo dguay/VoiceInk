@@ -81,61 +81,84 @@ fi
 repository_path="$("$git_command" -C "$repository_path" rev-parse --show-toplevel 2>/dev/null)" \
     || fail "The registered VoiceInk clone is unavailable. Run 'make bootstrap' again."
 
-candidate_ref="refs/voiceink-updater/candidates/$approved_sha"
-if [[ "$fork_base_sha" != "$approved_sha" ]]; then
+manifest_candidate_ref="$(/usr/bin/plutil -extract candidateRef raw "$manifest_path" 2>/dev/null || true)"
+candidate_ref="${manifest_candidate_ref:-refs/voiceink-updater/candidates/$approved_sha}"
+if [[ "$candidate_ref" != "refs/voiceink-updater/candidates/$approved_sha" \
+    && ! "$candidate_ref" =~ ^refs/voiceink-updater/candidates/$approved_sha-[0-9]+-[0-9]+$ ]]
+then
+    stale "the staged candidate contains an invalid preparation reference."
+fi
+if [[ -n "$manifest_candidate_ref" || "$fork_base_sha" != "$approved_sha" ]]; then
     [[ "$("$git_command" -C "$repository_path" rev-parse "$candidate_ref" 2>/dev/null || true)" == "$approved_sha" ]] \
         || stale "the unpublished candidate is no longer available. Prepare it again."
+fi
+if [[ "$fork_base_sha" != "$approved_sha" ]]; then
     "$git_command" -C "$repository_path" merge-base --is-ancestor \
         "$fork_base_sha" "$approved_sha" \
         || stale "the unpublished candidate does not extend the fetched fork."
 fi
 
-revalidate_fork() {
+refresh_fork_head() {
     "$git_command" -C "$repository_path" fetch origin main
     latest_fork_sha="$("$git_command" -C "$repository_path" rev-parse refs/remotes/origin/main)" \
         || fail "The fetched fork does not have origin/main."
+}
+
+preflight_local_publication() {
+    local_main_sha="$("$git_command" -C "$repository_path" rev-parse refs/heads/main)" \
+        || fail "The VoiceInk clone does not have a local main branch."
+    "$git_command" -C "$repository_path" merge-base --is-ancestor \
+        "$local_main_sha" "$approved_sha" \
+        || stale "Local main cannot fast-forward to the verified candidate."
+    if [[ "$("$git_command" -C "$repository_path" symbolic-ref --quiet --short HEAD || true)" == "main" ]]; then
+        [[ -z "$("$git_command" -C "$repository_path" status --porcelain)" ]] \
+            || stale "The VoiceInk clone changed during preparation; local main cannot be published safely."
+    fi
+}
+
+revalidate_fork() {
+    refresh_fork_head
     [[ "$latest_fork_sha" == "$fork_base_sha" ]] \
         || stale "origin/main changed after preparation. Prepare the new candidate before restarting."
 }
 
 publish_verified_candidate() {
-    "$git_command" -C "$repository_path" fetch origin main
-    latest_fork_sha="$("$git_command" -C "$repository_path" rev-parse refs/remotes/origin/main)" \
-        || fail "The fetched fork does not have origin/main."
+    refresh_fork_head
+    preflight_local_publication
 
     if [[ "$latest_fork_sha" != "$approved_sha" ]]; then
         [[ "$latest_fork_sha" == "$fork_base_sha" ]] \
             || stale "origin/main changed before the verified candidate could be published."
+        /bin/rm -rf "$candidate_stage"
+        /bin/rm -f "$manifest_path"
         if ! "$git_command" -C "$repository_path" push origin \
             "$approved_sha:refs/heads/main"
         then
-            "$git_command" -C "$repository_path" fetch origin main
-            latest_fork_sha="$("$git_command" -C "$repository_path" rev-parse refs/remotes/origin/main)" \
-                || fail "The fetched fork does not have origin/main."
+            refresh_fork_head
             [[ "$latest_fork_sha" == "$approved_sha" ]] \
                 || stale "another Mac published a different fork update first."
         fi
+    else
+        publication_succeeded=true
+        /bin/rm -rf "$candidate_stage"
+        /bin/rm -f "$manifest_path"
     fi
 
-    "$git_command" -C "$repository_path" fetch origin main
-    [[ "$("$git_command" -C "$repository_path" rev-parse refs/remotes/origin/main)" == "$approved_sha" ]] \
+    refresh_fork_head
+    [[ "$latest_fork_sha" == "$approved_sha" ]] \
         || fail "The fork did not retain the verified candidate after publication."
-    "$git_command" -C "$repository_path" merge-base --is-ancestor \
-        refs/heads/main "$approved_sha" \
-        || fail "Local main cannot fast-forward to the published candidate."
+    publication_succeeded=true
+    "$git_command" -C "$repository_path" update-ref -d "$candidate_ref" "$approved_sha"
 
     if [[ "$("$git_command" -C "$repository_path" symbolic-ref --quiet --short HEAD || true)" == "main" ]]; then
-        [[ -z "$("$git_command" -C "$repository_path" status --porcelain)" ]] \
-            || fail "The VoiceInk clone changed during installation; local main was not updated."
         "$git_command" -C "$repository_path" merge --ff-only "$approved_sha"
     else
-        local_main_sha="$("$git_command" -C "$repository_path" rev-parse refs/heads/main)"
         "$git_command" -C "$repository_path" update-ref \
             refs/heads/main "$approved_sha" "$local_main_sha"
     fi
-    "$git_command" -C "$repository_path" update-ref -d "$candidate_ref" "$approved_sha"
 }
 
+preflight_local_publication
 revalidate_fork
 
 manifest_upstream_sha="$(/usr/bin/plutil -extract upstreamCommit raw "$manifest_path" 2>/dev/null)" \
@@ -193,6 +216,7 @@ parent_terminated=false
 launched_pid=""
 recovery_published=false
 credential_snapshot_created=true
+publication_succeeded=false
 
 launch_candidate() {
     if [[ -n "$launcher" ]]; then
@@ -348,7 +372,9 @@ finish_transaction() {
     set +e
     installed_after_failure="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null || true)"
 
-    if [[ "$result" -ne 0 && "$installed_after_failure" == "$approved_sha" ]]; then
+    if [[ "$result" -ne 0 && "$publication_succeeded" == true ]]; then
+        printf 'Error: The verified candidate was published, but local repository convergence did not finish.\n' >&2
+    elif [[ "$result" -ne 0 && "$installed_after_failure" == "$approved_sha" ]]; then
         stop_launched_candidate
         run_automatic_rollback
         publish_recovered_pending_generation
@@ -510,7 +536,5 @@ if [[ -d "$previous_recovery" ]]; then
         || fail "VoiceInk could not remove the obsolete filesystem recovery snapshot."
 fi
 publish_verified_candidate
-/bin/rm -rf "$candidate_stage"
-/bin/rm -f "$manifest_path"
 printf 'Installed VoiceInk candidate %s and preserved the previous bundle at %s\n' \
     "$approved_sha" "$backup_bundle"

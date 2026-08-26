@@ -415,7 +415,8 @@ git -C "$seed_clone" add verified-candidate
 git -C "$seed_clone" commit -m "chore(updater): merge upstream main" >/dev/null
 new_sha="$(git -C "$seed_clone" rev-parse HEAD)"
 git -C "$canonical_clone" fetch "$seed_clone" "$new_sha" >/dev/null
-git -C "$canonical_clone" update-ref "refs/voiceink-updater/candidates/$new_sha" "$new_sha"
+candidate_ref="refs/voiceink-updater/candidates/$new_sha-$(date +%s)-$$"
+git -C "$canonical_clone" update-ref "$candidate_ref" "$new_sha"
 staged_bundle="$fixture_root/staging/candidates/$new_sha/VoiceInk.app"
 mkdir -p "$staged_bundle/Contents"
 printf 'newer-candidate\n' > "$staged_bundle/Contents/version"
@@ -425,8 +426,49 @@ printf 'newer-candidate\n' > "$staged_bundle/Contents/version"
 /usr/bin/plutil -insert VoiceInkUpdaterKind -string fork "$staged_bundle/Contents/Info.plist"
 /usr/bin/plutil -replace forkCommit -string "$new_sha" "$manifest_path"
 /usr/bin/plutil -insert forkBaseCommit -string "$fork_base_sha" "$manifest_path"
+/usr/bin/plutil -insert candidateRef -string "$candidate_ref" "$manifest_path"
 /usr/bin/plutil -replace bundlePath -string "$staged_bundle" "$manifest_path"
 publish_log="$fixture_root/publish.log"
+
+git -C "$canonical_clone" config user.name "VoiceInk Local Divergence Test"
+git -C "$canonical_clone" config user.email "local-divergence@example.com"
+printf 'local-only\n' > "$canonical_clone/local-only"
+git -C "$canonical_clone" add local-only
+git -C "$canonical_clone" commit -m "test: diverge local main" >/dev/null
+divergent_local_sha="$(git -C "$canonical_clone" rev-parse HEAD)"
+prepare_recovery_intent
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_GIT_COMMAND="$fake_bin/git-require-health-before-push" \
+    VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
+    VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
+    VOICEINK_UPDATE_STABILITY_SECONDS=1 \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    VOICEINK_TEST_REQUIRED_HEALTH_PATH="$health_path" \
+    VOICEINK_TEST_REQUIRED_PUBLISH_SHA="$new_sha" \
+    VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/divergent-local-output.log" 2>&1
+divergent_local_status=$?
+set -e
+
+[[ "$divergent_local_status" -eq 75 ]]
+kill -0 "$parent_pid"
+[[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$fork_base_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$divergent_local_sha" ]]
+grep -Fq "Local main cannot fast-forward" "$fixture_root/divergent-local-output.log"
+git -C "$canonical_clone" switch --detach "$old_sha" >/dev/null
+git -C "$canonical_clone" branch -f main "$old_sha"
+git -C "$canonical_clone" switch main >/dev/null
 
 prepare_recovery_intent
 
@@ -474,7 +516,7 @@ credential_generation="$(/usr/bin/plutil -extract credentialGeneration raw "$rec
 [[ "$(< "$publish_log")" == "push-after-health" ]]
 [[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$new_sha" ]]
 [[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$new_sha" ]]
-if git -C "$canonical_clone" rev-parse "refs/voiceink-updater/candidates/$new_sha" >/dev/null 2>&1; then
+if git -C "$canonical_clone" rev-parse "$candidate_ref" >/dev/null 2>&1; then
     printf 'install-local-update-test: published candidate reference was not cleaned up\n' >&2
     exit 1
 fi
