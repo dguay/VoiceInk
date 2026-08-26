@@ -1,22 +1,110 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -Eeuo pipefail
+
+current_stage="preflight"
+failure_kind="deterministic"
+candidate_identifier=""
+fork_commit=""
+upstream_commit=""
+manifest_path="${VOICEINK_UPDATE_MANIFEST_PATH:-$HOME/Library/Application Support/com.prakashjoshipax.VoiceInk/Updater/staged-candidate.plist}"
+result_path="${VOICEINK_UPDATE_RESULT_PATH:-}"
+stage_root="$(dirname "$manifest_path")"
+failure_state_path="${VOICEINK_UPDATE_FAILURE_STATE_PATH:-$stage_root/failure-state.plist}"
+failure_written=false
 
 fail() {
-    printf 'Error: %s\n' "$*" >&2
+    local message="$*"
+    write_failure_result "$message"
+    printf 'Error: %s\n' "$message" >&2
     exit 1
 }
 
 write_preparation_result() {
+    if [[ -n "$result_path" ]]; then
+        mkdir -p "$(dirname "$result_path")"
+        result_temporary="$result_path.tmp.$$"
+        /usr/bin/plutil -create xml1 "$result_temporary"
+        /usr/bin/plutil -insert outcome -string "$1" "$result_temporary"
+        if [[ -n "$fork_commit" ]]; then
+            /usr/bin/plutil -insert forkCommit -string "$fork_commit" "$result_temporary"
+        fi
+        if [[ -n "$upstream_commit" ]]; then
+            /usr/bin/plutil -insert upstreamCommit -string "$upstream_commit" "$result_temporary"
+        fi
+        if [[ -n "$candidate_identifier" ]]; then
+            /usr/bin/plutil -insert candidateIdentifier -string "$candidate_identifier" "$result_temporary"
+        fi
+        mv "$result_temporary" "$result_path"
+    fi
+    if [[ "$1" == "upToDate" || "$1" == "candidatePrepared" ]]; then
+        rm -f "$failure_state_path"
+    fi
+}
+
+write_failure_result() {
+    local message="$1"
+    local failure_temporary
     [[ -n "$result_path" ]] || return 0
+    failure_written=true
 
     mkdir -p "$(dirname "$result_path")"
-    result_temporary="$result_path.tmp.$$"
-    /usr/bin/plutil -create xml1 "$result_temporary"
-    /usr/bin/plutil -insert outcome -string "$1" "$result_temporary"
-    /usr/bin/plutil -insert forkCommit -string "$fork_commit" "$result_temporary"
-    /usr/bin/plutil -insert upstreamCommit -string "$upstream_commit" "$result_temporary"
-    mv "$result_temporary" "$result_path"
+    failure_temporary="$result_path.tmp.$$"
+    /usr/bin/plutil -create xml1 "$failure_temporary"
+    /usr/bin/plutil -insert outcome -string failure "$failure_temporary"
+    /usr/bin/plutil -insert stage -string "$current_stage" "$failure_temporary"
+    /usr/bin/plutil -insert kind -string "$failure_kind" "$failure_temporary"
+    /usr/bin/plutil -insert message -string "$message" "$failure_temporary"
+    if [[ -n "$candidate_identifier" ]]; then
+        /usr/bin/plutil -insert candidateIdentifier -string "$candidate_identifier" "$failure_temporary"
+    fi
+    if [[ -n "$fork_commit" ]]; then
+        /usr/bin/plutil -insert forkCommit -string "$fork_commit" "$failure_temporary"
+    fi
+    if [[ -n "$upstream_commit" ]]; then
+        /usr/bin/plutil -insert upstreamCommit -string "$upstream_commit" "$failure_temporary"
+    fi
+    mv "$failure_temporary" "$result_path"
+
+    if [[ "$failure_kind" == "deterministic" && -n "$candidate_identifier" ]]; then
+        mkdir -p "$(dirname "$failure_state_path")"
+        cp "$result_path" "$failure_state_path.tmp.$$"
+        mv "$failure_state_path.tmp.$$" "$failure_state_path"
+    fi
+}
+
+record_unhandled_failure() {
+    local status="$?"
+    if [[ "$status" -ne 0 && "$failure_written" == false ]]; then
+        write_failure_result "VoiceInk update stage '$current_stage' failed."
+    fi
+    return "$status"
+}
+
+trap record_unhandled_failure ERR
+
+begin_stage() {
+    current_stage="$1"
+    failure_kind="${2:-deterministic}"
+    [[ -n "$candidate_identifier" ]] || return 0
+    [[ "${VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE:-0}" != 1 ]] || return 0
+    [[ -f "$failure_state_path" ]] || return 0
+
+    local failed_candidate
+    local failed_stage
+    failed_candidate="$(/usr/bin/plutil -extract candidateIdentifier raw "$failure_state_path" 2>/dev/null || true)"
+    failed_stage="$(/usr/bin/plutil -extract stage raw "$failure_state_path" 2>/dev/null || true)"
+    [[ "$failed_candidate" == "$candidate_identifier" && "$failed_stage" == "$current_stage" ]] \
+        || return 0
+
+    if [[ -n "$result_path" ]]; then
+        mkdir -p "$(dirname "$result_path")"
+        cp "$failure_state_path" "$result_path.tmp.$$"
+        /usr/bin/plutil -replace outcome -string failureSuppressed "$result_path.tmp.$$" 2>/dev/null \
+            || /usr/bin/plutil -insert outcome -string failureSuppressed "$result_path.tmp.$$"
+        mv "$result_path.tmp.$$" "$result_path"
+    fi
+    exit 0
 }
 
 repository_path="${VOICEINK_REPOSITORY_PATH:-}"
@@ -32,9 +120,6 @@ repository_path="$(git -C "$repository_path" rev-parse --show-toplevel 2>/dev/nu
 [[ -z "$(git -C "$repository_path" status --porcelain)" ]] \
     || fail "The VoiceInk clone has uncommitted changes. Commit or stash them before preparing an update."
 
-manifest_path="${VOICEINK_UPDATE_MANIFEST_PATH:-$HOME/Library/Application Support/com.prakashjoshipax.VoiceInk/Updater/staged-candidate.plist}"
-result_path="${VOICEINK_UPDATE_RESULT_PATH:-}"
-stage_root="$(dirname "$manifest_path")"
 work_root="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-update.XXXXXX")"
 candidate_worktree="$work_root/candidate"
 derived_data="$work_root/DerivedData"
@@ -82,15 +167,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
-git -C "$repository_path" fetch origin main
-git -C "$repository_path" fetch upstream main
+begin_stage fetch transient
+git -C "$repository_path" fetch origin main \
+    || fail "VoiceInk could not fetch origin/main."
+git -C "$repository_path" fetch upstream main \
+    || fail "VoiceInk could not fetch upstream/main."
 
 fork_base_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main)" \
     || fail "The fetched fork does not have origin/main."
 upstream_commit="$(git -C "$repository_path" rev-parse refs/remotes/upstream/main)" \
     || fail "The fetched upstream does not have upstream/main."
+candidate_identifier="$fork_base_commit:$upstream_commit"
+if [[ -f "$failure_state_path" ]]; then
+    failed_candidate="$(/usr/bin/plutil -extract candidateIdentifier raw "$failure_state_path" 2>/dev/null || true)"
+    if [[ "$failed_candidate" != "$candidate_identifier" ]]; then
+        rm -f "$failure_state_path"
+    fi
+fi
 
 fork_commit="$fork_base_commit"
+begin_stage merge
 if ! git -C "$repository_path" merge-base --is-ancestor "$upstream_commit" "$fork_base_commit"; then
     git -C "$repository_path" worktree add --detach "$candidate_worktree" "$fork_base_commit"
     worktree_added=true
@@ -193,17 +289,27 @@ xcode_arguments=(
     VOICEINK_UPDATER_KIND=fork
 )
 
+begin_stage test
 (
     cd "$candidate_worktree"
     xcodebuild "${xcode_arguments[@]}" \
         -only-testing:VoiceInkTests/UpdaterViewModelTests \
         test
+) || fail "VoiceInk updater tests failed for this candidate."
+begin_stage test
+(
+    cd "$candidate_worktree"
     xcodebuild "${xcode_arguments[@]}" \
         -only-testing:VoiceInkTests \
         test
+) || fail "VoiceInk unit tests failed for this candidate."
+begin_stage build
+(
+    cd "$candidate_worktree"
     xcodebuild "${xcode_arguments[@]}" build
-)
+) || fail "VoiceInk could not build this candidate."
 
+begin_stage staging
 candidate_bundle="$derived_data/Build/Products/Debug/VoiceInk.app"
 [[ -d "$candidate_bundle" ]] || fail "The local build did not produce VoiceInk.app."
 codesign --verify --deep --strict "$candidate_bundle" \

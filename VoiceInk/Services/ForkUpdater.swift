@@ -43,6 +43,7 @@ enum ForkUpdatePreparationResult: Equatable {
     case upToDate(SourceProvenance)
     case buildDeferred
     case staged(StagedForkCandidate)
+    case failureSuppressed(ForkUpdateFailure)
 }
 
 enum ForkUpdatePreparationMode: Equatable, Sendable {
@@ -79,9 +80,18 @@ struct SystemForkUpdatePowerState: ForkUpdatePowerStateProviding {
 protocol ForkUpdateTransacting: AnyObject {
     var canRestorePreviousVersion: Bool { get }
     func loadStagedCandidate() throws -> StagedForkCandidate?
+    func loadPersistentFailure() throws -> ForkUpdateFailure?
+    func persistFailure(_ failure: ForkUpdateFailure) throws
+    func clearPersistentFailure() throws
     func prepare(mode: ForkUpdatePreparationMode) async throws -> ForkUpdatePreparationResult
     func requestRestart(for candidate: StagedForkCandidate) async throws -> StagedForkCandidate?
     func restorePreviousVersion() async throws
+}
+
+extension ForkUpdateTransacting {
+    func loadPersistentFailure() throws -> ForkUpdateFailure? { nil }
+    func persistFailure(_ failure: ForkUpdateFailure) throws {}
+    func clearPersistentFailure() throws {}
 }
 
 protocol ForkUpdateCommandRunning {
@@ -96,7 +106,8 @@ protocol ForkUpdateCommandRunning {
 enum ForkUpdateCommandResult: Equatable, Sendable {
     case upToDate(SourceProvenance)
     case buildDeferred
-    case candidatePrepared
+    case candidatePrepared(candidateIdentifier: String?)
+    case failureSuppressed(ForkUpdateFailure)
 }
 
 enum ForkUpdateInstallationOutcome: Equatable {
@@ -147,8 +158,28 @@ struct ForkUpdateError: LocalizedError {
 struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
     private struct Report: Decodable {
         let outcome: String
-        let forkCommit: String
-        let upstreamCommit: String
+        let forkCommit: String?
+        let upstreamCommit: String?
+        let stage: ForkUpdateStage?
+        let kind: ForkUpdateFailureKind?
+        let candidateIdentifier: String?
+        let message: String?
+    }
+
+    private let retryDelays: [TimeInterval]
+    private let sleep: @Sendable (TimeInterval) async throws -> Void
+    private let logger: any ForkUpdateLogging
+
+    init(
+        retryDelays: [TimeInterval] = [1, 5],
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { delay in
+            try await Task.sleep(for: .seconds(delay))
+        },
+        logger: any ForkUpdateLogging = ForkUpdateLogStore.shared
+    ) {
+        self.retryDelays = retryDelays
+        self.sleep = sleep
+        self.logger = logger
     }
 
     func run(
@@ -158,92 +189,274 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         mode: ForkUpdatePreparationMode
     ) async throws -> ForkUpdateCommandResult {
         let priority: TaskPriority = mode.isAutomatic ? .utility : .userInitiated
+        let attemptIdentifier = UUID().uuidString.lowercased()
+        await logger.record(
+            ForkUpdateLogRecord(
+                timestamp: Date(),
+                attemptIdentifier: attemptIdentifier,
+                stage: .preflight,
+                outcome: .started,
+                candidateIdentifier: nil,
+                forkCommit: installedForkCommit,
+                upstreamCommit: nil,
+                retry: nil,
+                message: nil
+            )
+        )
         return try await Task.detached(priority: priority) {
-            let process = Process()
-            process.qualityOfService = mode.isAutomatic ? .utility : .userInitiated
-            let outputURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("voiceink-update-\(UUID().uuidString).log")
-            let resultURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("voiceink-update-\(UUID().uuidString).plist")
-            _ = FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-            let output = try FileHandle(forWritingTo: outputURL)
-            defer {
-                try? output.close()
-                try? FileManager.default.removeItem(at: outputURL)
-                try? FileManager.default.removeItem(at: resultURL)
-            }
-            process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            process.arguments = [scriptURL.path]
-            process.standardOutput = output
-            process.standardError = output
-            var environment = ProcessInfo.processInfo.environment
-            environment["VOICEINK_UPDATE_MANIFEST_PATH"] = manifestURL.path
-            environment["VOICEINK_UPDATE_RESULT_PATH"] = resultURL.path
-            if let installedForkCommit {
-                environment["VOICEINK_INSTALLED_FORK_COMMIT"] = installedForkCommit
-            } else {
-                environment.removeValue(forKey: "VOICEINK_INSTALLED_FORK_COMMIT")
-            }
-            if mode.retriesSuppressedCandidate {
-                environment["VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE"] = "1"
-            } else {
-                environment.removeValue(forKey: "VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE")
-            }
-            if mode.defersBuild {
-                environment["VOICEINK_UPDATE_DEFER_BUILD"] = "1"
-            } else {
-                environment.removeValue(forKey: "VOICEINK_UPDATE_DEFER_BUILD")
-            }
-            process.environment = environment
-
-            try process.run()
-            process.waitUntilExit()
-
-            guard process.terminationStatus == 0 else {
-                try output.synchronize()
-                let reader = try FileHandle(forReadingFrom: outputURL)
-                defer { try? reader.close() }
-                let outputSize = try reader.seekToEnd()
-                try reader.seek(toOffset: outputSize > 16_384 ? outputSize - 16_384 : 0)
-                let outputData = try reader.readToEnd() ?? Data()
-                let message = String(data: outputData, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                throw ForkUpdateError(
-                    message: message.flatMap { $0.isEmpty ? nil : $0 }
-                        ?? "VoiceInk could not prepare the local update."
-                )
-            }
-
-            let report: Report
-            do {
-                report = try PropertyListDecoder().decode(
-                    Report.self,
-                    from: Data(contentsOf: resultURL)
-                )
-            } catch {
-                throw ForkUpdateError(
-                    message: "The local updater finished without recording its result."
-                )
-            }
-
-            switch report.outcome {
-            case "upToDate":
-                return .upToDate(
-                    SourceProvenance(
-                        forkCommit: report.forkCommit,
-                        upstreamCommit: report.upstreamCommit
+            for attempt in 0 ... retryDelays.count {
+                do {
+                    let result = try Self.runOnce(
+                        scriptURL: scriptURL,
+                        manifestURL: manifestURL,
+                        installedForkCommit: installedForkCommit,
+                        mode: mode
                     )
-                )
-            case "buildDeferred":
-                return .buildDeferred
-            case "candidatePrepared":
-                return .candidatePrepared
-            default:
-                throw ForkUpdateError(
-                    message: "The local updater recorded an unknown preparation result."
+                    await logger.record(Self.logRecord(
+                        for: result,
+                        attemptIdentifier: attemptIdentifier
+                    ))
+                    return result
+                } catch let failure as ForkUpdateFailure {
+                    guard attempt < retryDelays.count, failure.kind == .transient else {
+                        await logger.record(
+                            Self.logRecord(
+                                for: failure,
+                                attemptIdentifier: attemptIdentifier,
+                                outcome: .failed,
+                                retry: attempt
+                            )
+                        )
+                        throw failure
+                    }
+                    await logger.record(
+                        Self.logRecord(
+                            for: failure,
+                            attemptIdentifier: attemptIdentifier,
+                            outcome: .retrying,
+                            retry: attempt + 1
+                        )
+                    )
+                    try await sleep(retryDelays[attempt])
+                }
+            }
+
+            throw ForkUpdateError(message: "VoiceInk exhausted its update retry policy.")
+        }.value
+    }
+
+    private static func runOnce(
+        scriptURL: URL,
+        manifestURL: URL,
+        installedForkCommit: String?,
+        mode: ForkUpdatePreparationMode
+    ) throws -> ForkUpdateCommandResult {
+        let process = Process()
+        process.qualityOfService = mode.isAutomatic ? .utility : .userInitiated
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("voiceink-update-\(UUID().uuidString).log")
+        let resultURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("voiceink-update-\(UUID().uuidString).plist")
+        _ = FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+        let output = try FileHandle(forWritingTo: outputURL)
+        defer {
+            try? output.close()
+            try? FileManager.default.removeItem(at: outputURL)
+            try? FileManager.default.removeItem(at: resultURL)
+        }
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [scriptURL.path]
+        process.standardOutput = output
+        process.standardError = output
+        var environment = ProcessInfo.processInfo.environment
+        environment["VOICEINK_UPDATE_MANIFEST_PATH"] = manifestURL.path
+        environment["VOICEINK_UPDATE_RESULT_PATH"] = resultURL.path
+        if let installedForkCommit {
+            environment["VOICEINK_INSTALLED_FORK_COMMIT"] = installedForkCommit
+        } else {
+            environment.removeValue(forKey: "VOICEINK_INSTALLED_FORK_COMMIT")
+        }
+        if mode.retriesSuppressedCandidate {
+            environment["VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE"] = "1"
+        } else {
+            environment.removeValue(forKey: "VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE")
+        }
+        if mode.defersBuild {
+            environment["VOICEINK_UPDATE_DEFER_BUILD"] = "1"
+        } else {
+            environment.removeValue(forKey: "VOICEINK_UPDATE_DEFER_BUILD")
+        }
+        process.environment = environment
+
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            try output.synchronize()
+            let reader = try FileHandle(forReadingFrom: outputURL)
+            defer { try? reader.close() }
+            let outputSize = try reader.seekToEnd()
+            try reader.seek(toOffset: outputSize > 16_384 ? outputSize - 16_384 : 0)
+            let outputData = try reader.readToEnd() ?? Data()
+            let message = String(data: outputData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallbackMessage = message.flatMap { $0.isEmpty ? nil : $0 }
+                ?? "VoiceInk could not prepare the local update."
+            if let report = try? PropertyListDecoder().decode(
+                Report.self,
+                from: Data(contentsOf: resultURL)
+            ), report.outcome == "failure" {
+                throw failure(from: report, fallbackMessage: fallbackMessage)
+            }
+            throw ForkUpdateFailure.classify(message: fallbackMessage)
+        }
+
+        let report: Report
+        do {
+            report = try PropertyListDecoder().decode(
+                Report.self,
+                from: Data(contentsOf: resultURL)
+            )
+        } catch {
+            throw ForkUpdateFailure.classify(
+                message: "The local updater finished without recording its result."
+            )
+        }
+
+        switch report.outcome {
+        case "upToDate":
+            guard let forkCommit = report.forkCommit, let upstreamCommit = report.upstreamCommit else {
+                throw ForkUpdateFailure.classify(
+                    message: "The local updater recorded incomplete source provenance."
                 )
             }
-        }.value
+            return .upToDate(
+                SourceProvenance(
+                    forkCommit: forkCommit,
+                    upstreamCommit: upstreamCommit
+                )
+            )
+        case "buildDeferred":
+            return .buildDeferred
+        case "candidatePrepared":
+            return .candidatePrepared(candidateIdentifier: report.candidateIdentifier)
+        case "failureSuppressed":
+            return .failureSuppressed(
+                failure(
+                    from: report,
+                    fallbackMessage: "VoiceInk skipped an unchanged failed update stage."
+                )
+            )
+        default:
+            throw ForkUpdateFailure.classify(
+                message: "The local updater recorded an unknown preparation result."
+            )
+        }
+    }
+
+    private static func failure(from report: Report, fallbackMessage: String) -> ForkUpdateFailure {
+        let outputClassification = ForkUpdateFailure.classify(
+            message: fallbackMessage,
+            defaultStage: report.stage ?? .preflight,
+            candidateIdentifier: report.candidateIdentifier
+        )
+        if outputClassification.kind == .transient {
+            return .reported(
+                stage: outputClassification.stage,
+                kind: .transient,
+                candidateIdentifier: report.candidateIdentifier,
+                message: report.message ?? "VoiceInk could not reach an update dependency."
+            )
+        }
+        if outputClassification.stage == .toolchain {
+            return .reported(
+                stage: .toolchain,
+                kind: .deterministic,
+                candidateIdentifier: report.candidateIdentifier,
+                message: "The installed Xcode toolchain is incompatible with this VoiceInk revision."
+            )
+        }
+        let classified = ForkUpdateFailure.classify(
+            message: report.message ?? fallbackMessage,
+            defaultStage: report.stage ?? outputClassification.stage,
+            candidateIdentifier: report.candidateIdentifier
+        )
+        return .reported(
+            stage: report.stage ?? classified.stage,
+            kind: report.kind ?? classified.kind,
+            candidateIdentifier: report.candidateIdentifier,
+            message: report.message ?? fallbackMessage
+        )
+    }
+
+    private static func logRecord(
+        for result: ForkUpdateCommandResult,
+        attemptIdentifier: String
+    ) -> ForkUpdateLogRecord {
+        switch result {
+        case .upToDate(let provenance):
+            return ForkUpdateLogRecord(
+                timestamp: Date(),
+                attemptIdentifier: attemptIdentifier,
+                stage: .fetch,
+                outcome: .succeeded,
+                candidateIdentifier: provenance.forkCommit,
+                forkCommit: provenance.forkCommit,
+                upstreamCommit: provenance.upstreamCommit,
+                retry: nil,
+                message: nil
+            )
+        case .buildDeferred:
+            return ForkUpdateLogRecord(
+                timestamp: Date(),
+                attemptIdentifier: attemptIdentifier,
+                stage: .build,
+                outcome: .succeeded,
+                candidateIdentifier: nil,
+                forkCommit: nil,
+                upstreamCommit: nil,
+                retry: nil,
+                message: "Build deferred during Low Power Mode."
+            )
+        case .candidatePrepared(let candidateIdentifier):
+            return ForkUpdateLogRecord(
+                timestamp: Date(),
+                attemptIdentifier: attemptIdentifier,
+                stage: .staging,
+                outcome: .succeeded,
+                candidateIdentifier: candidateIdentifier,
+                forkCommit: nil,
+                upstreamCommit: nil,
+                retry: nil,
+                message: nil
+            )
+        case .failureSuppressed(let failure):
+            return logRecord(
+                for: failure,
+                attemptIdentifier: attemptIdentifier,
+                outcome: .suppressed,
+                retry: nil
+            )
+        }
+    }
+
+    private static func logRecord(
+        for failure: ForkUpdateFailure,
+        attemptIdentifier: String,
+        outcome: ForkUpdateLogOutcome,
+        retry: Int?
+    ) -> ForkUpdateLogRecord {
+        ForkUpdateLogRecord(
+            timestamp: Date(),
+            attemptIdentifier: attemptIdentifier,
+            stage: failure.stage,
+            outcome: outcome,
+            candidateIdentifier: failure.candidateIdentifier,
+            forkCommit: nil,
+            upstreamCommit: nil,
+            retry: retry,
+            message: failure.message
+        )
     }
 }
 
@@ -358,6 +571,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
     private let credentialSnapshotter: any ForkUpdateCredentialSnapshotting
     private let installationRunner: any ForkUpdateInstalling
     private let restorationRunner: any ForkUpdateRestoring
+    private let logger: any ForkUpdateLogging
 
     init(
         scriptURL: URL,
@@ -370,7 +584,8 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         parentProcessIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier,
         credentialSnapshotter: any ForkUpdateCredentialSnapshotting = LocalUpdateCredentialSnapshotStore(),
         installationRunner: any ForkUpdateInstalling = ProcessForkUpdateInstallationRunner(),
-        restorationRunner: any ForkUpdateRestoring = ProcessForkUpdateRestorationRunner()
+        restorationRunner: any ForkUpdateRestoring = ProcessForkUpdateRestorationRunner(),
+        logger: any ForkUpdateLogging = ForkUpdateLogStore.shared
     ) {
         self.scriptURL = scriptURL
         self.manifestURL = manifestURL
@@ -383,6 +598,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         self.credentialSnapshotter = credentialSnapshotter
         self.installationRunner = installationRunner
         self.restorationRunner = restorationRunner
+        self.logger = logger
     }
 
     static func production(
@@ -443,6 +659,38 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         return try PropertyListDecoder().decode(StagedForkCandidate.self, from: data)
     }
 
+    func loadPersistentFailure() throws -> ForkUpdateFailure? {
+        let failureURL = persistentFailureURL
+        guard FileManager.default.fileExists(atPath: failureURL.path) else { return nil }
+        return try PropertyListDecoder().decode(
+            ForkUpdateFailure.self,
+            from: Data(contentsOf: failureURL)
+        )
+    }
+
+    func persistFailure(_ failure: ForkUpdateFailure) throws {
+        let failureURL = persistentFailureURL
+        try FileManager.default.createDirectory(
+            at: failureURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try PropertyListEncoder().encode(failure).write(to: failureURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: failureURL.path
+        )
+    }
+
+    func clearPersistentFailure() throws {
+        guard FileManager.default.fileExists(atPath: persistentFailureURL.path) else { return }
+        try FileManager.default.removeItem(at: persistentFailureURL)
+    }
+
+    private var persistentFailureURL: URL {
+        manifestURL.deletingLastPathComponent().appendingPathComponent("failure-state.plist")
+    }
+
     func prepare(mode: ForkUpdatePreparationMode) async throws -> ForkUpdatePreparationResult {
         let commandResult = try await commandRunner.run(
             scriptURL: scriptURL,
@@ -457,12 +705,30 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             return .buildDeferred
         case .candidatePrepared:
             break
+        case .failureSuppressed(let failure):
+            return .failureSuppressed(failure)
         }
         guard let candidate = try loadStagedCandidate() else {
-            throw ForkUpdateError(
-                message: "The local updater finished without staging a candidate."
+            let failure = ForkUpdateFailure.classify(
+                message: "The local updater finished without staging a candidate.",
+                defaultStage: .staging
             )
+            await record(failure: failure, attemptIdentifier: UUID().uuidString.lowercased())
+            throw failure
         }
+        await logger.record(
+            ForkUpdateLogRecord(
+                timestamp: Date(),
+                attemptIdentifier: "candidate-\(candidate.forkCommit)",
+                stage: .staging,
+                outcome: .succeeded,
+                candidateIdentifier: "\(candidate.forkCommit):\(candidate.upstreamCommit)",
+                forkCommit: candidate.forkCommit,
+                upstreamCommit: candidate.upstreamCommit,
+                retry: nil,
+                message: nil
+            )
+        )
         return .staged(candidate)
     }
 
@@ -475,35 +741,76 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
                 throw ForkUpdateError(message: "VoiceInk deferred a user-approved update unexpectedly.")
             case .staged(let candidate):
                 return candidate
+            case .failureSuppressed(let failure):
+                throw failure
             }
         }
         guard stagedCandidate == candidate else {
             return stagedCandidate
         }
+        let installationAttempt = "installation-\(candidate.forkCommit)"
         guard let installationScriptURL, let targetBundleURL, let backupBundleURL else {
-            throw ForkUpdateError(
-                message: "VoiceInk could not find its local installation helper."
+            let failure = ForkUpdateFailure.classify(
+                message: "VoiceInk could not find its local installation helper.",
+                defaultStage: .installation,
+                candidateIdentifier: candidate.forkCommit
             )
+            await record(failure: failure, attemptIdentifier: installationAttempt)
+            throw failure
         }
+        await logger.record(
+            ForkUpdateLogRecord(
+                timestamp: Date(),
+                attemptIdentifier: installationAttempt,
+                stage: .installation,
+                outcome: .started,
+                candidateIdentifier: candidate.forkCommit,
+                forkCommit: candidate.forkCommit,
+                upstreamCommit: candidate.upstreamCommit,
+                retry: nil,
+                message: nil
+            )
+        )
 
         let credentialGeneration = UUID().uuidString.lowercased()
-        let recoveryIntentURL = try createRecoveryIntent(
-            candidate: candidate,
-            targetBundleURL: targetBundleURL,
-            backupBundleURL: backupBundleURL,
-            credentialGeneration: credentialGeneration
-        )
+        let recoveryIntentURL: URL
+        do {
+            recoveryIntentURL = try createRecoveryIntent(
+                candidate: candidate,
+                targetBundleURL: targetBundleURL,
+                backupBundleURL: backupBundleURL,
+                credentialGeneration: credentialGeneration
+            )
+        } catch {
+            let failure = ForkUpdateFailure.classify(
+                message: error.localizedDescription,
+                defaultStage: .installation,
+                candidateIdentifier: candidate.forkCommit
+            )
+            await record(failure: failure, attemptIdentifier: installationAttempt)
+            throw failure
+        }
         do {
             try credentialSnapshotter.createSnapshot(generationIdentifier: credentialGeneration)
         } catch {
             do {
                 try removeRecoveryIntentIfPresent(at: recoveryIntentURL)
             } catch {
-                throw ForkUpdateError(
-                    message: "VoiceInk could not create the credential snapshot or remove its recovery intent."
+                let failure = ForkUpdateFailure.classify(
+                    message: "VoiceInk could not create the credential snapshot or remove its recovery intent.",
+                    defaultStage: .permission,
+                    candidateIdentifier: candidate.forkCommit
                 )
+                await record(failure: failure, attemptIdentifier: installationAttempt)
+                throw failure
             }
-            throw error
+            let failure = ForkUpdateFailure.classify(
+                message: error.localizedDescription,
+                defaultStage: .permission,
+                candidateIdentifier: candidate.forkCommit
+            )
+            await record(failure: failure, attemptIdentifier: installationAttempt)
+            throw failure
         }
 
         let request = ForkUpdateInstallationRequest(
@@ -523,16 +830,53 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
                 try credentialSnapshotter.deleteSnapshot(generationIdentifier: credentialGeneration)
                 try removeRecoveryIntentIfPresent(at: recoveryIntentURL)
             } catch {
-                throw ForkUpdateError(
-                    message: "VoiceInk could not install the update or remove its temporary recovery intent."
+                let failure = ForkUpdateFailure.classify(
+                    message: "VoiceInk could not install the update or remove its temporary recovery intent.",
+                    defaultStage: .installation,
+                    candidateIdentifier: candidate.forkCommit
                 )
+                await record(failure: failure, attemptIdentifier: installationAttempt)
+                throw failure
             }
-            throw error
+            let failure = (error as? ForkUpdateFailure)
+                ?? .classify(
+                    message: error.localizedDescription,
+                    defaultStage: .installation,
+                    candidateIdentifier: candidate.forkCommit
+                )
+            await record(failure: failure, attemptIdentifier: installationAttempt)
+            throw failure
         }
         switch outcome {
         case .completed:
+            await logger.record(
+                ForkUpdateLogRecord(
+                    timestamp: Date(),
+                    attemptIdentifier: installationAttempt,
+                    stage: .installation,
+                    outcome: .succeeded,
+                    candidateIdentifier: candidate.forkCommit,
+                    forkCommit: candidate.forkCommit,
+                    upstreamCommit: candidate.upstreamCommit,
+                    retry: nil,
+                    message: nil
+                )
+            )
             return nil
         case .candidateStale:
+            await logger.record(
+                ForkUpdateLogRecord(
+                    timestamp: Date(),
+                    attemptIdentifier: installationAttempt,
+                    stage: .installation,
+                    outcome: .failed,
+                    candidateIdentifier: candidate.forkCommit,
+                    forkCommit: candidate.forkCommit,
+                    upstreamCommit: candidate.upstreamCommit,
+                    retry: nil,
+                    message: "The approved candidate became stale before installation."
+                )
+            )
             try credentialSnapshotter.deleteSnapshot(generationIdentifier: credentialGeneration)
             try removeRecoveryIntentIfPresent(at: recoveryIntentURL)
             switch try await prepare(mode: .candidateRevalidation) {
@@ -542,25 +886,82 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
                 throw ForkUpdateError(message: "VoiceInk deferred a user-approved update unexpectedly.")
             case .staged(let candidate):
                 return candidate
+            case .failureSuppressed(let failure):
+                throw failure
             }
         }
     }
 
     func restorePreviousVersion() async throws {
+        let attemptIdentifier = "rollback-\(UUID().uuidString.lowercased())"
         guard
             canRestorePreviousVersion,
             let restorationScriptURL,
             let targetBundleURL,
             let backupBundleURL
         else {
-            throw ForkUpdateError(message: "VoiceInk does not have a previous version to restore.")
+            let failure = ForkUpdateFailure.classify(
+                message: "VoiceInk does not have a previous version to restore.",
+                defaultStage: .rollback
+            )
+            await record(failure: failure, attemptIdentifier: attemptIdentifier)
+            throw failure
         }
-        try await restorationRunner.restore(
-            ForkUpdateRestorationRequest(
-                scriptURL: restorationScriptURL,
-                targetBundleURL: targetBundleURL,
-                backupBundleURL: backupBundleURL,
-                parentProcessIdentifier: parentProcessIdentifier
+        await logger.record(
+            ForkUpdateLogRecord(
+                timestamp: Date(),
+                attemptIdentifier: attemptIdentifier,
+                stage: .rollback,
+                outcome: .started,
+                candidateIdentifier: nil,
+                forkCommit: nil,
+                upstreamCommit: nil,
+                retry: nil,
+                message: nil
+            )
+        )
+        do {
+            try await restorationRunner.restore(
+                ForkUpdateRestorationRequest(
+                    scriptURL: restorationScriptURL,
+                    targetBundleURL: targetBundleURL,
+                    backupBundleURL: backupBundleURL,
+                    parentProcessIdentifier: parentProcessIdentifier
+                )
+            )
+            await logger.record(
+                ForkUpdateLogRecord(
+                    timestamp: Date(),
+                    attemptIdentifier: attemptIdentifier,
+                    stage: .rollback,
+                    outcome: .succeeded,
+                    candidateIdentifier: nil,
+                    forkCommit: nil,
+                    upstreamCommit: nil,
+                    retry: nil,
+                    message: nil
+                )
+            )
+        } catch {
+            let failure = (error as? ForkUpdateFailure)
+                ?? .classify(message: error.localizedDescription, defaultStage: .rollback)
+            await record(failure: failure, attemptIdentifier: attemptIdentifier)
+            throw failure
+        }
+    }
+
+    private func record(failure: ForkUpdateFailure, attemptIdentifier: String) async {
+        await logger.record(
+            ForkUpdateLogRecord(
+                timestamp: Date(),
+                attemptIdentifier: attemptIdentifier,
+                stage: failure.stage,
+                outcome: .failed,
+                candidateIdentifier: failure.candidateIdentifier,
+                forkCommit: nil,
+                upstreamCommit: nil,
+                retry: nil,
+                message: failure.message
             )
         )
     }
@@ -699,9 +1100,12 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
 
     func start() {
         onEvent?(.stateChanged(state))
-        guard let candidate = try? transaction?.loadStagedCandidate() else { return }
-        stagedCandidate = candidate
-        onEvent?(.stagedCandidate(candidate))
+        if let candidate = try? transaction?.loadStagedCandidate() {
+            stagedCandidate = candidate
+            onEvent?(.stagedCandidate(candidate))
+        } else if let failure = try? transaction?.loadPersistentFailure() {
+            onEvent?(.preparationFailed(failure))
+        }
     }
 
     func checkForUpdateInformation() {
@@ -727,16 +1131,24 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
             do {
                 switch try await transaction.prepare(mode: mode) {
                 case .upToDate(let provenance):
+                    try? transaction.clearPersistentFailure()
                     self?.stagedCandidate = nil
                     self?.onEvent?(.forkUpToDate(provenance))
                 case .buildDeferred:
                     break
                 case .staged(let candidate):
+                    try? transaction.clearPersistentFailure()
                     self?.stagedCandidate = candidate
                     self?.onEvent?(.stagedCandidate(candidate))
+                case .failureSuppressed(let failure):
+                    try? transaction.persistFailure(failure)
+                    self?.onEvent?(.preparationFailed(failure))
                 }
             } catch {
-                self?.onEvent?(.preparationFailed(error.localizedDescription))
+                let failure = (error as? ForkUpdateFailure)
+                    ?? .classify(message: error.localizedDescription)
+                try? transaction.persistFailure(failure)
+                self?.onEvent?(.preparationFailed(failure))
             }
             self?.finishUpdateCycle()
         }
@@ -760,7 +1172,14 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
                     self?.onEvent?(.stagedCandidate(replacement))
                 }
             } catch {
-                self?.onEvent?(.preparationFailed(error.localizedDescription))
+                let failure = (error as? ForkUpdateFailure)
+                    ?? .classify(
+                        message: error.localizedDescription,
+                        defaultStage: .installation,
+                        candidateIdentifier: candidate.forkCommit
+                    )
+                try? transaction.persistFailure(failure)
+                self?.onEvent?(.preparationFailed(failure))
             }
             self?.finishUpdateCycle()
         }
@@ -780,8 +1199,13 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
         Task { [weak self] in
             do {
                 try await transaction.restorePreviousVersion()
+                try? transaction.clearPersistentFailure()
+                self?.onEvent?(.rollbackCompleted)
             } catch {
-                self?.onEvent?(.preparationFailed(error.localizedDescription))
+                let failure = (error as? ForkUpdateFailure)
+                    ?? .classify(message: error.localizedDescription, defaultStage: .rollback)
+                try? transaction.persistFailure(failure)
+                self?.onEvent?(.preparationFailed(failure))
             }
             self?.finishUpdateCycle()
         }

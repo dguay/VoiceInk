@@ -227,7 +227,11 @@ struct UpdaterViewModelTests {
         )
 
         adapter.send(.stagedCandidate(candidate))
-        adapter.send(.preparationFailed("VoiceInk could not read credentials."))
+        adapter.send(
+            .preparationFailed(
+                ForkUpdateFailure.classify(message: "VoiceInk could not read credentials.")
+            )
+        )
 
         #expect(updater.state.stagedUpdate == nil)
         #expect(!updater.state.isPresentingStagedUpdate)
@@ -1156,7 +1160,7 @@ private struct ForkUpdatePowerStateStub: ForkUpdatePowerStateProviding {
 private struct ForkUpdateCommandRunnerStub: ForkUpdateCommandRunning {
     let result: ForkUpdateCommandResult
 
-    init(result: ForkUpdateCommandResult = .candidatePrepared) {
+    init(result: ForkUpdateCommandResult = .candidatePrepared(candidateIdentifier: nil)) {
         self.result = result
     }
 

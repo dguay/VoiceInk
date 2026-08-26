@@ -44,6 +44,7 @@ struct UpdaterState: Equatable {
     var isPreparingUpdate: Bool
     var isPresentingStagedUpdate: Bool
     var preparationError: String?
+    var failure: ForkUpdateFailure?
 }
 
 @MainActor
@@ -59,6 +60,7 @@ protocol UpdaterModule: AnyObject {
     func showRestorePreviousVersion()
     func cancelRestorePreviousVersion()
     func restorePreviousVersion()
+    func openUpdateLogs()
 }
 
 struct UpdaterAdapterState: Equatable {
@@ -82,7 +84,8 @@ enum UpdaterAdapterEvent: Equatable {
     case didFinishUpdateCycle
     case forkUpToDate(SourceProvenance)
     case stagedCandidate(StagedForkCandidate)
-    case preparationFailed(String)
+    case preparationFailed(ForkUpdateFailure)
+    case rollbackCompleted
 }
 
 @MainActor
@@ -126,11 +129,15 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         static let automaticUpdateChecks = "VoiceInkChecksForUpdatesOnLaunch"
         static let interactedUpdateVersions = "VoiceInkInteractedUpdateVersions"
         static let sparkleAutomaticChecks = "SUEnableAutomaticChecks"
+        static let notifiedCandidateCommits = "VoiceInkForkUpdaterNotifiedCandidateCommits"
+        static let activeFailureNotification = "VoiceInkForkUpdaterActiveFailureNotification"
     }
 
     private let defaults: UserDefaults
     private let adapter: any UpdaterAdapter
     private let automaticUpdateScheduler: (any AutomaticUpdateScheduling)?
+    private let notificationDeliverer: any ForkUpdateNotificationDelivering
+    private let logOpener: any ForkUpdateLogOpening
     private var isUserInitiatedUpdateCheck = false
 
     @Published private(set) var state: UpdaterState
@@ -151,11 +158,15 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         defaults: UserDefaults,
         adapter: any UpdaterAdapter,
         sourceProvenance: SourceProvenance? = SourceProvenance.from(bundle: .main),
-        automaticUpdateScheduler: (any AutomaticUpdateScheduling)? = nil
+        automaticUpdateScheduler: (any AutomaticUpdateScheduling)? = nil,
+        notificationDeliverer: any ForkUpdateNotificationDelivering = AppForkUpdateNotificationDeliverer(),
+        logOpener: any ForkUpdateLogOpening = WorkspaceForkUpdateLogOpener()
     ) {
         self.defaults = defaults
         self.adapter = adapter
         self.automaticUpdateScheduler = automaticUpdateScheduler
+        self.notificationDeliverer = notificationDeliverer
+        self.logOpener = logOpener
         state = UpdaterState(
             canCheckForUpdates: adapter.state.canCheckForUpdates,
             checksForUpdatesWhenDashboardAppears: Self.initialAutomaticCheckPreference(in: defaults),
@@ -166,7 +177,8 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             stagedUpdate: nil,
             isPreparingUpdate: adapter.state.sessionInProgress,
             isPresentingStagedUpdate: false,
-            preparationError: nil
+            preparationError: nil,
+            failure: nil
         )
 
         adapter.onEvent = { [weak self] event in
@@ -210,6 +222,8 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         guard state.canCheckForUpdates else { return }
 
         state.preparationError = nil
+        state.failure = nil
+        defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
 
         // Any explicit check is interaction with the currently advertised update.
         // Persist it before presenting the adapter's update UI so dismissing or closing
@@ -255,6 +269,10 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         state.isPresentingRestorePreviousVersion = false
     }
 
+    func openUpdateLogs() {
+        logOpener.openLogs()
+    }
+
     private func handle(_ event: UpdaterAdapterEvent) {
         switch event {
         case .stateChanged(let adapterState):
@@ -270,15 +288,77 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.stagedUpdate = nil
             state.isPresentingStagedUpdate = false
             state.preparationError = nil
+            state.failure = nil
+            defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
         case .stagedCandidate(let candidate):
             state.stagedUpdate = candidate
             state.isPresentingStagedUpdate = true
             state.preparationError = nil
-        case .preparationFailed(let message):
+            state.failure = nil
+            defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
+            notifyCandidateIfNeeded(candidate)
+        case .preparationFailed(let failure):
             state.stagedUpdate = nil
             state.isPresentingStagedUpdate = false
-            state.preparationError = message
+            state.preparationError = failure.message
+            state.failure = failure
+            notifyFailureIfNeeded(failure)
+        case .rollbackCompleted:
+            state.failure = nil
+            state.preparationError = nil
+            defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
+            notificationDeliverer.deliver(
+                ForkUpdateUserNotification(
+                    identifier: "rollback-completed",
+                    kind: .rollbackSucceeded,
+                    title: "VoiceInk restored the previous version.",
+                    actionLabel: "Open Logs"
+                ),
+                action: { [weak self] in self?.openUpdateLogs() }
+            )
         }
+    }
+
+    private func notifyCandidateIfNeeded(_ candidate: StagedForkCandidate) {
+        var commits = defaults.stringArray(forKey: DefaultsKey.notifiedCandidateCommits) ?? []
+        guard !commits.contains(candidate.forkCommit) else { return }
+        commits.append(candidate.forkCommit)
+        defaults.set(Array(commits.suffix(20)), forKey: DefaultsKey.notifiedCandidateCommits)
+        notificationDeliverer.deliver(
+            ForkUpdateUserNotification(
+                identifier: "candidate-\(candidate.forkCommit)",
+                kind: .candidateReady,
+                title: "A verified VoiceInk update is ready.",
+                actionLabel: "View"
+            ),
+            action: { [weak self] in self?.showStagedUpdate() }
+        )
+    }
+
+    private func notifyFailureIfNeeded(_ failure: ForkUpdateFailure) {
+        let identifier = "\(failure.candidateIdentifier ?? "unknown"):\(failure.stage.rawValue)"
+        guard defaults.string(forKey: DefaultsKey.activeFailureNotification) != identifier else {
+            return
+        }
+        defaults.set(identifier, forKey: DefaultsKey.activeFailureNotification)
+        let kind: ForkUpdateUserNotification.Kind
+        switch failure.stage {
+        case .permission:
+            kind = .permissionRegression
+        case .rollback:
+            kind = .rollbackFailed
+        default:
+            kind = .persistentFailure
+        }
+        notificationDeliverer.deliver(
+            ForkUpdateUserNotification(
+                identifier: identifier,
+                kind: kind,
+                title: failure.message,
+                actionLabel: "Open Logs"
+            ),
+            action: { [weak self] in self?.openUpdateLogs() }
+        )
     }
 
     private func apply(_ adapterState: UpdaterAdapterState) {

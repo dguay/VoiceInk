@@ -71,6 +71,11 @@ set -euo pipefail
 [[ -f "$PWD/candidate-marker" ]]
 printf '%s|%s\n' "$PWD" "$*" >> "$XCODE_LOG"
 
+if [[ "${XCODE_SHOULD_FAIL:-0}" == 1 && " $* " == *" -only-testing:VoiceInkTests/UpdaterViewModelTests test "* ]]; then
+    printf 'error: deterministic updater test failure\n' >&2
+    exit 1
+fi
+
 derived_data=""
 fork_commit=""
 upstream_commit=""
@@ -147,6 +152,65 @@ if [[ "$(/usr/bin/plutil -extract outcome raw "$up_to_date_result")" != "upToDat
     || "$(/usr/bin/plutil -extract upstreamCommit raw "$up_to_date_result")" != "$upstream_sha" ]]
 then
     printf 'prepare-local-update-test: exact installed fork reported the wrong provenance\n' >&2
+    exit 1
+fi
+
+failure_manifest="$fixture_root/failure/staged-candidate.plist"
+failure_result="$fixture_root/failure/preparation-result.plist"
+failure_state="$fixture_root/failure/failure-state.plist"
+xcode_count_before_failure="$(wc -l < "$xcode_log" 2>/dev/null || printf '0')"
+if PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    XCODE_SHOULD_FAIL=1 \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$failure_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$failure_result" \
+    VOICEINK_UPDATE_FAILURE_STATE_PATH="$failure_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/failure-first.log" 2>&1
+then
+    printf 'prepare-local-update-test: deterministic test failure was accepted\n' >&2
+    exit 1
+fi
+xcode_count_after_failure="$(wc -l < "$xcode_log")"
+if [[ ! -f "$failure_state" \
+    || "$(/usr/bin/plutil -extract stage raw "$failure_state" 2>/dev/null || true)" != "test" \
+    || "$(/usr/bin/plutil -extract candidateIdentifier raw "$failure_state" 2>/dev/null || true)" != "$candidate_sha:$upstream_sha" \
+    || "$xcode_count_after_failure" -ne $((xcode_count_before_failure + 1)) ]]
+then
+    printf 'prepare-local-update-test: deterministic failure state was not recorded\n' >&2
+    exit 1
+fi
+
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$failure_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$failure_result" \
+    VOICEINK_UPDATE_FAILURE_STATE_PATH="$failure_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+if [[ "$(/usr/bin/plutil -extract outcome raw "$failure_result" 2>/dev/null || true)" != "failureSuppressed" \
+    || "$(wc -l < "$xcode_log")" -ne "$xcode_count_after_failure" ]]
+then
+    printf 'prepare-local-update-test: unchanged deterministic failure reran automatically\n' >&2
+    exit 1
+fi
+
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$failure_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$failure_result" \
+    VOICEINK_UPDATE_FAILURE_STATE_PATH="$failure_state" \
+    VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE=1 \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+if [[ ! -f "$failure_manifest" || -e "$failure_state" \
+    || "$(wc -l < "$xcode_log")" -ne $((xcode_count_after_failure + 3)) ]]
+then
+    printf 'prepare-local-update-test: explicit retry did not rerun the failed stage\n' >&2
     exit 1
 fi
 

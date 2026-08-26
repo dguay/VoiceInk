@@ -303,6 +303,23 @@ struct SettingsView: View {
                         }
                         .help("Staged fork commit \(stagedUpdate.forkCommit.prefix(12))")
                     }
+                } else if let failure = updaterViewModel.state.failure {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(failure.message)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                        Text(failure.recoverySuggestion)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("Retry") {
+                                updaterViewModel.checkForUpdates()
+                            }
+                            Button("Open Update Logs") {
+                                updaterViewModel.openUpdateLogs()
+                            }
+                        }
+                    }
+                    .font(.caption)
                 } else if let preparationError = updaterViewModel.state.preparationError {
                     Text(preparationError)
                         .font(.caption)
