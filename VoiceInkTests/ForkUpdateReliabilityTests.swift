@@ -106,42 +106,61 @@ struct ForkUpdateReliabilityTests {
     }
 
     @Test
-    func installationRunnerReportsAnAutomaticRollbackOutcomeSeparately() async throws {
+    func postTerminationOutcomeIsImportedBeforeRelaunch() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
-        let scriptURL = temporaryDirectory.appendingPathComponent("install-local-update.sh")
-        try Data("""
-            #!/usr/bin/env bash
-            printf 'Error: Candidate health verification failed.\n' >&2
-            printf 'VoiceInk automatic rollback succeeded.\n' >&2
-            exit 1
-            """.utf8).write(to: scriptURL)
-        let candidate = StagedForkCandidate(
+        let updaterDirectory = temporaryDirectory.appendingPathComponent("Updater", isDirectory: true)
+        let logDirectory = updaterDirectory.appendingPathComponent("Logs", isDirectory: true)
+        let reportURL = updaterDirectory.appendingPathComponent("install-result.plist")
+        let report = LocalUpdateInstallationOutcomeReport(
+            attemptIdentifier: "installation-candidate",
+            candidateIdentifier: "candidate",
             forkCommit: "0123456789abcdef0123456789abcdef01234567",
             upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
-            bundleURL: temporaryDirectory.appendingPathComponent("VoiceInk.app"),
-            preparedAt: Date(timeIntervalSince1970: 1_787_400_000)
+            outcome: .failed,
+            failureStage: .permission,
+            failureKind: .deterministic,
+            message: "The installed app lost microphone permission after replacement.",
+            rollbackOutcome: .succeeded
         )
+        try FileManager.default.createDirectory(at: updaterDirectory, withIntermediateDirectories: true)
+        try PropertyListEncoder().encode(report).write(to: reportURL)
 
-        do {
-            _ = try await ProcessForkUpdateInstallationRunner().install(
-                ForkUpdateInstallationRequest(
-                    scriptURL: scriptURL,
-                    candidate: candidate,
-                    manifestURL: temporaryDirectory.appendingPathComponent("candidate.plist"),
-                    targetBundleURL: temporaryDirectory.appendingPathComponent("Installed.app"),
-                    backupBundleURL: temporaryDirectory.appendingPathComponent("Recovery.app"),
-                    parentProcessIdentifier: 1,
-                    credentialGeneration: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-                )
-            )
-            Issue.record("Expected the installation helper to fail after rollback")
-        } catch let error as ForkUpdateError {
-            #expect(error.rollbackOutcome == .succeeded)
-            #expect(!error.failureDescription.contains("rollback succeeded"))
-            #expect(error.failureDescription.contains("health verification failed"))
+        try LocalUpdateInstallationOutcomeRecorder(
+            updaterDirectoryURL: updaterDirectory,
+            logDirectoryURL: logDirectory
+        ).consume(reportAt: reportURL)
+
+        let failure = try PropertyListDecoder().decode(
+            ForkUpdateFailure.self,
+            from: Data(contentsOf: updaterDirectory.appendingPathComponent("failure-state.plist"))
+        )
+        let rollback = try PropertyListDecoder().decode(
+            LocalUpdateRollbackNotice.self,
+            from: Data(contentsOf: updaterDirectory.appendingPathComponent("rollback-state.plist"))
+        )
+        let records = await ForkUpdateLogStore(directoryURL: logDirectory).loadRecords()
+
+        #expect(failure.stage == .permission)
+        #expect(rollback.outcome == .succeeded)
+        #expect(records.contains { $0.stage == .permission && $0.outcome == .failed })
+        #expect(records.contains { $0.stage == .rollback && $0.outcome == .succeeded })
+        #expect(!FileManager.default.fileExists(atPath: reportURL.path))
+    }
+
+    @Test
+    func commonTransientGitAndDependencyFailuresAreRetried() {
+        let messages = [
+            "RPC failed; HTTP 503 curl 22",
+            "fetch-pack: unexpected disconnect while reading sideband packet",
+            "fatal: early EOF",
+            "Failed to clone repository because the connection was refused",
+        ]
+
+        for message in messages {
+            #expect(ForkUpdateFailure.classify(message: message).kind == .transient)
         }
     }
 
@@ -238,7 +257,7 @@ struct ForkUpdateReliabilityTests {
             directoryURL: temporaryDirectory,
             now: { now },
             maximumAge: 1,
-            maximumBytes: 1
+            maximumBytes: 2_048
         )
         await logger.record(
             ForkUpdateLogRecord(
@@ -257,6 +276,97 @@ struct ForkUpdateReliabilityTests {
         let records = await logger.loadRecords()
 
         #expect(records.contains { $0.attemptIdentifier == "preflight-failure" })
+    }
+
+    @Test
+    func corruptLogFilesCannotBypassTheSizeCap() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        try Data(repeating: 0x41, count: 4_096).write(
+            to: temporaryDirectory.appendingPathComponent("attempt-corrupt.jsonl")
+        )
+        let logger = ForkUpdateLogStore(
+            directoryURL: temporaryDirectory,
+            maximumAge: 30 * 24 * 60 * 60,
+            maximumBytes: 2_048
+        )
+
+        await logger.record(
+            ForkUpdateLogRecord(
+                timestamp: Date(),
+                attemptIdentifier: "valid",
+                stage: .fetch,
+                outcome: .failed,
+                candidateIdentifier: nil,
+                forkCommit: nil,
+                upstreamCommit: nil,
+                retry: 2,
+                message: "Network unavailable."
+            )
+        )
+
+        let storedBytes = try FileManager.default.contentsOfDirectory(
+            at: temporaryDirectory,
+            includingPropertiesForKeys: [.fileSizeKey]
+        ).reduce(0) { total, url in
+            total + ((try url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+        #expect(storedBytes <= 2_048)
+        #expect(await logger.loadRecords().contains { $0.attemptIdentifier == "valid" })
+    }
+
+    @Test
+    func oversizedProtectedBundleIsCompactedWithoutLosingItsFailure() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let protectedURL = temporaryDirectory.appendingPathComponent("attempt-protected.jsonl")
+        var oversized = Data()
+        for index in 0 ..< 20 {
+            let record = ForkUpdateLogRecord(
+                timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                attemptIdentifier: "protected",
+                stage: .build,
+                outcome: index == 19 ? .failed : .retrying,
+                candidateIdentifier: "candidate",
+                forkCommit: nil,
+                upstreamCommit: nil,
+                retry: index,
+                message: String(repeating: "evidence ", count: 20)
+            )
+            oversized.append(try JSONEncoder().encode(record))
+            oversized.append(0x0A)
+        }
+        try oversized.write(to: protectedURL)
+        let logger = ForkUpdateLogStore(directoryURL: temporaryDirectory, maximumBytes: 2_048)
+
+        await logger.record(
+            ForkUpdateLogRecord(
+                timestamp: Date(timeIntervalSince1970: 21),
+                attemptIdentifier: "other",
+                stage: .fetch,
+                outcome: .succeeded,
+                candidateIdentifier: "other",
+                forkCommit: nil,
+                upstreamCommit: nil,
+                retry: nil,
+                message: nil
+            )
+        )
+
+        let storedBytes = try FileManager.default.contentsOfDirectory(
+            at: temporaryDirectory,
+            includingPropertiesForKeys: [.fileSizeKey]
+        ).reduce(0) { total, url in
+            total + ((try url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+        #expect(storedBytes <= 2_048)
+        #expect(await logger.loadRecords().contains {
+            $0.attemptIdentifier == "protected" && $0.outcome == .failed
+        })
     }
 
     @Test @MainActor
@@ -343,6 +453,37 @@ struct ForkUpdateReliabilityTests {
         #expect(logOpener.openCount == 1)
         #expect(adapter.updateCheckCount == 1)
         #expect(updater.state.failure == nil)
+    }
+
+    @Test @MainActor
+    func automaticRollbackNotificationKeepsTheActionablePrimaryFailure() {
+        let suiteName = "ForkUpdateReliabilityTests.automatic-rollback"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let adapter = ReliabilityUpdaterAdapterStub()
+        let notifications = ForkUpdateNotificationRecorder()
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: adapter,
+            notificationDeliverer: notifications
+        )
+        let failure = ForkUpdateFailure.reported(
+            stage: .permission,
+            kind: .deterministic,
+            candidateIdentifier: "candidate",
+            message: "VoiceInk lost microphone permission."
+        )
+
+        adapter.send(.preparationFailed(failure))
+        adapter.send(
+            .automaticRollbackReported(
+                LocalUpdateRollbackNotice(candidateIdentifier: "candidate", outcome: .succeeded)
+            )
+        )
+
+        #expect(notifications.notifications.map(\.kind) == [.permissionRegression, .rollbackSucceeded])
+        #expect(updater.state.failure == failure)
     }
 }
 

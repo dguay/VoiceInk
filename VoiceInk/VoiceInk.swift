@@ -11,6 +11,10 @@ enum VoiceInkMain {
     static func main() {
         #if LOCAL_BUILD
             do {
+                if try LocalUpdateInstallationOutcomeRecorder.runIfRequested() {
+                    Darwin.exit(EXIT_SUCCESS)
+                }
+                try LocalUpdateInstallationOutcomeRecorder.consumePendingIfPresent()
                 if try LocalUpdateCredentialRecoveryCommand.runIfRequested() {
                     Darwin.exit(EXIT_SUCCESS)
                 }

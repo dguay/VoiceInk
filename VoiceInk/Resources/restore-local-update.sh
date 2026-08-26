@@ -9,6 +9,7 @@ fail() {
 
 automatic=false
 resume=false
+defer_relaunch="${VOICEINK_UPDATE_DEFER_RELAUNCH:-0}"
 if [[ "${1:-}" == "--resume" ]]; then
     [[ "$#" -eq 3 ]] \
         || fail "Usage: restore-local-update.sh --resume TARGET_BUNDLE BACKUP_BUNDLE"
@@ -142,7 +143,9 @@ finish_restore() {
         if [[ "$recovery_state_mutation_started" == true && -f "$rejected_recovery_state" ]]; then
             /bin/cp "$rejected_recovery_state" "$recovery_state" || compensation_failed=true
         fi
-        if [[ "$compensation_failed" == false && "$credential_replacement_started" == false ]]; then
+        if [[ "$compensation_failed" == false && "$credential_replacement_started" == false \
+            && "$defer_relaunch" != 1 ]]
+        then
             if [[ -n "$relauncher" ]]; then
                 "$relauncher" "$target_bundle" >/dev/null 2>&1 || compensation_failed=true
             else
@@ -257,7 +260,7 @@ credential_replacement_started=false
     || fail "VoiceInk could not commit the completed rollback state."
 restore_complete=true
 
-if [[ "$resume" == false ]]; then
+if [[ "$resume" == false && "$defer_relaunch" != 1 ]]; then
     if [[ -n "$relauncher" ]]; then
         "$relauncher" "$target_bundle"
     else

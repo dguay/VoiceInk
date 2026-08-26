@@ -2,8 +2,12 @@
 
 set -euo pipefail
 
+failure_message=""
+failure_stage="installation"
+
 fail() {
-    printf 'Error: %s\n' "$*" >&2
+    failure_message="$*"
+    printf 'Error: %s\n' "$failure_message" >&2
     exit 1
 }
 
@@ -24,6 +28,8 @@ stage_root="$(dirname "$manifest_path")"
 git_command="${VOICEINK_UPDATE_GIT_COMMAND:-git}"
 credential_generation="${VOICEINK_UPDATE_CREDENTIAL_GENERATION:-}"
 credential_snapshot_deleter="${VOICEINK_UPDATE_CREDENTIAL_SNAPSHOT_DELETER:-}"
+install_result_path="${VOICEINK_UPDATE_INSTALL_RESULT_PATH:-$stage_root/install-result.plist}"
+outcome_recorder="${VOICEINK_UPDATE_OUTCOME_RECORDER:-}"
 
 if [[ -n "$credential_generation" ]]; then
     [[ "$credential_generation" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] \
@@ -348,6 +354,9 @@ recovery_published=false
 credential_snapshot_created=true
 publication_succeeded=false
 publication_outcome_uncertain=false
+rollback_attempted=false
+rollback_succeeded=false
+needs_relaunch=false
 
 launch_candidate() {
     if [[ -n "$launcher" ]]; then
@@ -441,11 +450,12 @@ stop_launched_candidate() {
 run_automatic_rollback() {
     rollback_bundle="$backup_bundle"
     [[ "$recovery_published" == true ]] || rollback_bundle="$recovery_temporary/VoiceInk.app"
+    rollback_attempted=true
     rollback_succeeded=false
     if [[ "$candidate_stopped" == true && -d "$rollback_bundle" ]] \
-        && /bin/bash "$restoration_script" --automatic "$target_bundle" "$rollback_bundle"; then
+        && VOICEINK_UPDATE_DEFER_RELAUNCH=1 \
+            /bin/bash "$restoration_script" --automatic "$target_bundle" "$rollback_bundle"; then
         rollback_succeeded=true
-        printf 'VoiceInk automatic rollback succeeded.\n' >&2
         return
     fi
     printf 'Error: Automatic rollback could not restore a consistent local state.\n' >&2
@@ -498,6 +508,42 @@ cleanup_installation_artifacts() {
     fi
 }
 
+persist_installation_outcome() {
+    local outcome="succeeded"
+    local temporary="$install_result_path.tmp.$$"
+    [[ "$result" -eq 0 ]] || outcome="failed"
+    mkdir -p "$(dirname "$install_result_path")"
+    /usr/bin/plutil -create xml1 "$temporary"
+    /usr/bin/plutil -insert attemptIdentifier -string "installation-$approved_sha" "$temporary"
+    /usr/bin/plutil -insert candidateIdentifier -string "$approved_sha" "$temporary"
+    /usr/bin/plutil -insert forkCommit -string "$approved_sha" "$temporary"
+    /usr/bin/plutil -insert upstreamCommit -string "$manifest_upstream_sha" "$temporary"
+    /usr/bin/plutil -insert outcome -string "$outcome" "$temporary"
+    if [[ "$outcome" == "failed" ]]; then
+        /usr/bin/plutil -insert failureStage -string "$failure_stage" "$temporary"
+        /usr/bin/plutil -insert failureKind -string deterministic "$temporary"
+        /usr/bin/plutil -insert message -string \
+            "${failure_message:-VoiceInk could not install the local update.}" "$temporary"
+    fi
+    if [[ "$rollback_attempted" == true ]]; then
+        rollback_outcome="failed"
+        [[ "$rollback_succeeded" == true ]] && rollback_outcome="succeeded"
+        /usr/bin/plutil -insert rollbackOutcome -string "$rollback_outcome" "$temporary"
+    fi
+    chmod 600 "$temporary"
+    mv "$temporary" "$install_result_path"
+}
+
+record_installation_outcome() {
+    if [[ -n "$outcome_recorder" ]]; then
+        "$outcome_recorder" "$install_result_path"
+        return
+    fi
+    outcome_executable="$target_bundle/Contents/MacOS/VoiceInk"
+    [[ -x "$outcome_executable" ]] \
+        && "$outcome_executable" --voiceink-record-update-outcome "$install_result_path"
+}
+
 finish_transaction() {
     result=$?
     trap - EXIT
@@ -513,9 +559,9 @@ finish_transaction() {
         run_automatic_rollback
         publish_recovered_pending_generation
         remove_previous_recovery_generation
-    elif [[ "$result" -ne 0 && "$parent_terminated" == true ]] && ! relaunch_previous; then
-        printf 'Error: VoiceInk could not relaunch the previous version after the failed update.\n' >&2
-        result=2
+        needs_relaunch=true
+    elif [[ "$result" -ne 0 && "$parent_terminated" == true ]]; then
+        needs_relaunch=true
     fi
 
     restore_previous_recovery_directory
@@ -525,6 +571,18 @@ finish_transaction() {
         result=2
     fi
     cleanup_installation_artifacts
+    if [[ "$parent_terminated" == true ]]; then
+        if ! persist_installation_outcome; then
+            printf 'Error: VoiceInk could not persist the installation outcome.\n' >&2
+            result=2
+        elif ! record_installation_outcome; then
+            printf 'Error: VoiceInk deferred installation outcome import until the next launch.\n' >&2
+        fi
+    fi
+    if [[ "$needs_relaunch" == true ]] && ! relaunch_previous; then
+        printf 'Error: VoiceInk could not relaunch the previous version after the failed update.\n' >&2
+        result=2
+    fi
     exit "$result"
 }
 trap finish_transaction EXIT
@@ -619,6 +677,7 @@ fi
 move_recovery_directory "$recovery_temporary" "$recovery_root"
 recovery_published=true
 
+failure_stage="health"
 /bin/rm -f "$health_path"
 launched_pid="$(launch_candidate)"
 [[ "$launched_pid" =~ ^[1-9][0-9]*$ ]] \
@@ -662,9 +721,11 @@ verify_permission_preserved() {
         || fail "The installed app lost $label permission after replacement."
 }
 
+failure_stage="permission"
 verify_permission_preserved microphoneAuthorized microphone
 verify_permission_preserved accessibilityAuthorized accessibility
 verify_permission_preserved screenCaptureAuthorized "screen capture"
+failure_stage="health"
 
 for ((attempt = 0; attempt < stability_seconds * 10; attempt++)); do
     kill -0 "$launched_pid" 2>/dev/null \
@@ -672,6 +733,7 @@ for ((attempt = 0; attempt < stability_seconds * 10; attempt++)); do
     sleep 0.1
 done
 
+failure_stage="installation"
 /usr/bin/plutil -replace installInProgress -bool false "$recovery_root/recovery.plist" \
     || fail "VoiceInk could not commit the successful installation state."
 

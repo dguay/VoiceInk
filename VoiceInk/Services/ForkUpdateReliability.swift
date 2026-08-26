@@ -122,11 +122,22 @@ struct ForkUpdateFailure: Codable, Equatable, LocalizedError, Sendable {
             "network connection was lost",
             "connection reset",
             "connection timed out",
+            "connection refused",
+            "connection was refused",
+            "network is unreachable",
+            "remote end hung up",
+            "unexpected disconnect",
+            "early eof",
+            "rpc failed",
+            "failed to clone repository",
             "failed downloading",
             "failed to download",
             "package resolution failed",
         ]
-        if transientMarkers.contains(where: normalized.contains) {
+        let transientHTTPStatuses = ["http 500", "http 502", "http 503", "http 504"]
+        if transientMarkers.contains(where: normalized.contains)
+            || transientHTTPStatuses.contains(where: normalized.contains)
+        {
             return ForkUpdateFailure(
                 stage: defaultStage == .preflight ? .fetch : defaultStage,
                 kind: .transient,
@@ -230,12 +241,36 @@ actor ForkUpdateLogStore: ForkUpdateLogging {
     .appendingPathComponent("Logs", isDirectory: true)
     static let shared = ForkUpdateLogStore(directoryURL: directoryURL)
 
+    private let archive: ForkUpdateLogArchive
+
+    init(
+        directoryURL: URL,
+        now: @escaping @Sendable () -> Date = { Date() },
+        maximumAge: TimeInterval = ForkUpdateLogStore.maximumAge,
+        maximumBytes: Int = ForkUpdateLogStore.maximumBytes
+    ) {
+        archive = ForkUpdateLogArchive(
+            directoryURL: directoryURL,
+            now: now,
+            maximumAge: maximumAge,
+            maximumBytes: maximumBytes
+        )
+    }
+
+    func record(_ record: ForkUpdateLogRecord) async {
+        try? archive.record(record)
+    }
+
+    func loadRecords() -> [ForkUpdateLogRecord] {
+        (try? archive.loadRecords()) ?? []
+    }
+}
+
+struct ForkUpdateLogArchive {
     private let directoryURL: URL
     private let now: @Sendable () -> Date
     private let maximumAge: TimeInterval
     private let maximumBytes: Int
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
 
     init(
         directoryURL: URL,
@@ -249,47 +284,31 @@ actor ForkUpdateLogStore: ForkUpdateLogging {
         self.maximumBytes = maximumBytes
     }
 
-    func record(_ record: ForkUpdateLogRecord) async {
-        do {
-            try FileManager.default.createDirectory(
-                at: directoryURL,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
+    func record(_ record: ForkUpdateLogRecord) throws {
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let data = try encodedLine(for: sanitized(record))
+        let url = bundleURL(for: record.attemptIdentifier)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(
+                atPath: url.path,
+                contents: nil,
+                attributes: [.posixPermissions: 0o600]
             )
-            let sanitized = ForkUpdateLogRecord(
-                timestamp: record.timestamp,
-                attemptIdentifier: record.attemptIdentifier,
-                stage: record.stage,
-                outcome: record.outcome,
-                candidateIdentifier: record.candidateIdentifier,
-                forkCommit: record.forkCommit,
-                upstreamCommit: record.upstreamCommit,
-                retry: record.retry,
-                message: record.message.map(Self.sanitize)
-            )
-            var data = try encoder.encode(sanitized)
-            data.append(0x0A)
-            let url = bundleURL(for: sanitized.attemptIdentifier)
-            if !FileManager.default.fileExists(atPath: url.path) {
-                FileManager.default.createFile(
-                    atPath: url.path,
-                    contents: nil,
-                    attributes: [.posixPermissions: 0o600]
-                )
-            }
-            let handle = try FileHandle(forWritingTo: url)
-            defer { try? handle.close() }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: data)
-            try prune()
-        } catch {
-            // Updater evidence must never make an update operation fail.
         }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
+        try prune()
     }
 
-    func loadRecords() -> [ForkUpdateLogRecord] {
-        (try? bundleURLs().flatMap(records(in:)))?
-            .sorted { $0.timestamp < $1.timestamp } ?? []
+    func loadRecords() throws -> [ForkUpdateLogRecord] {
+        try bundleURLs().flatMap { (try? records(in: $0)) ?? [] }
+            .sorted { $0.timestamp < $1.timestamp }
     }
 
     private func bundleURL(for attemptIdentifier: String) -> URL {
@@ -312,30 +331,38 @@ actor ForkUpdateLogStore: ForkUpdateLogging {
     private func records(in url: URL) throws -> [ForkUpdateLogRecord] {
         try String(contentsOf: url, encoding: .utf8)
             .split(separator: "\n")
-            .compactMap { try? decoder.decode(ForkUpdateLogRecord.self, from: Data($0.utf8)) }
+            .compactMap { try? JSONDecoder().decode(ForkUpdateLogRecord.self, from: Data($0.utf8)) }
     }
 
     private func prune() throws {
-        let decodedBundles = try bundleURLs().compactMap { url -> (URL, [ForkUpdateLogRecord], Int)? in
-            let records = try records(in: url)
-            guard !records.isEmpty else { return nil }
-            let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            return (url, records, size)
+        let bundlesWithRecords = try bundleURLs().map { url -> BundleEvidence in
+            let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let decoded = (try? records(in: url)) ?? []
+            return BundleEvidence(
+                url: url,
+                date: decoded.map(\.timestamp).max() ?? values.contentModificationDate ?? .distantPast,
+                size: values.fileSize ?? 0,
+                records: decoded,
+                unresolved: false
+            )
         }
-        let successfulCandidates = decodedBundles
-            .flatMap { $0.1 }
+        let successfulCandidates = bundlesWithRecords
+            .flatMap(\.records)
             .filter { $0.outcome == .succeeded && $0.candidateIdentifier != nil }
-        var bundles = decodedBundles.compactMap { url, records, size -> BundleEvidence? in
-            guard let last = records.max(by: { $0.timestamp < $1.timestamp }) else { return nil }
+        var bundles = bundlesWithRecords.map { bundle -> BundleEvidence in
+            guard let last = bundle.records.max(by: { $0.timestamp < $1.timestamp }) else {
+                return bundle
+            }
             let wasResolved = last.candidateIdentifier.map { candidate in
                 successfulCandidates.contains {
                     $0.candidateIdentifier == candidate && $0.timestamp >= last.timestamp
                 }
             } ?? false
             return BundleEvidence(
-                url: url,
-                date: last.timestamp,
-                size: size,
+                url: bundle.url,
+                date: bundle.date,
+                size: bundle.size,
+                records: bundle.records,
                 unresolved: last.outcome == .failed && !wasResolved
             )
         }
@@ -345,8 +372,9 @@ actor ForkUpdateLogStore: ForkUpdateLogging {
             .url
         let cutoff = now().addingTimeInterval(-maximumAge)
 
-        // Prune expired bundles before enforcing the size cap. Both passes exempt
-        // the newest unresolved failure so a bounded log set still retains recovery evidence.
+        // Remove expired and then oldest non-protected bundles. If the protected
+        // bundle alone exceeds the cap, compact its oldest records instead of losing
+        // the newest unresolved failure evidence.
         for bundle in bundles where bundle.date < cutoff && bundle.url != protectedURL {
             try FileManager.default.removeItem(at: bundle.url)
         }
@@ -358,6 +386,44 @@ actor ForkUpdateLogStore: ForkUpdateLogging {
             try FileManager.default.removeItem(at: bundle.url)
             total -= bundle.size
         }
+        if total > maximumBytes, let protectedURL {
+            try compactProtectedBundle(at: protectedURL)
+        }
+    }
+
+    private func compactProtectedBundle(at url: URL) throws {
+        let newestFirst = try records(in: url).sorted { $0.timestamp > $1.timestamp }
+        var retained: [Data] = []
+        var retainedBytes = 0
+        for record in newestFirst {
+            let line = try encodedLine(for: record)
+            guard retainedBytes + line.count <= maximumBytes else { continue }
+            retained.append(line)
+            retainedBytes += line.count
+        }
+        let compacted = retained.reversed().reduce(into: Data()) { $0.append($1) }
+        try compacted.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func encodedLine(for record: ForkUpdateLogRecord) throws -> Data {
+        var data = try JSONEncoder().encode(record)
+        data.append(0x0A)
+        return data
+    }
+
+    private func sanitized(_ record: ForkUpdateLogRecord) -> ForkUpdateLogRecord {
+        ForkUpdateLogRecord(
+            timestamp: record.timestamp,
+            attemptIdentifier: record.attemptIdentifier,
+            stage: record.stage,
+            outcome: record.outcome,
+            candidateIdentifier: record.candidateIdentifier,
+            forkCommit: record.forkCommit,
+            upstreamCommit: record.upstreamCommit,
+            retry: record.retry,
+            message: record.message.map(Self.sanitize)
+        )
     }
 
     private static func sanitize(_ message: String) -> String {
@@ -382,6 +448,134 @@ actor ForkUpdateLogStore: ForkUpdateLogging {
         let url: URL
         let date: Date
         let size: Int
+        let records: [ForkUpdateLogRecord]
         let unresolved: Bool
+    }
+}
+
+struct LocalUpdateInstallationOutcomeReport: Codable, Equatable, Sendable {
+    let attemptIdentifier: String
+    let candidateIdentifier: String
+    let forkCommit: String
+    let upstreamCommit: String
+    let outcome: ForkUpdateLogOutcome
+    let failureStage: ForkUpdateStage?
+    let failureKind: ForkUpdateFailureKind?
+    let message: String?
+    let rollbackOutcome: ForkUpdateLogOutcome?
+}
+
+struct LocalUpdateRollbackNotice: Codable, Equatable, Sendable {
+    let candidateIdentifier: String
+    let outcome: ForkUpdateLogOutcome
+}
+
+struct LocalUpdateInstallationOutcomeRecorder {
+    private static let commandArgument = "--voiceink-record-update-outcome"
+    static let pendingFilename = "install-result.plist"
+    static let failureFilename = "failure-state.plist"
+    static let rollbackFilename = "rollback-state.plist"
+
+    private let updaterDirectoryURL: URL
+    private let archive: ForkUpdateLogArchive
+
+    init(
+        updaterDirectoryURL: URL,
+        logDirectoryURL: URL = ForkUpdateLogStore.directoryURL
+    ) {
+        self.updaterDirectoryURL = updaterDirectoryURL
+        archive = ForkUpdateLogArchive(directoryURL: logDirectoryURL)
+    }
+
+    static func runIfRequested(arguments: [String] = CommandLine.arguments) throws -> Bool {
+        guard
+            let index = arguments.firstIndex(of: commandArgument),
+            arguments.indices.contains(index + 1)
+        else {
+            return false
+        }
+        let reportURL = URL(fileURLWithPath: arguments[index + 1])
+        try LocalUpdateInstallationOutcomeRecorder(
+            updaterDirectoryURL: reportURL.deletingLastPathComponent()
+        ).consume(reportAt: reportURL)
+        return true
+    }
+
+    static func consumePendingIfPresent() throws {
+        let updaterDirectory = ForkUpdateLogStore.directoryURL.deletingLastPathComponent()
+        try LocalUpdateInstallationOutcomeRecorder(
+            updaterDirectoryURL: updaterDirectory
+        ).consumePendingIfPresent()
+    }
+
+    func consume(reportAt reportURL: URL) throws {
+        let report = try PropertyListDecoder().decode(
+            LocalUpdateInstallationOutcomeReport.self,
+            from: Data(contentsOf: reportURL)
+        )
+        try record(report)
+        try FileManager.default.removeItem(at: reportURL)
+    }
+
+    func consumePendingIfPresent() throws {
+        let url = updaterDirectoryURL.appendingPathComponent(Self.pendingFilename)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try consume(reportAt: url)
+    }
+
+    private func record(_ report: LocalUpdateInstallationOutcomeReport) throws {
+        try FileManager.default.createDirectory(
+            at: updaterDirectoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try archive.record(logRecord(stage: .installation, outcome: report.outcome, report: report))
+        if report.outcome == .failed {
+            let stage = report.failureStage ?? .installation
+            let failure = ForkUpdateFailure.reported(
+                stage: stage,
+                kind: report.failureKind ?? .deterministic,
+                candidateIdentifier: report.candidateIdentifier,
+                message: report.message ?? "VoiceInk could not install the local update."
+            )
+            if stage != .installation {
+                try archive.record(logRecord(stage: stage, outcome: .failed, report: report))
+            }
+            try write(failure, filename: Self.failureFilename)
+        }
+        if let rollbackOutcome = report.rollbackOutcome {
+            try archive.record(logRecord(stage: .rollback, outcome: rollbackOutcome, report: report))
+            try write(
+                LocalUpdateRollbackNotice(
+                    candidateIdentifier: report.candidateIdentifier,
+                    outcome: rollbackOutcome
+                ),
+                filename: Self.rollbackFilename
+            )
+        }
+    }
+
+    private func logRecord(
+        stage: ForkUpdateStage,
+        outcome: ForkUpdateLogOutcome,
+        report: LocalUpdateInstallationOutcomeReport
+    ) -> ForkUpdateLogRecord {
+        ForkUpdateLogRecord(
+            timestamp: Date(),
+            attemptIdentifier: report.attemptIdentifier,
+            stage: stage,
+            outcome: outcome,
+            candidateIdentifier: report.candidateIdentifier,
+            forkCommit: report.forkCommit,
+            upstreamCommit: report.upstreamCommit,
+            retry: nil,
+            message: report.message
+        )
+    }
+
+    private func write(_ value: some Encodable, filename: String) throws {
+        let url = updaterDirectoryURL.appendingPathComponent(filename)
+        try PropertyListEncoder().encode(value).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }
