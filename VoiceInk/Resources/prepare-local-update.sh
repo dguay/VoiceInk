@@ -97,13 +97,25 @@ if ! git -C "$repository_path" merge-base --is-ancestor "$upstream_commit" "$for
     if git -C "$repository_path" merge-base --is-ancestor "$fork_base_commit" "$upstream_commit"; then
         git -C "$candidate_worktree" merge --ff-only "$upstream_commit"
     else
-        git -C "$candidate_worktree" \
+        if ! git -C "$candidate_worktree" \
             -c user.name="VoiceInk Updater" \
             -c user.email="voiceink-updater@localhost" \
             merge --no-ff --no-gpg-sign \
-            -m "chore(updater): merge upstream main" "$upstream_commit"
+            -m "chore(updater): merge upstream main" "$upstream_commit" \
+            >/dev/null 2>&1
+        then
+            fail "The fetched fork conflicts with upstream/main. Resolve the shared fork before retrying."
+        fi
     fi
     fork_commit="$(git -C "$candidate_worktree" rev-parse HEAD)"
+fi
+
+if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" \
+    && "$VOICEINK_INSTALLED_FORK_COMMIT" != "$fork_commit" ]] \
+    && ! git -C "$repository_path" merge-base --is-ancestor \
+        "$VOICEINK_INSTALLED_FORK_COMMIT" "$fork_base_commit"
+then
+    fail "The fetched fork does not descend from the installed VoiceInk revision. Automatic downgrade or history replacement is blocked."
 fi
 
 if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" \
