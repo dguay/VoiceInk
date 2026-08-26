@@ -174,14 +174,15 @@ then
     exit 1
 fi
 xcode_count_after_failure="$(wc -l < "$xcode_log")"
-if [[ ! -f "$failure_state" \
-    || "$(/usr/bin/plutil -extract stage raw "$failure_state" 2>/dev/null || true)" != "test" \
-    || "$(/usr/bin/plutil -extract candidateIdentifier raw "$failure_state" 2>/dev/null || true)" != "$candidate_sha:$upstream_sha" \
+if [[ "$(/usr/bin/plutil -extract stage raw "$failure_result" 2>/dev/null || true)" != "test" \
+    || "$(/usr/bin/plutil -extract candidateIdentifier raw "$failure_result" 2>/dev/null || true)" != "$candidate_sha:$upstream_sha" \
     || "$xcode_count_after_failure" -ne $((xcode_count_before_failure + 1)) ]]
 then
-    printf 'prepare-local-update-test: deterministic failure state was not recorded\n' >&2
+    printf 'prepare-local-update-test: deterministic failure result was not recorded\n' >&2
     exit 1
 fi
+/bin/cp "$failure_result" "$failure_state"
+/usr/bin/plutil -insert kind -string deterministic "$failure_state"
 
 PATH="$fake_bin:$PATH" \
     CANONICAL_PATH="$canonical_clone" \

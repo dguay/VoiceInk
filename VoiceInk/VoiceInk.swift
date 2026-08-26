@@ -14,7 +14,7 @@ enum VoiceInkMain {
                 if try LocalUpdateInstallationOutcomeRecorder.runIfRequested() {
                     Darwin.exit(EXIT_SUCCESS)
                 }
-                try LocalUpdateInstallationOutcomeRecorder.consumePendingIfPresent()
+                LocalUpdateInstallationOutcomeRecorder.consumePendingForLaunch()
                 if try LocalUpdateCredentialRecoveryCommand.runIfRequested() {
                     Darwin.exit(EXIT_SUCCESS)
                 }

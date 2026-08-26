@@ -138,6 +138,8 @@ struct ForkUpdateRestorationRequest: Equatable {
     let targetBundleURL: URL
     let backupBundleURL: URL
     let parentProcessIdentifier: Int32
+    let outcomeReportURL: URL
+    let attemptIdentifier: String
 }
 
 protocol ForkUpdateRestoring {
@@ -678,7 +680,10 @@ struct ProcessForkUpdateRestorationRunner: ForkUpdateRestoring {
             ]
             process.standardOutput = output
             process.standardError = output
-            process.environment = ProcessInfo.processInfo.environment
+            var environment = ProcessInfo.processInfo.environment
+            environment["VOICEINK_UPDATE_ROLLBACK_RESULT_PATH"] = request.outcomeReportURL.path
+            environment["VOICEINK_UPDATE_ROLLBACK_ATTEMPT_IDENTIFIER"] = request.attemptIdentifier
+            process.environment = environment
 
             try process.run()
             process.waitUntilExit()
@@ -855,7 +860,9 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
     }
 
     private var persistentFailureURL: URL {
-        manifestURL.deletingLastPathComponent().appendingPathComponent("failure-state.plist")
+        manifestURL.deletingLastPathComponent().appendingPathComponent(
+            LocalUpdateInstallationOutcomeRecorder.failureFilename
+        )
     }
 
     private var persistentRollbackURL: URL {
@@ -1152,7 +1159,11 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
                     scriptURL: restorationScriptURL,
                     targetBundleURL: targetBundleURL,
                     backupBundleURL: backupBundleURL,
-                    parentProcessIdentifier: parentProcessIdentifier
+                    parentProcessIdentifier: parentProcessIdentifier,
+                    outcomeReportURL: manifestURL.deletingLastPathComponent().appendingPathComponent(
+                        LocalUpdateInstallationOutcomeRecorder.pendingRollbackFilename
+                    ),
+                    attemptIdentifier: attemptIdentifier
                 )
             )
             await logger.record(
@@ -1334,7 +1345,7 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
             onEvent?(.stagedCandidate(candidate))
         }
         if let notice = try? transaction?.loadPersistentRollbackNotice() {
-            onEvent?(.automaticRollbackReported(notice))
+            onEvent?(.rollbackReported(notice))
             try? transaction?.clearPersistentRollbackNotice()
         }
     }

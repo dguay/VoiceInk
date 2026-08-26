@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 current_stage="preflight"
-failure_kind="deterministic"
+failure_kind=""
 candidate_identifier=""
 fork_commit=""
 upstream_commit=""
@@ -54,7 +54,9 @@ write_failure_result() {
     /usr/bin/plutil -create xml1 "$failure_temporary"
     /usr/bin/plutil -insert outcome -string failure "$failure_temporary"
     /usr/bin/plutil -insert stage -string "$current_stage" "$failure_temporary"
-    /usr/bin/plutil -insert kind -string "$failure_kind" "$failure_temporary"
+    if [[ -n "$failure_kind" ]]; then
+        /usr/bin/plutil -insert kind -string "$failure_kind" "$failure_temporary"
+    fi
     /usr/bin/plutil -insert message -string "$message" "$failure_temporary"
     if [[ -n "$candidate_identifier" ]]; then
         /usr/bin/plutil -insert candidateIdentifier -string "$candidate_identifier" "$failure_temporary"
@@ -67,11 +69,6 @@ write_failure_result() {
     fi
     mv "$failure_temporary" "$result_path"
 
-    if [[ "$failure_kind" == "deterministic" && -n "$candidate_identifier" ]]; then
-        mkdir -p "$(dirname "$failure_state_path")"
-        cp "$result_path" "$failure_state_path.tmp.$$"
-        mv "$failure_state_path.tmp.$$" "$failure_state_path"
-    fi
 }
 
 record_unhandled_failure() {
@@ -89,9 +86,16 @@ record_stage_success() {
     printf '%s\n' "$1" >> "$progress_path"
 }
 
-begin_stage() {
-    current_stage="$1"
-    failure_kind="${2:-deterministic}"
+write_suppressed_result() {
+    [[ -n "$result_path" ]] || return 0
+    mkdir -p "$(dirname "$result_path")"
+    cp "$failure_state_path" "$result_path.tmp.$$"
+    /usr/bin/plutil -replace outcome -string failureSuppressed "$result_path.tmp.$$" 2>/dev/null \
+        || /usr/bin/plutil -insert outcome -string failureSuppressed "$result_path.tmp.$$"
+    mv "$result_path.tmp.$$" "$result_path"
+}
+
+exit_if_stage_failure_is_unchanged() {
     [[ -n "$candidate_identifier" ]] || return 0
     [[ "${VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE:-0}" != 1 ]] || return 0
     [[ -f "$failure_state_path" ]] || return 0
@@ -103,14 +107,14 @@ begin_stage() {
     [[ "$failed_candidate" == "$candidate_identifier" && "$failed_stage" == "$current_stage" ]] \
         || return 0
 
-    if [[ -n "$result_path" ]]; then
-        mkdir -p "$(dirname "$result_path")"
-        cp "$failure_state_path" "$result_path.tmp.$$"
-        /usr/bin/plutil -replace outcome -string failureSuppressed "$result_path.tmp.$$" 2>/dev/null \
-            || /usr/bin/plutil -insert outcome -string failureSuppressed "$result_path.tmp.$$"
-        mv "$result_path.tmp.$$" "$result_path"
-    fi
+    write_suppressed_result
     exit 0
+}
+
+begin_stage() {
+    current_stage="$1"
+    failure_kind="${2:-}"
+    exit_if_stage_failure_is_unchanged
 }
 
 repository_path="${VOICEINK_REPOSITORY_PATH:-}"
@@ -173,7 +177,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-begin_stage fetch transient
+begin_stage fetch
 git -C "$repository_path" fetch origin main \
     || fail "VoiceInk could not fetch origin/main."
 git -C "$repository_path" fetch upstream main \

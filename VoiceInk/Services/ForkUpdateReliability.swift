@@ -299,9 +299,17 @@ struct ForkUpdateLogArchive {
                 attributes: [.posixPermissions: 0o600]
             )
         }
-        let handle = try FileHandle(forWritingTo: url)
+        let handle = try FileHandle(forUpdating: url)
         defer { try? handle.close() }
-        try handle.seekToEnd()
+        let endOffset = try handle.seekToEnd()
+        if endOffset > 0 {
+            try handle.seek(toOffset: endOffset - 1)
+            let finalByte = try handle.read(upToCount: 1)
+            try handle.seekToEnd()
+            if finalByte != Data([0x0A]) {
+                try handle.write(contentsOf: Data([0x0A]))
+            }
+        }
         try handle.write(contentsOf: data)
         try prune()
     }
@@ -465,14 +473,32 @@ struct LocalUpdateInstallationOutcomeReport: Codable, Equatable, Sendable {
     let rollbackOutcome: ForkUpdateLogOutcome?
 }
 
+enum LocalUpdateRollbackInitiator: String, Codable, Equatable, Sendable {
+    case automatic
+    case manual
+}
+
+struct LocalUpdateRollbackOutcomeReport: Codable, Equatable, Sendable {
+    let attemptIdentifier: String
+    let candidateIdentifier: String
+    let forkCommit: String?
+    let upstreamCommit: String?
+    let outcome: ForkUpdateLogOutcome
+    let message: String?
+    let initiator: LocalUpdateRollbackInitiator
+}
+
 struct LocalUpdateRollbackNotice: Codable, Equatable, Sendable {
     let candidateIdentifier: String
     let outcome: ForkUpdateLogOutcome
+    let initiator: LocalUpdateRollbackInitiator
 }
 
 struct LocalUpdateInstallationOutcomeRecorder {
-    private static let commandArgument = "--voiceink-record-update-outcome"
+    private static let installationCommandArgument = "--voiceink-record-update-outcome"
+    private static let rollbackCommandArgument = "--voiceink-record-rollback-outcome"
     static let pendingFilename = "install-result.plist"
+    static let pendingRollbackFilename = "rollback-result.plist"
     static let failureFilename = "failure-state.plist"
     static let rollbackFilename = "rollback-state.plist"
 
@@ -488,24 +514,26 @@ struct LocalUpdateInstallationOutcomeRecorder {
     }
 
     static func runIfRequested(arguments: [String] = CommandLine.arguments) throws -> Bool {
-        guard
-            let index = arguments.firstIndex(of: commandArgument),
-            arguments.indices.contains(index + 1)
-        else {
-            return false
+        if let reportURL = reportURL(after: installationCommandArgument, in: arguments) {
+            try LocalUpdateInstallationOutcomeRecorder(
+                updaterDirectoryURL: reportURL.deletingLastPathComponent()
+            ).consume(reportAt: reportURL)
+            return true
         }
-        let reportURL = URL(fileURLWithPath: arguments[index + 1])
-        try LocalUpdateInstallationOutcomeRecorder(
-            updaterDirectoryURL: reportURL.deletingLastPathComponent()
-        ).consume(reportAt: reportURL)
-        return true
+        if let reportURL = reportURL(after: rollbackCommandArgument, in: arguments) {
+            try LocalUpdateInstallationOutcomeRecorder(
+                updaterDirectoryURL: reportURL.deletingLastPathComponent()
+            ).consumeRollback(reportAt: reportURL)
+            return true
+        }
+        return false
     }
 
-    static func consumePendingIfPresent() throws {
+    static func consumePendingForLaunch() {
         let updaterDirectory = ForkUpdateLogStore.directoryURL.deletingLastPathComponent()
-        try LocalUpdateInstallationOutcomeRecorder(
+        LocalUpdateInstallationOutcomeRecorder(
             updaterDirectoryURL: updaterDirectory
-        ).consumePendingIfPresent()
+        ).consumePendingForLaunch()
     }
 
     func consume(reportAt reportURL: URL) throws {
@@ -517,10 +545,28 @@ struct LocalUpdateInstallationOutcomeRecorder {
         try FileManager.default.removeItem(at: reportURL)
     }
 
-    func consumePendingIfPresent() throws {
-        let url = updaterDirectoryURL.appendingPathComponent(Self.pendingFilename)
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        try consume(reportAt: url)
+    func consumeRollback(reportAt reportURL: URL) throws {
+        let report = try PropertyListDecoder().decode(
+            LocalUpdateRollbackOutcomeReport.self,
+            from: Data(contentsOf: reportURL)
+        )
+        try record(report)
+        try FileManager.default.removeItem(at: reportURL)
+    }
+
+    func consumePendingForLaunch() {
+        consumeForLaunch(
+            filename: Self.pendingFilename,
+            invalidFilename: "install-result.invalid.plist",
+            as: LocalUpdateInstallationOutcomeReport.self,
+            record: record
+        )
+        consumeForLaunch(
+            filename: Self.pendingRollbackFilename,
+            invalidFilename: "rollback-result.invalid.plist",
+            as: LocalUpdateRollbackOutcomeReport.self,
+            record: record
+        )
     }
 
     private func record(_ report: LocalUpdateInstallationOutcomeReport) throws {
@@ -548,11 +594,54 @@ struct LocalUpdateInstallationOutcomeRecorder {
             try write(
                 LocalUpdateRollbackNotice(
                     candidateIdentifier: report.candidateIdentifier,
-                    outcome: rollbackOutcome
+                    outcome: rollbackOutcome,
+                    initiator: .automatic
                 ),
                 filename: Self.rollbackFilename
             )
         }
+    }
+
+    private func record(_ report: LocalUpdateRollbackOutcomeReport) throws {
+        try FileManager.default.createDirectory(
+            at: updaterDirectoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try archive.record(
+            ForkUpdateLogRecord(
+                timestamp: Date(),
+                attemptIdentifier: report.attemptIdentifier,
+                stage: .rollback,
+                outcome: report.outcome,
+                candidateIdentifier: report.candidateIdentifier,
+                forkCommit: report.forkCommit,
+                upstreamCommit: report.upstreamCommit,
+                retry: nil,
+                message: report.message
+            )
+        )
+        if report.outcome == .failed {
+            try write(
+                ForkUpdateFailure.reported(
+                    stage: .rollback,
+                    kind: .deterministic,
+                    candidateIdentifier: report.candidateIdentifier,
+                    message: report.message ?? "VoiceInk could not restore the previous version."
+                ),
+                filename: Self.failureFilename
+            )
+        } else if report.initiator == .manual {
+            try removeIfPresent(filename: Self.failureFilename)
+        }
+        try write(
+            LocalUpdateRollbackNotice(
+                candidateIdentifier: report.candidateIdentifier,
+                outcome: report.outcome,
+                initiator: report.initiator
+            ),
+            filename: Self.rollbackFilename
+        )
     }
 
     private func logRecord(
@@ -577,5 +666,50 @@ struct LocalUpdateInstallationOutcomeRecorder {
         let url = updaterDirectoryURL.appendingPathComponent(filename)
         try PropertyListEncoder().encode(value).write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func consumeForLaunch<Report: Decodable>(
+        filename: String,
+        invalidFilename: String,
+        as _: Report.Type,
+        record: (Report) throws -> Void
+    ) {
+        let url = updaterDirectoryURL.appendingPathComponent(filename)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let report: Report
+        do {
+            report = try PropertyListDecoder().decode(Report.self, from: Data(contentsOf: url))
+        } catch {
+            quarantineInvalidReport(at: url, filename: invalidFilename)
+            return
+        }
+        do {
+            try record(report)
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            // Evidence import is retried next launch, but must never block recovery or app startup.
+        }
+    }
+
+    private func quarantineInvalidReport(at url: URL, filename: String) {
+        let invalidURL = updaterDirectoryURL.appendingPathComponent(filename)
+        try? FileManager.default.removeItem(at: invalidURL)
+        try? FileManager.default.moveItem(at: url, to: invalidURL)
+    }
+
+    private func removeIfPresent(filename: String) throws {
+        let url = updaterDirectoryURL.appendingPathComponent(filename)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.removeItem(at: url)
+    }
+
+    private static func reportURL(after argument: String, in arguments: [String]) -> URL? {
+        guard
+            let index = arguments.firstIndex(of: argument),
+            arguments.indices.contains(index + 1)
+        else {
+            return nil
+        }
+        return URL(fileURLWithPath: arguments[index + 1])
     }
 }

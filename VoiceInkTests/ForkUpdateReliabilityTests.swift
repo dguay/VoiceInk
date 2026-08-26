@@ -64,6 +64,50 @@ struct ForkUpdateReliabilityTests {
     }
 
     @Test
+    func deterministicFetchFailureIsNotRetried() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
+        let attemptsURL = temporaryDirectory.appendingPathComponent("attempts")
+        let script = """
+            #!/usr/bin/env bash
+            attempts_file="$(dirname "$0")/attempts"
+            attempts=0
+            [[ ! -f "$attempts_file" ]] || attempts="$(< "$attempts_file")"
+            printf '%s' "$((attempts + 1))" > "$attempts_file"
+            /usr/bin/plutil -create xml1 "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert outcome -string failure "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert stage -string fetch "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert message -string 'VoiceInk could not fetch origin/main.' "$VOICEINK_UPDATE_RESULT_PATH"
+            printf 'fatal: Authentication failed for repository\n' >&2
+            exit 1
+            """
+        try Data(script.utf8).write(to: scriptURL)
+        let delays = DelayRecorder()
+
+        do {
+            _ = try await ProcessForkUpdateCommandRunner(
+                retryDelays: [1, 2],
+                sleep: { delay in await delays.record(delay) }
+            ).run(
+                scriptURL: scriptURL,
+                manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+                installedForkCommit: nil,
+                mode: .automatic(deferBuild: false)
+            )
+            Issue.record("Expected a deterministic fetch failure")
+        } catch let failure as ForkUpdateFailure {
+            #expect(failure.stage == .fetch)
+            #expect(failure.kind == .deterministic)
+        }
+
+        #expect(try String(contentsOf: attemptsURL, encoding: .utf8) == "1")
+        #expect(await delays.values.isEmpty)
+    }
+
+    @Test
     func incompatibleToolchainIsReportedWithoutRetrying() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -147,6 +191,66 @@ struct ForkUpdateReliabilityTests {
         #expect(rollback.outcome == .succeeded)
         #expect(records.contains { $0.stage == .permission && $0.outcome == .failed })
         #expect(records.contains { $0.stage == .rollback && $0.outcome == .succeeded })
+        #expect(!FileManager.default.fileExists(atPath: reportURL.path))
+    }
+
+    @Test
+    func corruptPendingOutcomeIsQuarantinedWithoutBlockingLaunch() throws {
+        let updaterDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let logDirectory = updaterDirectory.appendingPathComponent("Logs", isDirectory: true)
+        try FileManager.default.createDirectory(at: updaterDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: updaterDirectory) }
+        let reportURL = updaterDirectory.appendingPathComponent("install-result.plist")
+        try Data("not a property list".utf8).write(to: reportURL)
+        let recorder = LocalUpdateInstallationOutcomeRecorder(
+            updaterDirectoryURL: updaterDirectory,
+            logDirectoryURL: logDirectory
+        )
+
+        recorder.consumePendingForLaunch()
+
+        #expect(!FileManager.default.fileExists(atPath: reportURL.path))
+        #expect(FileManager.default.fileExists(
+            atPath: updaterDirectory.appendingPathComponent("install-result.invalid.plist").path
+        ))
+    }
+
+    @Test
+    func manualRollbackOutcomeIsImportedAndClearsTheSupersededFailure() async throws {
+        let updaterDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let logDirectory = updaterDirectory.appendingPathComponent("Logs", isDirectory: true)
+        try FileManager.default.createDirectory(at: updaterDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: updaterDirectory) }
+        let reportURL = updaterDirectory.appendingPathComponent("rollback-result.plist")
+        let failureURL = updaterDirectory.appendingPathComponent("failure-state.plist")
+        try Data("superseded".utf8).write(to: failureURL)
+        let report = LocalUpdateRollbackOutcomeReport(
+            attemptIdentifier: "rollback-candidate",
+            candidateIdentifier: "candidate",
+            forkCommit: "candidate",
+            upstreamCommit: "upstream",
+            outcome: .succeeded,
+            message: nil,
+            initiator: .manual
+        )
+        try PropertyListEncoder().encode(report).write(to: reportURL)
+        let recorder = LocalUpdateInstallationOutcomeRecorder(
+            updaterDirectoryURL: updaterDirectory,
+            logDirectoryURL: logDirectory
+        )
+
+        try recorder.consumeRollback(reportAt: reportURL)
+
+        let notice = try PropertyListDecoder().decode(
+            LocalUpdateRollbackNotice.self,
+            from: Data(contentsOf: updaterDirectory.appendingPathComponent("rollback-state.plist"))
+        )
+        let records = await ForkUpdateLogStore(directoryURL: logDirectory).loadRecords()
+        #expect(notice.initiator == .manual)
+        #expect(records.contains { $0.stage == .rollback && $0.outcome == .succeeded })
+        #expect(!FileManager.default.fileExists(atPath: failureURL.path))
         #expect(!FileManager.default.fileExists(atPath: reportURL.path))
     }
 
@@ -318,6 +422,36 @@ struct ForkUpdateReliabilityTests {
     }
 
     @Test
+    func appendingToACorruptBundlePreservesTheNewFailureRecord() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        try Data("corrupt-without-newline".utf8).write(
+            to: temporaryDirectory.appendingPathComponent("attempt-protected.jsonl")
+        )
+        let logger = ForkUpdateLogStore(directoryURL: temporaryDirectory, maximumBytes: 2_048)
+
+        await logger.record(
+            ForkUpdateLogRecord(
+                timestamp: Date(),
+                attemptIdentifier: "protected",
+                stage: .installation,
+                outcome: .failed,
+                candidateIdentifier: "candidate",
+                forkCommit: "candidate",
+                upstreamCommit: "upstream",
+                retry: nil,
+                message: "Installation failed."
+            )
+        )
+
+        #expect(await logger.loadRecords().contains {
+            $0.attemptIdentifier == "protected" && $0.outcome == .failed
+        })
+    }
+
+    @Test
     func oversizedProtectedBundleIsCompactedWithoutLosingItsFailure() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -477,13 +611,52 @@ struct ForkUpdateReliabilityTests {
 
         adapter.send(.preparationFailed(failure))
         adapter.send(
-            .automaticRollbackReported(
-                LocalUpdateRollbackNotice(candidateIdentifier: "candidate", outcome: .succeeded)
+            .rollbackReported(
+                LocalUpdateRollbackNotice(
+                    candidateIdentifier: "candidate",
+                    outcome: .succeeded,
+                    initiator: .automatic
+                )
             )
         )
 
         #expect(notifications.notifications.map(\.kind) == [.permissionRegression, .rollbackSucceeded])
         #expect(updater.state.failure == failure)
+    }
+
+    @Test @MainActor
+    func manualRollbackNotificationClearsTheSupersededPrimaryFailure() {
+        let suiteName = "ForkUpdateReliabilityTests.manual-rollback"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let adapter = ReliabilityUpdaterAdapterStub()
+        let notifications = ForkUpdateNotificationRecorder()
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: adapter,
+            notificationDeliverer: notifications
+        )
+        let failure = ForkUpdateFailure.reported(
+            stage: .permission,
+            kind: .deterministic,
+            candidateIdentifier: "candidate",
+            message: "VoiceInk lost microphone permission."
+        )
+
+        adapter.send(.preparationFailed(failure))
+        adapter.send(
+            .rollbackReported(
+                LocalUpdateRollbackNotice(
+                    candidateIdentifier: "candidate",
+                    outcome: .succeeded,
+                    initiator: .manual
+                )
+            )
+        )
+
+        #expect(notifications.notifications.map(\.kind) == [.permissionRegression, .rollbackSucceeded])
+        #expect(updater.state.failure == nil)
     }
 }
 

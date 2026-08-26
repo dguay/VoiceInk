@@ -85,7 +85,7 @@ enum UpdaterAdapterEvent: Equatable {
     case forkUpToDate(SourceProvenance)
     case stagedCandidate(StagedForkCandidate)
     case preparationFailed(ForkUpdateFailure)
-    case automaticRollbackReported(LocalUpdateRollbackNotice)
+    case rollbackReported(LocalUpdateRollbackNotice)
     case rollbackCompleted
 }
 
@@ -304,10 +304,14 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.preparationError = failure.message
             state.failure = failure
             notifyFailureIfNeeded(failure)
-        case .automaticRollbackReported(let notice):
+        case .rollbackReported(let notice):
+            if notice.initiator == .manual, notice.outcome == .succeeded {
+                state.failure = nil
+                state.preparationError = nil
+            }
             notificationDeliverer.deliver(
                 ForkUpdateUserNotification(
-                    identifier: "automatic-rollback-\(notice.candidateIdentifier)-\(notice.outcome.rawValue)",
+                    identifier: "rollback-\(notice.initiator.rawValue)-\(notice.candidateIdentifier)-\(notice.outcome.rawValue)",
                     kind: notice.outcome == .succeeded ? .rollbackSucceeded : .rollbackFailed,
                     title: notice.outcome == .succeeded
                         ? "VoiceInk restored the previous version after the update failed."
