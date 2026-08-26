@@ -263,11 +263,37 @@ cat > "$fake_bin/git-require-health-before-push" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ " $* " == *" fetch origin main "* \
+    && -n "${VOICEINK_TEST_PUSH_COMPLETED_PATH:-}" \
+    && -f "$VOICEINK_TEST_PUSH_COMPLETED_PATH" ]]
+then
+    printf 'unexpected fetch after successful push\n' >&2
+    exit 86
+fi
+
 if [[ " $* " == *" push origin "* && " $* " == *":refs/heads/main "* ]]; then
     [[ " $* " != *" --force"* ]]
     [[ -f "$VOICEINK_TEST_REQUIRED_HEALTH_PATH" ]]
     [[ "$(/usr/bin/plutil -extract forkCommit raw "$VOICEINK_TEST_REQUIRED_HEALTH_PATH")" == "$VOICEINK_TEST_REQUIRED_PUBLISH_SHA" ]]
+    if [[ -n "${VOICEINK_TEST_REQUIRED_LOCAL_MAIN_SHA:-}" ]]; then
+        /usr/bin/git -C "$VOICEINK_REPOSITORY_PATH" merge-base --is-ancestor \
+            "$VOICEINK_TEST_REQUIRED_LOCAL_MAIN_SHA" refs/heads/main
+    fi
     printf 'push-after-health\n' >> "$VOICEINK_TEST_PUBLISH_LOG"
+    if [[ "${VOICEINK_TEST_REJECT_PUSH:-0}" == 1 ]]; then
+        exit 1
+    fi
+    set +e
+    /usr/bin/git "$@"
+    git_status=$?
+    set -e
+    if [[ "$git_status" -eq 0 ]]; then
+        if [[ -n "${VOICEINK_TEST_PUSH_COMPLETED_PATH:-}" ]]; then
+            : > "$VOICEINK_TEST_PUSH_COMPLETED_PATH"
+        fi
+        exit 0
+    fi
+    exit "$git_status"
 fi
 
 exec /usr/bin/git "$@"
@@ -471,6 +497,54 @@ git -C "$canonical_clone" branch -f main "$old_sha"
 git -C "$canonical_clone" switch main >/dev/null
 
 prepare_recovery_intent
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_GIT_COMMAND="$fake_bin/git-require-health-before-push" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+    VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
+    VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
+    VOICEINK_UPDATE_STABILITY_SECONDS=1 \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    VOICEINK_TEST_REQUIRED_HEALTH_PATH="$health_path" \
+    VOICEINK_TEST_REQUIRED_PUBLISH_SHA="$new_sha" \
+    VOICEINK_TEST_REQUIRED_LOCAL_MAIN_SHA="$new_sha" \
+    VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
+    VOICEINK_TEST_REJECT_PUSH=1 \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/rejected-push-output.log" 2>&1
+rejected_push_status=$?
+set -e
+
+[[ "$rejected_push_status" -eq 75 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: approved parent survived rejected-push setup\n' >&2
+    exit 1
+fi
+parent_pid=""
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+[[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$fork_base_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$old_sha" ]]
+[[ -f "$manifest_path" ]]
+[[ -d "$staged_bundle" ]]
+[[ "$(git -C "$canonical_clone" rev-parse "$candidate_ref")" == "$new_sha" ]]
+grep -Fq "another Mac published a different fork update first" "$fixture_root/rejected-push-output.log"
+
+sleep 30 &
+parent_pid=$!
+: > "$launch_log"
+: > "$publish_log"
+prepare_recovery_intent
+push_completed_path="$fixture_root/push-completed"
 
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -486,7 +560,9 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
     VOICEINK_TEST_REQUIRED_HEALTH_PATH="$health_path" \
     VOICEINK_TEST_REQUIRED_PUBLISH_SHA="$new_sha" \
+    VOICEINK_TEST_REQUIRED_LOCAL_MAIN_SHA="$new_sha" \
     VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
+    VOICEINK_TEST_PUSH_COMPLETED_PATH="$push_completed_path" \
     /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
     "$new_sha" \
     "$manifest_path" \
@@ -514,6 +590,7 @@ credential_generation="$(/usr/bin/plutil -extract credentialGeneration raw "$rec
 [[ ! -e "$staged_bundle" ]]
 [[ "$(< "$launch_log")" == "$installed_bundle" ]]
 [[ "$(< "$publish_log")" == "push-after-health" ]]
+[[ -f "$push_completed_path" ]]
 [[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$new_sha" ]]
 [[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$new_sha" ]]
 if git -C "$canonical_clone" rev-parse "$candidate_ref" >/dev/null 2>&1; then

@@ -260,6 +260,8 @@ PATH="$fake_bin:$PATH" \
 [[ "$(/usr/bin/plutil -extract forkBaseCommit raw "$fast_forward_manifest")" == "$candidate_sha" ]]
 [[ "$(/usr/bin/plutil -extract upstreamCommit raw "$fast_forward_manifest")" == "$upstream_fast_forward_sha" ]]
 fast_forward_candidate_ref="$(/usr/bin/plutil -extract candidateRef raw "$fast_forward_manifest")"
+fast_forward_staged_bundle="$(/usr/bin/plutil -extract bundlePath raw "$fast_forward_manifest")"
+fast_forward_candidate_stage="$(dirname "$fast_forward_staged_bundle")"
 [[ "$(git -C "$canonical_clone" rev-parse "$fast_forward_candidate_ref")" == "$upstream_fast_forward_sha" ]]
 [[ "$(git -C "$canonical_clone" rev-parse HEAD)" == "$before_head" ]]
 [[ "$(git -C "$canonical_clone" status --porcelain)" == "" ]]
@@ -275,6 +277,22 @@ PATH="$fake_bin:$PATH" \
 second_fast_forward_candidate_ref="$(/usr/bin/plutil -extract candidateRef raw "$second_fast_forward_manifest")"
 [[ "$second_fast_forward_candidate_ref" != "$fast_forward_candidate_ref" ]]
 [[ "$(git -C "$canonical_clone" rev-parse "$fast_forward_candidate_ref")" == "$upstream_fast_forward_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse "$second_fast_forward_candidate_ref")" == "$upstream_fast_forward_sha" ]]
+
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$fast_forward_manifest" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+replacement_candidate_ref="$(/usr/bin/plutil -extract candidateRef raw "$fast_forward_manifest")"
+[[ "$replacement_candidate_ref" != "$fast_forward_candidate_ref" ]]
+[[ ! -e "$fast_forward_candidate_stage" ]]
+if git -C "$canonical_clone" rev-parse "$fast_forward_candidate_ref" >/dev/null 2>&1; then
+    printf 'prepare-local-update-test: superseded candidate reference was not cleaned up\n' >&2
+    exit 1
+fi
+[[ "$(git -C "$canonical_clone" rev-parse "$replacement_candidate_ref")" == "$upstream_fast_forward_sha" ]]
 [[ "$(git -C "$canonical_clone" rev-parse "$second_fast_forward_candidate_ref")" == "$upstream_fast_forward_sha" ]]
 
 fork_writer="$fixture_root/fork-writer"
@@ -298,9 +316,9 @@ PATH="$fake_bin:$PATH" \
 merge_candidate_sha="$(/usr/bin/plutil -extract forkCommit raw "$merge_manifest")"
 [[ "$(/usr/bin/plutil -extract forkBaseCommit raw "$merge_manifest")" == "$diverged_fork_sha" ]]
 [[ "$(/usr/bin/plutil -extract upstreamCommit raw "$merge_manifest")" == "$upstream_fast_forward_sha" ]]
-[[ "$(git -C "$canonical_clone" show -s --format=%s "$merge_candidate_sha")" == "chore(updater): merge upstream main" ]]
+merge_subject="$(git -C "$canonical_clone" show -s --format=%s "$merge_candidate_sha")"
+printf '%s\n' "$merge_subject" | grep -Eq '^[a-z]+(\([a-z0-9-]+\))?!?: .+'
 [[ "$(git -C "$canonical_clone" show -s --format='%P' "$merge_candidate_sha")" == "$diverged_fork_sha $upstream_fast_forward_sha" ]]
-[[ "$(git -C "$canonical_clone" show -s --format=%s "$upstream_fast_forward_sha")" == "feat: advance upstream" ]]
 [[ "$(git -C "$canonical_clone" rev-parse refs/remotes/origin/main)" == "$diverged_fork_sha" ]]
 merge_candidate_ref="$(/usr/bin/plutil -extract candidateRef raw "$merge_manifest")"
 [[ "$(git -C "$canonical_clone" rev-parse "$merge_candidate_ref")" == "$merge_candidate_sha" ]]

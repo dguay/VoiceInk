@@ -116,6 +116,35 @@ preflight_local_publication() {
     fi
 }
 
+advance_local_main() {
+    if [[ "$local_main_sha" == "$approved_sha" ]]; then
+        return
+    fi
+
+    if [[ "$("$git_command" -C "$repository_path" symbolic-ref --quiet --short HEAD || true)" == "main" ]]; then
+        "$git_command" -C "$repository_path" merge --ff-only "$approved_sha"
+    else
+        "$git_command" -C "$repository_path" update-ref \
+            refs/heads/main "$approved_sha" "$local_main_sha"
+    fi
+    local_main_advanced=true
+}
+
+restore_local_main() {
+    [[ "$local_main_advanced" == true ]] || return 0
+    [[ "$("$git_command" -C "$repository_path" rev-parse refs/heads/main 2>/dev/null || true)" == "$approved_sha" ]] \
+        || return 1
+
+    if [[ "$("$git_command" -C "$repository_path" symbolic-ref --quiet --short HEAD || true)" == "main" ]]; then
+        [[ -z "$("$git_command" -C "$repository_path" status --porcelain)" ]] || return 1
+        "$git_command" -C "$repository_path" reset --keep "$local_main_sha"
+    else
+        "$git_command" -C "$repository_path" update-ref \
+            refs/heads/main "$local_main_sha" "$approved_sha"
+    fi
+    local_main_advanced=false
+}
+
 revalidate_fork() {
     refresh_fork_head
     [[ "$latest_fork_sha" == "$fork_base_sha" ]] \
@@ -126,39 +155,33 @@ publish_verified_candidate() {
     refresh_fork_head
     preflight_local_publication
 
+    [[ "$latest_fork_sha" == "$approved_sha" || "$latest_fork_sha" == "$fork_base_sha" ]] \
+        || stale "origin/main changed before the verified candidate could be published."
+
+    # Safety invariant: finish the local fast-forward before publishing. Once a
+    # push succeeds, no network or branch movement may make the install roll back.
+    advance_local_main
+
     if [[ "$latest_fork_sha" != "$approved_sha" ]]; then
-        [[ "$latest_fork_sha" == "$fork_base_sha" ]] \
-            || stale "origin/main changed before the verified candidate could be published."
-        /bin/rm -rf "$candidate_stage"
-        /bin/rm -f "$manifest_path"
         if "$git_command" -C "$repository_path" push origin \
             "$approved_sha:refs/heads/main"
         then
             publication_succeeded=true
-        else
-            refresh_fork_head
-            [[ "$latest_fork_sha" == "$approved_sha" ]] \
-                || stale "another Mac published a different fork update first."
+        elif refresh_fork_head && [[ "$latest_fork_sha" == "$approved_sha" ]]; then
             publication_succeeded=true
+        else
+            restore_local_main \
+                || fail "Local main could not be restored after publication failed."
+            stale "another Mac published a different fork update first."
         fi
     else
         publication_succeeded=true
-        /bin/rm -rf "$candidate_stage"
-        /bin/rm -f "$manifest_path"
     fi
 
-    refresh_fork_head
-    [[ "$latest_fork_sha" == "$approved_sha" ]] \
-        || fail "The fork did not retain the verified candidate after publication."
-    publication_succeeded=true
+    /bin/rm -rf "$candidate_stage"
+    /bin/rm -f "$manifest_path"
     "$git_command" -C "$repository_path" update-ref -d "$candidate_ref" "$approved_sha"
-
-    if [[ "$("$git_command" -C "$repository_path" symbolic-ref --quiet --short HEAD || true)" == "main" ]]; then
-        "$git_command" -C "$repository_path" merge --ff-only "$approved_sha"
-    else
-        "$git_command" -C "$repository_path" update-ref \
-            refs/heads/main "$approved_sha" "$local_main_sha"
-    fi
+    local_main_advanced=false
 }
 
 preflight_local_publication
@@ -220,6 +243,7 @@ launched_pid=""
 recovery_published=false
 credential_snapshot_created=true
 publication_succeeded=false
+local_main_advanced=false
 
 launch_candidate() {
     if [[ -n "$launcher" ]]; then
@@ -374,6 +398,13 @@ finish_transaction() {
     trap - EXIT
     set +e
     installed_after_failure="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null || true)"
+
+    if [[ "$result" -ne 0 && "$publication_succeeded" == false && "$local_main_advanced" == true ]] \
+        && ! restore_local_main
+    then
+        printf 'Error: VoiceInk could not restore local main after failed publication.\n' >&2
+        result=2
+    fi
 
     if [[ "$result" -ne 0 && "$publication_succeeded" == true ]]; then
         printf 'Error: The verified candidate was published, but local repository convergence did not finish.\n' >&2

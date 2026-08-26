@@ -40,7 +40,33 @@ candidate_worktree="$work_root/candidate"
 derived_data="$work_root/DerivedData"
 worktree_added=false
 candidate_ref=""
+candidate_stage=""
 candidate_staged=false
+
+cleanup_candidate_artifacts() {
+    local cleanup_sha="$1"
+    local cleanup_ref="$2"
+    local cleanup_bundle="$3"
+    local cleanup_stage
+    local cleanup_stage_name
+
+    [[ "$cleanup_sha" =~ ^[0-9a-f]{40}$ ]] || return 0
+
+    cleanup_stage="$(dirname "$cleanup_bundle")"
+    cleanup_stage_name="$(basename "$cleanup_stage")"
+    if [[ "$(dirname "$cleanup_stage")" == "$stage_root/candidates" \
+        && "$(basename "$cleanup_bundle")" == "VoiceInk.app" \
+        && "$cleanup_stage_name" =~ ^$cleanup_sha-[0-9]+-[0-9]+$ ]]
+    then
+        rm -rf "$cleanup_stage"
+    fi
+
+    if [[ "$cleanup_ref" == "refs/voiceink-updater/candidates/$cleanup_sha" \
+        || "$cleanup_ref" =~ ^refs/voiceink-updater/candidates/$cleanup_sha-[0-9]+-[0-9]+$ ]]
+    then
+        git -C "$repository_path" update-ref -d "$cleanup_ref" "$cleanup_sha"
+    fi
+}
 
 cleanup() {
     if [[ "$worktree_added" == true ]]; then
@@ -48,6 +74,9 @@ cleanup() {
     fi
     if [[ -n "$candidate_ref" && "$candidate_staged" == false ]]; then
         git -C "$repository_path" update-ref -d "$candidate_ref" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$candidate_stage" && "$candidate_staged" == false ]]; then
+        rm -rf "$candidate_stage"
     fi
     rm -rf "$work_root"
 }
@@ -77,6 +106,12 @@ fi
 if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" \
     && "$VOICEINK_INSTALLED_FORK_COMMIT" == "$fork_commit" ]]
 then
+    if [[ -f "$manifest_path" ]]; then
+        cleanup_candidate_artifacts \
+            "$(/usr/bin/plutil -extract forkCommit raw "$manifest_path" 2>/dev/null || true)" \
+            "$(/usr/bin/plutil -extract candidateRef raw "$manifest_path" 2>/dev/null || true)" \
+            "$(/usr/bin/plutil -extract bundlePath raw "$manifest_path" 2>/dev/null || true)"
+    fi
     rm -f "$manifest_path"
     write_preparation_result upToDate
     exit 0
@@ -165,6 +200,14 @@ codesign --verify --deep --strict "$staged_bundle" \
     || fail "The staged candidate bundle failed signature validation."
 
 mkdir -p "$stage_root"
+previous_candidate_sha=""
+previous_candidate_ref=""
+previous_candidate_bundle=""
+if [[ -f "$manifest_path" ]]; then
+    previous_candidate_sha="$(/usr/bin/plutil -extract forkCommit raw "$manifest_path" 2>/dev/null || true)"
+    previous_candidate_ref="$(/usr/bin/plutil -extract candidateRef raw "$manifest_path" 2>/dev/null || true)"
+    previous_candidate_bundle="$(/usr/bin/plutil -extract bundlePath raw "$manifest_path" 2>/dev/null || true)"
+fi
 manifest_temporary="$manifest_path.tmp.$$"
 /usr/bin/plutil -create xml1 "$manifest_temporary"
 /usr/bin/plutil -insert forkCommit -string "$fork_commit" "$manifest_temporary"
@@ -177,6 +220,10 @@ candidate_ref="refs/voiceink-updater/candidates/$fork_commit-$(date +%s)-$$"
 git -C "$repository_path" update-ref "$candidate_ref" "$fork_commit"
 mv "$manifest_temporary" "$manifest_path"
 candidate_staged=true
+cleanup_candidate_artifacts \
+    "$previous_candidate_sha" \
+    "$previous_candidate_ref" \
+    "$previous_candidate_bundle"
 write_preparation_result candidatePrepared
 
 printf 'Staged VoiceInk candidate %s at %s\n' "$fork_commit" "$staged_bundle"
