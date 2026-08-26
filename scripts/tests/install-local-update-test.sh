@@ -271,16 +271,29 @@ then
     exit 86
 fi
 
+if [[ " $* " == *" fetch origin main "* \
+    && -n "${VOICEINK_TEST_AMBIGUOUS_PUSH_PATH:-}" \
+    && -f "$VOICEINK_TEST_AMBIGUOUS_PUSH_PATH" ]]
+then
+    printf 'simulated reconciliation network failure\n' >&2
+    exit 86
+fi
+
 if [[ " $* " == *" push origin "* && " $* " == *":refs/heads/main "* ]]; then
     [[ " $* " != *" --force"* ]]
     [[ -f "$VOICEINK_TEST_REQUIRED_HEALTH_PATH" ]]
     [[ "$(/usr/bin/plutil -extract forkCommit raw "$VOICEINK_TEST_REQUIRED_HEALTH_PATH")" == "$VOICEINK_TEST_REQUIRED_PUBLISH_SHA" ]]
-    if [[ -n "${VOICEINK_TEST_REQUIRED_LOCAL_MAIN_SHA:-}" ]]; then
-        /usr/bin/git -C "$VOICEINK_REPOSITORY_PATH" merge-base --is-ancestor \
-            "$VOICEINK_TEST_REQUIRED_LOCAL_MAIN_SHA" refs/heads/main
+    if [[ -n "${VOICEINK_TEST_EXPECTED_LOCAL_MAIN_BEFORE_PUSH:-}" ]]; then
+        [[ "$(/usr/bin/git -C "$VOICEINK_REPOSITORY_PATH" rev-parse refs/heads/main)" \
+            == "$VOICEINK_TEST_EXPECTED_LOCAL_MAIN_BEFORE_PUSH" ]]
     fi
     printf 'push-after-health\n' >> "$VOICEINK_TEST_PUBLISH_LOG"
     if [[ "${VOICEINK_TEST_REJECT_PUSH:-0}" == 1 ]]; then
+        exit 1
+    fi
+    if [[ -n "${VOICEINK_TEST_AMBIGUOUS_PUSH_PATH:-}" ]]; then
+        /usr/bin/git "$@"
+        : > "$VOICEINK_TEST_AMBIGUOUS_PUSH_PATH"
         exit 1
     fi
     set +e
@@ -512,7 +525,7 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
     VOICEINK_TEST_REQUIRED_HEALTH_PATH="$health_path" \
     VOICEINK_TEST_REQUIRED_PUBLISH_SHA="$new_sha" \
-    VOICEINK_TEST_REQUIRED_LOCAL_MAIN_SHA="$new_sha" \
+    VOICEINK_TEST_EXPECTED_LOCAL_MAIN_BEFORE_PUSH="$old_sha" \
     VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
     VOICEINK_TEST_REJECT_PUSH=1 \
     /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
@@ -544,6 +557,64 @@ parent_pid=$!
 : > "$launch_log"
 : > "$publish_log"
 prepare_recovery_intent
+ambiguous_push_path="$fixture_root/ambiguous-push"
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_GIT_COMMAND="$fake_bin/git-require-health-before-push" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+    VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
+    VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
+    VOICEINK_UPDATE_STABILITY_SECONDS=1 \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    VOICEINK_TEST_REQUIRED_HEALTH_PATH="$health_path" \
+    VOICEINK_TEST_REQUIRED_PUBLISH_SHA="$new_sha" \
+    VOICEINK_TEST_EXPECTED_LOCAL_MAIN_BEFORE_PUSH="$old_sha" \
+    VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
+    VOICEINK_TEST_AMBIGUOUS_PUSH_PATH="$ambiguous_push_path" \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/ambiguous-push-output.log" 2>&1
+ambiguous_push_status=$?
+set -e
+
+[[ "$ambiguous_push_status" -ne 0 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: approved parent survived ambiguous-push setup\n' >&2
+    exit 1
+fi
+parent_pid=""
+[[ "$(< "$installed_bundle/Contents/version")" == "newer-candidate" ]]
+[[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$new_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$old_sha" ]]
+[[ -f "$manifest_path" ]]
+[[ -d "$staged_bundle" ]]
+[[ "$(git -C "$canonical_clone" rev-parse "$candidate_ref")" == "$new_sha" ]]
+grep -Fq "could not determine whether publication succeeded" "$fixture_root/ambiguous-push-output.log"
+if grep -Fq "rollback:$installed_bundle" "$launch_log"; then
+    printf 'install-local-update-test: ambiguous publication rolled back the healthy candidate\n' >&2
+    exit 1
+fi
+
+ambiguous_launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path")"
+kill "$ambiguous_launched_pid"
+/bin/rm -rf "$installed_bundle"
+/usr/bin/ditto "$backup_bundle" "$installed_bundle"
+git --git-dir="$fork_bare" update-ref refs/heads/main "$fork_base_sha" "$new_sha"
+
+sleep 30 &
+parent_pid=$!
+: > "$launch_log"
+: > "$publish_log"
+prepare_recovery_intent
 push_completed_path="$fixture_root/push-completed"
 
 PATH="$fake_bin:$PATH" \
@@ -560,7 +631,7 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
     VOICEINK_TEST_REQUIRED_HEALTH_PATH="$health_path" \
     VOICEINK_TEST_REQUIRED_PUBLISH_SHA="$new_sha" \
-    VOICEINK_TEST_REQUIRED_LOCAL_MAIN_SHA="$new_sha" \
+    VOICEINK_TEST_EXPECTED_LOCAL_MAIN_BEFORE_PUSH="$old_sha" \
     VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
     VOICEINK_TEST_PUSH_COMPLETED_PATH="$push_completed_path" \
     /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \

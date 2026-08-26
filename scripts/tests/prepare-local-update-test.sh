@@ -267,6 +267,22 @@ fast_forward_candidate_stage="$(dirname "$fast_forward_staged_bundle")"
 [[ "$(git -C "$canonical_clone" status --porcelain)" == "" ]]
 [[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
 
+publication_retry_result="$fixture_root/fast-forward/preparation-result.plist"
+xcode_lines_before_retry="$(wc -l < "$xcode_log")"
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$fast_forward_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$publication_retry_result" \
+    VOICEINK_INSTALLED_FORK_COMMIT="$upstream_fast_forward_sha" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+[[ "$(/usr/bin/plutil -extract outcome raw "$publication_retry_result")" == "candidatePrepared" ]]
+[[ "$(/usr/bin/plutil -extract candidateRef raw "$fast_forward_manifest")" == "$fast_forward_candidate_ref" ]]
+[[ -d "$fast_forward_staged_bundle" ]]
+[[ "$(git -C "$canonical_clone" rev-parse "$fast_forward_candidate_ref")" == "$upstream_fast_forward_sha" ]]
+[[ "$(wc -l < "$xcode_log")" -eq "$xcode_lines_before_retry" ]]
+
 second_fast_forward_manifest="$fixture_root/fast-forward-second/staged-candidate.plist"
 PATH="$fake_bin:$PATH" \
     CANONICAL_PATH="$canonical_clone" \
@@ -305,8 +321,12 @@ git -C "$fork_writer" commit -m "feat: advance fork" >/dev/null
 git -C "$fork_writer" push origin main >/dev/null
 diverged_fork_sha="$(git -C "$fork_writer" rev-parse HEAD)"
 merge_manifest="$fixture_root/merge/staged-candidate.plist"
+git -C "$canonical_clone" config user.useConfigOnly true
+git -C "$canonical_clone" config --unset-all user.name >/dev/null 2>&1 || true
+git -C "$canonical_clone" config --unset-all user.email >/dev/null 2>&1 || true
 
-PATH="$fake_bin:$PATH" \
+GIT_CONFIG_GLOBAL=/dev/null \
+    PATH="$fake_bin:$PATH" \
     CANONICAL_PATH="$canonical_clone" \
     XCODE_LOG="$xcode_log" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \

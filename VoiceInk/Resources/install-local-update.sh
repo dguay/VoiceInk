@@ -99,9 +99,9 @@ if [[ "$fork_base_sha" != "$approved_sha" ]]; then
 fi
 
 refresh_fork_head() {
-    "$git_command" -C "$repository_path" fetch origin main
+    "$git_command" -C "$repository_path" fetch origin main || return 1
     latest_fork_sha="$("$git_command" -C "$repository_path" rev-parse refs/remotes/origin/main)" \
-        || fail "The fetched fork does not have origin/main."
+        || return 1
 }
 
 preflight_local_publication() {
@@ -127,22 +127,6 @@ advance_local_main() {
         "$git_command" -C "$repository_path" update-ref \
             refs/heads/main "$approved_sha" "$local_main_sha"
     fi
-    local_main_advanced=true
-}
-
-restore_local_main() {
-    [[ "$local_main_advanced" == true ]] || return 0
-    [[ "$("$git_command" -C "$repository_path" rev-parse refs/heads/main 2>/dev/null || true)" == "$approved_sha" ]] \
-        || return 1
-
-    if [[ "$("$git_command" -C "$repository_path" symbolic-ref --quiet --short HEAD || true)" == "main" ]]; then
-        [[ -z "$("$git_command" -C "$repository_path" status --porcelain)" ]] || return 1
-        "$git_command" -C "$repository_path" reset --keep "$local_main_sha"
-    else
-        "$git_command" -C "$repository_path" update-ref \
-            refs/heads/main "$local_main_sha" "$approved_sha"
-    fi
-    local_main_advanced=false
 }
 
 revalidate_fork() {
@@ -158,30 +142,29 @@ publish_verified_candidate() {
     [[ "$latest_fork_sha" == "$approved_sha" || "$latest_fork_sha" == "$fork_base_sha" ]] \
         || stale "origin/main changed before the verified candidate could be published."
 
-    # Safety invariant: finish the local fast-forward before publishing. Once a
-    # push succeeds, no network or branch movement may make the install roll back.
-    advance_local_main
-
     if [[ "$latest_fork_sha" != "$approved_sha" ]]; then
         if "$git_command" -C "$repository_path" push origin \
             "$approved_sha:refs/heads/main"
         then
             publication_succeeded=true
-        elif refresh_fork_head && [[ "$latest_fork_sha" == "$approved_sha" ]]; then
+        elif refresh_fork_head; then
+            [[ "$latest_fork_sha" == "$approved_sha" ]] \
+                || stale "another Mac published a different fork update first."
             publication_succeeded=true
         else
-            restore_local_main \
-                || fail "Local main could not be restored after publication failed."
-            stale "another Mac published a different fork update first."
+            publication_outcome_uncertain=true
+            fail "VoiceInk could not determine whether publication succeeded. The verified app and staged candidate were retained for retry."
         fi
     else
         publication_succeeded=true
     fi
 
+    # A confirmed remote update is the commit boundary. Local convergence may
+    # fail and retry, but it must never roll back an app the fork may reference.
+    advance_local_main
     /bin/rm -rf "$candidate_stage"
     /bin/rm -f "$manifest_path"
     "$git_command" -C "$repository_path" update-ref -d "$candidate_ref" "$approved_sha"
-    local_main_advanced=false
 }
 
 preflight_local_publication
@@ -243,7 +226,7 @@ launched_pid=""
 recovery_published=false
 credential_snapshot_created=true
 publication_succeeded=false
-local_main_advanced=false
+publication_outcome_uncertain=false
 
 launch_candidate() {
     if [[ -n "$launcher" ]]; then
@@ -399,14 +382,9 @@ finish_transaction() {
     set +e
     installed_after_failure="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null || true)"
 
-    if [[ "$result" -ne 0 && "$publication_succeeded" == false && "$local_main_advanced" == true ]] \
-        && ! restore_local_main
-    then
-        printf 'Error: VoiceInk could not restore local main after failed publication.\n' >&2
-        result=2
-    fi
-
-    if [[ "$result" -ne 0 && "$publication_succeeded" == true ]]; then
+    if [[ "$result" -ne 0 && "$publication_outcome_uncertain" == true ]]; then
+        printf 'Error: Publication is uncertain; the healthy candidate and retry state were preserved.\n' >&2
+    elif [[ "$result" -ne 0 && "$publication_succeeded" == true ]]; then
         printf 'Error: The verified candidate was published, but local repository convergence did not finish.\n' >&2
     elif [[ "$result" -ne 0 && "$installed_after_failure" == "$approved_sha" ]]; then
         stop_launched_candidate

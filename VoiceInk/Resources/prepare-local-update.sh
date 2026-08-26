@@ -97,7 +97,10 @@ if ! git -C "$repository_path" merge-base --is-ancestor "$upstream_commit" "$for
     if git -C "$repository_path" merge-base --is-ancestor "$fork_base_commit" "$upstream_commit"; then
         git -C "$candidate_worktree" merge --ff-only "$upstream_commit"
     else
-        git -C "$candidate_worktree" merge --no-ff --no-gpg-sign \
+        git -C "$candidate_worktree" \
+            -c user.name="VoiceInk Updater" \
+            -c user.email="voiceink-updater@localhost" \
+            merge --no-ff --no-gpg-sign \
             -m "chore(updater): merge upstream main" "$upstream_commit"
     fi
     fork_commit="$(git -C "$candidate_worktree" rev-parse HEAD)"
@@ -106,6 +109,12 @@ fi
 if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" \
     && "$VOICEINK_INSTALLED_FORK_COMMIT" == "$fork_commit" ]]
 then
+    staged_manifest_sha="$(/usr/bin/plutil -extract forkCommit raw "$manifest_path" 2>/dev/null || true)"
+    if [[ "$fork_base_commit" != "$fork_commit" && "$staged_manifest_sha" == "$fork_commit" ]]; then
+        write_preparation_result candidatePrepared
+        printf 'Retained verified VoiceInk candidate %s for publication retry.\n' "$fork_commit"
+        exit 0
+    fi
     if [[ -f "$manifest_path" ]]; then
         cleanup_candidate_artifacts \
             "$(/usr/bin/plutil -extract forkCommit raw "$manifest_path" 2>/dev/null || true)" \
