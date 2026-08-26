@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import VoiceInk
@@ -22,6 +23,44 @@ struct UpdaterViewModelTests {
 
         #expect(adapter.userInitiatedCheckCount == 1)
         #expect(updater.state.availableUpdate == nil)
+    }
+
+    @Test
+    func automaticChecksFollowAppLifecycleAndUseALowFrequencyTimer() async throws {
+        let suiteName = "UpdaterViewModelTests.automatic-scheduling"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let applicationNotifications = NotificationCenter()
+        let workspaceNotifications = NotificationCenter()
+        var scheduledInterval: TimeInterval?
+        var scheduledTimer: Timer?
+        let scheduler = AutomaticUpdateScheduler(
+            applicationNotifications: applicationNotifications,
+            workspaceNotifications: workspaceNotifications,
+            timerFactory: { interval, action in
+                scheduledInterval = interval
+                let timer = Timer(timeInterval: interval, repeats: true) { _ in action() }
+                scheduledTimer = timer
+                return timer
+            }
+        )
+        let adapter = OfficialUpdaterAdapterStub(canCheckForUpdates: true)
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: adapter,
+            automaticUpdateScheduler: scheduler
+        )
+
+        #expect(adapter.informationCheckCount == 1)
+        let interval = try #require(scheduledInterval)
+        #expect(interval == 3_600)
+
+        applicationNotifications.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        workspaceNotifications.post(name: NSWorkspace.didWakeNotification, object: nil)
+        scheduledTimer?.fire()
+        try await waitUntil { adapter.informationCheckCount == 4 }
+
+        _ = updater
     }
 
     @Test
@@ -72,6 +111,70 @@ struct UpdaterViewModelTests {
         #expect(updater.state.stagedUpdate == nil)
         #expect(!updater.state.isPresentingStagedUpdate)
         #expect(updater.state.preparationError == nil)
+    }
+
+    @Test
+    func lowPowerModeDefersAutomaticBuildButNotManualPreparation() async throws {
+        let provenance = SourceProvenance(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98"
+        )
+        let transaction = ForkUpdateTransactionStub(
+            preparationResult: .upToDate(provenance)
+        )
+        let adapter = ForkUpdaterAdapter(
+            transaction: transaction,
+            powerState: ForkUpdatePowerStateStub(isLowPowerModeEnabled: true)
+        )
+
+        adapter.checkForUpdateInformation()
+        try await waitUntil { transaction.preparationModes.count == 1 }
+        #expect(transaction.preparationModes == [.automatic(deferBuild: true)])
+
+        try await waitUntil { !adapter.state.sessionInProgress }
+        adapter.checkForUpdates()
+        try await waitUntil { transaction.preparationModes.count == 2 }
+        #expect(transaction.preparationModes == [.automatic(deferBuild: true), .manual])
+    }
+
+    @Test
+    func recentForkCheckRemainsFreshAfterRelaunch() async throws {
+        let suiteName = "UpdaterViewModelTests.persisted-check-date"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let completedAt = Date()
+        let provenance = SourceProvenance(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98"
+        )
+        let firstTransaction = ForkUpdateTransactionStub(preparationResult: .upToDate(provenance))
+        let firstAdapter = ForkUpdaterAdapter(
+            transaction: firstTransaction,
+            powerState: ForkUpdatePowerStateStub(isLowPowerModeEnabled: false),
+            defaults: defaults,
+            now: { completedAt }
+        )
+
+        firstAdapter.checkForUpdateInformation()
+        try await waitUntil { !firstAdapter.state.sessionInProgress }
+        #expect(firstAdapter.state.lastUpdateCheckDate == completedAt)
+
+        let relaunchedTransaction = ForkUpdateTransactionStub(preparationResult: .upToDate(provenance))
+        let relaunchedAdapter = ForkUpdaterAdapter(
+            transaction: relaunchedTransaction,
+            powerState: ForkUpdatePowerStateStub(isLowPowerModeEnabled: false),
+            defaults: defaults
+        )
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: relaunchedAdapter,
+            sourceProvenance: provenance
+        )
+
+        #expect(relaunchedAdapter.state.lastUpdateCheckDate == completedAt)
+        #expect(relaunchedAdapter.state.updateCheckInterval == 24 * 60 * 60)
+        updater.checkForUpdatesIfDue()
+        #expect(relaunchedTransaction.prepareCount == 0)
     }
 
     @Test
@@ -178,7 +281,7 @@ struct UpdaterViewModelTests {
             commandRunner: ForkUpdateCommandRunnerStub(result: .upToDate(provenance))
         )
 
-        let result = try await transaction.prepare()
+        let result = try await transaction.prepare(mode: .manual)
 
         #expect(result == .upToDate(provenance))
     }
@@ -207,7 +310,7 @@ struct UpdaterViewModelTests {
             scriptURL: scriptURL,
             manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
             installedForkCommit: forkCommit,
-            retrySuppressedCandidate: false
+            mode: .candidateRevalidation
         )
 
         #expect(
@@ -950,6 +1053,37 @@ struct UpdaterViewModelTests {
         #expect(defaults.object(forKey: "VoiceInkChecksForUpdatesOnLaunch") as? Bool == false)
     }
 
+    @Test
+    func pausingAutomaticUpdatesDoesNotPauseAnotherMac() {
+        let firstSuite = "UpdaterViewModelTests.pause.first-mac"
+        let secondSuite = "UpdaterViewModelTests.pause.second-mac"
+        let firstDefaults = makeDefaults(suiteName: firstSuite)
+        let secondDefaults = makeDefaults(suiteName: secondSuite)
+        defer {
+            firstDefaults.removePersistentDomain(forName: firstSuite)
+            secondDefaults.removePersistentDomain(forName: secondSuite)
+        }
+        let firstAdapter = OfficialUpdaterAdapterStub(canCheckForUpdates: true)
+        let secondAdapter = OfficialUpdaterAdapterStub(canCheckForUpdates: true)
+        let firstUpdater: any UpdaterModule = UpdaterViewModel(
+            defaults: firstDefaults,
+            adapter: firstAdapter
+        )
+        let secondUpdater: any UpdaterModule = UpdaterViewModel(
+            defaults: secondDefaults,
+            adapter: secondAdapter
+        )
+
+        firstUpdater.setChecksForUpdatesWhenDashboardAppears(false)
+        firstUpdater.checkForUpdatesIfDue()
+        secondUpdater.checkForUpdatesIfDue()
+
+        #expect(!firstUpdater.state.checksForUpdatesWhenDashboardAppears)
+        #expect(secondUpdater.state.checksForUpdatesWhenDashboardAppears)
+        #expect(firstAdapter.informationCheckCount == 0)
+        #expect(secondAdapter.informationCheckCount == 1)
+    }
+
     private func makeDefaults(suiteName: String) -> UserDefaults {
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
@@ -977,6 +1111,7 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
     let preparationResult: ForkUpdatePreparationResult
     let restartResult: StagedForkCandidate?
     private(set) var prepareCount = 0
+    private(set) var preparationModes: [ForkUpdatePreparationMode] = []
     private(set) var restartRequestCount = 0
     var canRestorePreviousVersion = false
     private(set) var restorePreviousVersionCount = 0
@@ -998,8 +1133,9 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
         nil
     }
 
-    func prepare() async throws -> ForkUpdatePreparationResult {
+    func prepare(mode: ForkUpdatePreparationMode) async throws -> ForkUpdatePreparationResult {
         prepareCount += 1
+        preparationModes.append(mode)
         return preparationResult
     }
 
@@ -1013,6 +1149,10 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
     }
 }
 
+private struct ForkUpdatePowerStateStub: ForkUpdatePowerStateProviding {
+    let isLowPowerModeEnabled: Bool
+}
+
 private struct ForkUpdateCommandRunnerStub: ForkUpdateCommandRunning {
     let result: ForkUpdateCommandResult
 
@@ -1024,7 +1164,7 @@ private struct ForkUpdateCommandRunnerStub: ForkUpdateCommandRunning {
         scriptURL: URL,
         manifestURL: URL,
         installedForkCommit: String?,
-        retrySuppressedCandidate: Bool
+        mode: ForkUpdatePreparationMode
     ) async throws -> ForkUpdateCommandResult {
         result
     }

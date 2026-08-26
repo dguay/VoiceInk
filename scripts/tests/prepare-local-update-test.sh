@@ -103,6 +103,30 @@ EOF
 
 chmod +x "$fake_bin/xcodebuild" "$fake_bin/codesign"
 
+deferred_manifest="$fixture_root/deferred/staged-candidate.plist"
+deferred_result="$fixture_root/deferred/preparation-result.plist"
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$deferred_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$deferred_result" \
+    VOICEINK_INSTALLED_FORK_COMMIT="$upstream_sha" \
+    VOICEINK_UPDATE_DEFER_BUILD=1 \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+
+if [[ -e "$deferred_manifest" || -e "$xcode_log" || ! -f "$deferred_result" ]]; then
+    printf 'prepare-local-update-test: deferred automatic check built or staged a candidate\n' >&2
+    exit 1
+fi
+if [[ "$(/usr/bin/plutil -extract outcome raw "$deferred_result")" != "buildDeferred" \
+    || "$(/usr/bin/plutil -extract forkCommit raw "$deferred_result")" != "$candidate_sha" \
+    || "$(/usr/bin/plutil -extract upstreamCommit raw "$deferred_result")" != "$upstream_sha" ]]
+then
+    printf 'prepare-local-update-test: deferred automatic check reported the wrong candidate\n' >&2
+    exit 1
+fi
+
 up_to_date_manifest="$fixture_root/up-to-date/staged-candidate.plist"
 up_to_date_result="$fixture_root/up-to-date/preparation-result.plist"
 PATH="$fake_bin:$PATH" \

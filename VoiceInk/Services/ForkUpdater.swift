@@ -41,14 +41,45 @@ struct StagedForkCandidate: Codable, Equatable {
 
 enum ForkUpdatePreparationResult: Equatable {
     case upToDate(SourceProvenance)
+    case buildDeferred
     case staged(StagedForkCandidate)
+}
+
+enum ForkUpdatePreparationMode: Equatable, Sendable {
+    case automatic(deferBuild: Bool)
+    case candidateRevalidation
+    case manual
+
+    var isAutomatic: Bool {
+        if case .automatic = self { return true }
+        return false
+    }
+
+    var defersBuild: Bool {
+        if case .automatic(deferBuild: true) = self { return true }
+        return false
+    }
+
+    var retriesSuppressedCandidate: Bool {
+        self == .manual
+    }
+}
+
+protocol ForkUpdatePowerStateProviding {
+    var isLowPowerModeEnabled: Bool { get }
+}
+
+struct SystemForkUpdatePowerState: ForkUpdatePowerStateProviding {
+    var isLowPowerModeEnabled: Bool {
+        ProcessInfo.processInfo.isLowPowerModeEnabled
+    }
 }
 
 @MainActor
 protocol ForkUpdateTransacting: AnyObject {
     var canRestorePreviousVersion: Bool { get }
     func loadStagedCandidate() throws -> StagedForkCandidate?
-    func prepare() async throws -> ForkUpdatePreparationResult
+    func prepare(mode: ForkUpdatePreparationMode) async throws -> ForkUpdatePreparationResult
     func requestRestart(for candidate: StagedForkCandidate) async throws -> StagedForkCandidate?
     func restorePreviousVersion() async throws
 }
@@ -58,12 +89,13 @@ protocol ForkUpdateCommandRunning {
         scriptURL: URL,
         manifestURL: URL,
         installedForkCommit: String?,
-        retrySuppressedCandidate: Bool
+        mode: ForkUpdatePreparationMode
     ) async throws -> ForkUpdateCommandResult
 }
 
 enum ForkUpdateCommandResult: Equatable, Sendable {
     case upToDate(SourceProvenance)
+    case buildDeferred
     case candidatePrepared
 }
 
@@ -123,10 +155,12 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         scriptURL: URL,
         manifestURL: URL,
         installedForkCommit: String?,
-        retrySuppressedCandidate: Bool
+        mode: ForkUpdatePreparationMode
     ) async throws -> ForkUpdateCommandResult {
-        try await Task.detached {
+        let priority: TaskPriority = mode.isAutomatic ? .utility : .userInitiated
+        return try await Task.detached(priority: priority) {
             let process = Process()
+            process.qualityOfService = mode.isAutomatic ? .utility : .userInitiated
             let outputURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("voiceink-update-\(UUID().uuidString).log")
             let resultURL = FileManager.default.temporaryDirectory
@@ -150,10 +184,15 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
             } else {
                 environment.removeValue(forKey: "VOICEINK_INSTALLED_FORK_COMMIT")
             }
-            if retrySuppressedCandidate {
+            if mode.retriesSuppressedCandidate {
                 environment["VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE"] = "1"
             } else {
                 environment.removeValue(forKey: "VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE")
+            }
+            if mode.defersBuild {
+                environment["VOICEINK_UPDATE_DEFER_BUILD"] = "1"
+            } else {
+                environment.removeValue(forKey: "VOICEINK_UPDATE_DEFER_BUILD")
             }
             process.environment = environment
 
@@ -195,6 +234,8 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                         upstreamCommit: report.upstreamCommit
                     )
                 )
+            case "buildDeferred":
+                return .buildDeferred
             case "candidatePrepared":
                 return .candidatePrepared
             default:
@@ -402,21 +443,20 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         return try PropertyListDecoder().decode(StagedForkCandidate.self, from: data)
     }
 
-    func prepare() async throws -> ForkUpdatePreparationResult {
-        // The adapter calls this only for an explicit user check, which is the
-        // issue's opt-in retry boundary for a locally suppressed candidate.
-        try await prepare(retryingSuppressedCandidate: true)
-    }
-
-    private func prepare(retryingSuppressedCandidate: Bool) async throws -> ForkUpdatePreparationResult {
+    func prepare(mode: ForkUpdatePreparationMode) async throws -> ForkUpdatePreparationResult {
         let commandResult = try await commandRunner.run(
             scriptURL: scriptURL,
             manifestURL: manifestURL,
             installedForkCommit: targetBundleURL.flatMap { try? installedForkCommit(at: $0) },
-            retrySuppressedCandidate: retryingSuppressedCandidate
+            mode: mode
         )
-        if case .upToDate(let provenance) = commandResult {
+        switch commandResult {
+        case .upToDate(let provenance):
             return .upToDate(provenance)
+        case .buildDeferred:
+            return .buildDeferred
+        case .candidatePrepared:
+            break
         }
         guard let candidate = try loadStagedCandidate() else {
             throw ForkUpdateError(
@@ -428,9 +468,11 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
 
     func requestRestart(for candidate: StagedForkCandidate) async throws -> StagedForkCandidate? {
         guard let stagedCandidate = try loadStagedCandidate() else {
-            switch try await prepare(retryingSuppressedCandidate: false) {
+            switch try await prepare(mode: .candidateRevalidation) {
             case .upToDate:
                 return nil
+            case .buildDeferred:
+                throw ForkUpdateError(message: "VoiceInk deferred a user-approved update unexpectedly.")
             case .staged(let candidate):
                 return candidate
             }
@@ -493,9 +535,11 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         case .candidateStale:
             try credentialSnapshotter.deleteSnapshot(generationIdentifier: credentialGeneration)
             try removeRecoveryIntentIfPresent(at: recoveryIntentURL)
-            switch try await prepare(retryingSuppressedCandidate: false) {
+            switch try await prepare(mode: .candidateRevalidation) {
             case .upToDate:
                 return nil
+            case .buildDeferred:
+                throw ForkUpdateError(message: "VoiceInk deferred a user-approved update unexpectedly.")
             case .staged(let candidate):
                 return candidate
             }
@@ -604,24 +648,48 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
 
 @MainActor
 final class ForkUpdaterAdapter: UpdaterAdapter {
+    private enum DefaultsKey {
+        static let lastCheckDate = "VoiceInkForkUpdaterLastCheckDate"
+    }
+
+    private static let automaticCheckInterval: TimeInterval = 24 * 60 * 60
+
     private(set) var state: UpdaterAdapterState
     var onEvent: ((UpdaterAdapterEvent) -> Void)?
 
     private let transaction: (any ForkUpdateTransacting)?
+    private let powerState: any ForkUpdatePowerStateProviding
+    private let defaults: UserDefaults
+    private let now: () -> Date
     private var stagedCandidate: StagedForkCandidate?
 
-    init() {
+    init(
+        powerState: any ForkUpdatePowerStateProviding = SystemForkUpdatePowerState(),
+        defaults: UserDefaults = .standard,
+        now: @escaping () -> Date = Date.init
+    ) {
         transaction = nil
+        self.powerState = powerState
+        self.defaults = defaults
+        self.now = now
         state = .unavailable
     }
 
-    init(transaction: any ForkUpdateTransacting) {
+    init(
+        transaction: any ForkUpdateTransacting,
+        powerState: any ForkUpdatePowerStateProviding = SystemForkUpdatePowerState(),
+        defaults: UserDefaults = .standard,
+        now: @escaping () -> Date = Date.init
+    ) {
         self.transaction = transaction
+        self.powerState = powerState
+        self.defaults = defaults
+        self.now = now
         state = UpdaterAdapterState(
             canCheckForUpdates: true,
             sessionInProgress: false,
-            lastUpdateCheckDate: nil,
-            updateCheckInterval: 0
+            lastUpdateCheckDate: defaults.object(forKey: DefaultsKey.lastCheckDate) as? Date,
+            updateCheckInterval: Self.automaticCheckInterval
         )
     }
 
@@ -636,9 +704,15 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
         onEvent?(.stagedCandidate(candidate))
     }
 
-    func checkForUpdateInformation() {}
+    func checkForUpdateInformation() {
+        startPreparation(mode: .automatic(deferBuild: powerState.isLowPowerModeEnabled))
+    }
 
     func checkForUpdates() {
+        startPreparation(mode: .manual)
+    }
+
+    private func startPreparation(mode: ForkUpdatePreparationMode) {
         guard let transaction, !state.sessionInProgress else { return }
 
         state = UpdaterAdapterState(
@@ -651,10 +725,12 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
 
         Task { [weak self] in
             do {
-                switch try await transaction.prepare() {
+                switch try await transaction.prepare(mode: mode) {
                 case .upToDate(let provenance):
                     self?.stagedCandidate = nil
                     self?.onEvent?(.forkUpToDate(provenance))
+                case .buildDeferred:
+                    break
                 case .staged(let candidate):
                     self?.stagedCandidate = candidate
                     self?.onEvent?(.stagedCandidate(candidate))
@@ -712,10 +788,12 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
     }
 
     private func finishUpdateCycle() {
+        let completedAt = now()
+        defaults.set(completedAt, forKey: DefaultsKey.lastCheckDate)
         state = UpdaterAdapterState(
             canCheckForUpdates: state.canCheckForUpdates,
             sessionInProgress: false,
-            lastUpdateCheckDate: Date(),
+            lastUpdateCheckDate: completedAt,
             updateCheckInterval: state.updateCheckInterval
         )
         onEvent?(.stateChanged(state))

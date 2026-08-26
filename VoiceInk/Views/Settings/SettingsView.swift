@@ -245,12 +245,21 @@ struct SettingsView: View {
                 )
                 .disabled(launchAtLoginManager.isUpdating)
 
-                Toggle(
-                    "Automatically Check for Updates",
-                    isOn: Binding(
-                        get: { updaterViewModel.state.checksForUpdatesWhenDashboardAppears },
-                        set: { updaterViewModel.setChecksForUpdatesWhenDashboardAppears($0) }
-                    ))
+                #if LOCAL_BUILD
+                    Toggle(
+                        "Pause Automatic Updates",
+                        isOn: Binding(
+                            get: { !updaterViewModel.state.checksForUpdatesWhenDashboardAppears },
+                            set: { updaterViewModel.setChecksForUpdatesWhenDashboardAppears(!$0) }
+                        ))
+                #else
+                    Toggle(
+                        "Automatically Check for Updates",
+                        isOn: Binding(
+                            get: { updaterViewModel.state.checksForUpdatesWhenDashboardAppears },
+                            set: { updaterViewModel.setChecksForUpdatesWhenDashboardAppears($0) }
+                        ))
+                #endif
 
                 Toggle("Show Announcements", isOn: $enableAnnouncements)
                     .onChange(of: enableAnnouncements) { _, newValue in
