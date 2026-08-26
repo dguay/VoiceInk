@@ -764,80 +764,95 @@ candidate_ref="$original_candidate_ref"
 staged_bundle="$original_staged_bundle"
 stage_publishable_candidate newer-candidate
 
-converged_peer_clone="$fixture_root/converged-peer"
-converged_peer_pushed_path="$fixture_root/converged-peer-pushed"
-converged_fetch_log="$fixture_root/converged-fetch.log"
-git clone "$fork_bare" "$converged_peer_clone" >/dev/null
-git -C "$converged_peer_clone" config user.name "VoiceInk Peer Test"
-git -C "$converged_peer_clone" config user.email "peer-test@example.com"
-git -C "$converged_peer_clone" fetch "$canonical_clone" "$new_sha" >/dev/null
-git -C "$converged_peer_clone" merge --ff-only "$new_sha" >/dev/null
-printf 'peer descendant\n' > "$converged_peer_clone/peer-descendant"
-git -C "$converged_peer_clone" add peer-descendant
-git -C "$converged_peer_clone" commit -m "test: publish after approved candidate" >/dev/null
-converged_peer_sha="$(git -C "$converged_peer_clone" rev-parse HEAD)"
+run_successful_peer_convergence() {
+    local peer_clone="$1"
+    local peer_sha="$2"
+    local scenario="$3"
+    local fetch_log="$fixture_root/$scenario-fetch.log"
+    local peer_pushed_path="$fixture_root/$scenario-peer-pushed"
+    local output_log="$fixture_root/$scenario-output.log"
+    local converged_launched_pid
 
-sleep 30 &
-parent_pid=$!
-: > "$launch_log"
-: > "$publish_log"
-prepare_recovery_intent
-PATH="$fake_bin:$PATH" \
-    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
-    VOICEINK_UPDATE_GIT_COMMAND="$fake_bin/git-require-health-before-push" \
-    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
-    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
-    VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
-    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
-    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
-    VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
-    VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
-    VOICEINK_UPDATE_STABILITY_SECONDS=1 \
-    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
-    VOICEINK_TEST_REQUIRED_HEALTH_PATH="$health_path" \
-    VOICEINK_TEST_REQUIRED_PUBLISH_SHA="$new_sha" \
-    VOICEINK_TEST_EXPECTED_LOCAL_MAIN_BEFORE_PUSH="$old_sha" \
-    VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
-    VOICEINK_TEST_PEER_CLONE="$converged_peer_clone" \
-    VOICEINK_TEST_PEER_PUSHED_PATH="$converged_peer_pushed_path" \
-    VOICEINK_TEST_FAIL_AFTER_PEER_PUSH=1 \
-    VOICEINK_TEST_FETCH_LOG="$converged_fetch_log" \
-    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
-    "$new_sha" \
-    "$manifest_path" \
-    "$installed_bundle" \
-    "$backup_bundle" \
-    "$parent_pid" \
-    > "$fixture_root/converged-peer-output.log" 2>&1
+    sleep 30 &
+    parent_pid=$!
+    : > "$launch_log"
+    : > "$publish_log"
+    prepare_recovery_intent
+    PATH="$fake_bin:$PATH" \
+        VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+        VOICEINK_UPDATE_GIT_COMMAND="$fake_bin/git-require-health-before-push" \
+        VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+        VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+        VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+        VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
+        VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+        VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
+        VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
+        VOICEINK_UPDATE_STABILITY_SECONDS=1 \
+        VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+        VOICEINK_TEST_REQUIRED_HEALTH_PATH="$health_path" \
+        VOICEINK_TEST_REQUIRED_PUBLISH_SHA="$new_sha" \
+        VOICEINK_TEST_EXPECTED_LOCAL_MAIN_BEFORE_PUSH="$old_sha" \
+        VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
+        VOICEINK_TEST_PEER_CLONE="$peer_clone" \
+        VOICEINK_TEST_PEER_PUSHED_PATH="$peer_pushed_path" \
+        VOICEINK_TEST_FAIL_AFTER_PEER_PUSH=1 \
+        VOICEINK_TEST_FETCH_LOG="$fetch_log" \
+        /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+        "$new_sha" \
+        "$manifest_path" \
+        "$installed_bundle" \
+        "$backup_bundle" \
+        "$parent_pid" \
+        > "$output_log" 2>&1
 
-if kill -0 "$parent_pid" >/dev/null 2>&1; then
-    printf 'install-local-update-test: approved parent survived peer convergence\n' >&2
-    exit 1
-fi
-parent_pid=""
-[[ "$(< "$installed_bundle/Contents/version")" == "newer-candidate" ]]
-[[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$converged_peer_sha" ]]
-[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$converged_peer_sha" ]]
-[[ ! -e "$manifest_path" ]]
-[[ ! -e "$staged_bundle" ]]
-if git -C "$canonical_clone" rev-parse "$candidate_ref" >/dev/null 2>&1; then
-    printf 'install-local-update-test: converged candidate reference survived\n' >&2
-    exit 1
-fi
-if [[ "$(grep -c '^fetch$' "$converged_fetch_log")" -ne 4 ]]; then
-    printf 'install-local-update-test: peer convergence did not use one reconciliation fetch\n' >&2
-    exit 1
-fi
+    if kill -0 "$parent_pid" >/dev/null 2>&1; then
+        printf 'install-local-update-test: approved parent survived %s convergence\n' "$scenario" >&2
+        exit 1
+    fi
+    parent_pid=""
+    [[ "$(< "$installed_bundle/Contents/version")" == "newer-candidate" ]]
+    [[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$peer_sha" ]]
+    [[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$peer_sha" ]]
+    [[ ! -e "$manifest_path" ]]
+    [[ ! -e "$staged_bundle" ]]
+    if git -C "$canonical_clone" rev-parse "$candidate_ref" >/dev/null 2>&1; then
+        printf 'install-local-update-test: %s candidate reference survived\n' "$scenario" >&2
+        exit 1
+    fi
+    if [[ "$(grep -c '^fetch$' "$fetch_log")" -ne 4 ]]; then
+        printf 'install-local-update-test: %s convergence did not use one reconciliation fetch\n' "$scenario" >&2
+        exit 1
+    fi
 
-converged_launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path")"
-kill "$converged_launched_pid"
-/bin/rm -rf "$installed_bundle"
-/usr/bin/ditto "$backup_bundle" "$installed_bundle"
-git --git-dir="$fork_bare" update-ref refs/heads/main "$fork_base_sha" "$converged_peer_sha"
-git -C "$canonical_clone" switch --detach "$old_sha" >/dev/null
-git -C "$canonical_clone" branch -f main "$old_sha"
-git -C "$canonical_clone" switch main >/dev/null
-stage_publishable_candidate newer-candidate
+    converged_launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path")"
+    kill "$converged_launched_pid"
+    /bin/rm -rf "$installed_bundle"
+    /usr/bin/ditto "$backup_bundle" "$installed_bundle"
+    git --git-dir="$fork_bare" update-ref refs/heads/main "$fork_base_sha" "$peer_sha"
+    git -C "$canonical_clone" switch --detach "$old_sha" >/dev/null
+    git -C "$canonical_clone" branch -f main "$old_sha"
+    git -C "$canonical_clone" switch main >/dev/null
+    stage_publishable_candidate newer-candidate
+}
+
+exact_peer_clone="$fixture_root/exact-peer"
+git clone "$fork_bare" "$exact_peer_clone" >/dev/null
+git -C "$exact_peer_clone" fetch "$canonical_clone" "$new_sha" >/dev/null
+git -C "$exact_peer_clone" merge --ff-only "$new_sha" >/dev/null
+run_successful_peer_convergence "$exact_peer_clone" "$new_sha" exact-peer
+
+descendant_peer_clone="$fixture_root/descendant-peer"
+git clone "$fork_bare" "$descendant_peer_clone" >/dev/null
+git -C "$descendant_peer_clone" config user.name "VoiceInk Peer Test"
+git -C "$descendant_peer_clone" config user.email "peer-test@example.com"
+git -C "$descendant_peer_clone" fetch "$canonical_clone" "$new_sha" >/dev/null
+git -C "$descendant_peer_clone" merge --ff-only "$new_sha" >/dev/null
+printf 'peer descendant\n' > "$descendant_peer_clone/peer-descendant"
+git -C "$descendant_peer_clone" add peer-descendant
+git -C "$descendant_peer_clone" commit -m "test: publish after approved candidate" >/dev/null
+descendant_peer_sha="$(git -C "$descendant_peer_clone" rev-parse HEAD)"
+run_successful_peer_convergence "$descendant_peer_clone" "$descendant_peer_sha" descendant-peer
 
 sleep 30 &
 parent_pid=$!
