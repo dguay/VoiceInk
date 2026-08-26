@@ -131,12 +131,15 @@ publish_verified_candidate() {
             || stale "origin/main changed before the verified candidate could be published."
         /bin/rm -rf "$candidate_stage"
         /bin/rm -f "$manifest_path"
-        if ! "$git_command" -C "$repository_path" push origin \
+        if "$git_command" -C "$repository_path" push origin \
             "$approved_sha:refs/heads/main"
         then
+            publication_succeeded=true
+        else
             refresh_fork_head
             [[ "$latest_fork_sha" == "$approved_sha" ]] \
                 || stale "another Mac published a different fork update first."
+            publication_succeeded=true
         fi
     else
         publication_succeeded=true
