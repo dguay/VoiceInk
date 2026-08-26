@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-struct SourceProvenance: Equatable {
+struct SourceProvenance: Equatable, Sendable {
     static let forkCommitInfoKey = "VoiceInkForkCommit"
     static let upstreamCommitInfoKey = "VoiceInkUpstreamCommit"
 
@@ -80,6 +80,7 @@ enum UpdaterAdapterEvent: Equatable {
     case foundUpdate(versionIdentifier: String, displayVersion: String)
     case didNotFindUpdate
     case didFinishUpdateCycle
+    case forkUpToDate(SourceProvenance)
     case stagedCandidate(StagedForkCandidate)
     case preparationFailed(String)
 }
@@ -254,6 +255,11 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.availableUpdate = nil
         case .didFinishUpdateCycle:
             isUserInitiatedUpdateCheck = false
+        case .forkUpToDate(let provenance):
+            state.sourceProvenance = provenance
+            state.stagedUpdate = nil
+            state.isPresentingStagedUpdate = false
+            state.preparationError = nil
         case .stagedCandidate(let candidate):
             state.stagedUpdate = candidate
             state.isPresentingStagedUpdate = true
