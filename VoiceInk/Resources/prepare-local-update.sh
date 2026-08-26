@@ -7,6 +7,18 @@ fail() {
     exit 1
 }
 
+write_preparation_result() {
+    [[ -n "$result_path" ]] || return 0
+
+    mkdir -p "$(dirname "$result_path")"
+    result_temporary="$result_path.tmp.$$"
+    /usr/bin/plutil -create xml1 "$result_temporary"
+    /usr/bin/plutil -insert outcome -string "$1" "$result_temporary"
+    /usr/bin/plutil -insert forkCommit -string "$fork_commit" "$result_temporary"
+    /usr/bin/plutil -insert upstreamCommit -string "$upstream_commit" "$result_temporary"
+    mv "$result_temporary" "$result_path"
+}
+
 repository_path="${VOICEINK_REPOSITORY_PATH:-}"
 if [[ -z "$repository_path" ]]; then
     repository_path="$(git config --global --get voiceink.repositoryPath 2>/dev/null || true)"
@@ -21,6 +33,7 @@ repository_path="$(git -C "$repository_path" rev-parse --show-toplevel 2>/dev/nu
     || fail "The VoiceInk clone has uncommitted changes. Commit or stash them before preparing an update."
 
 manifest_path="${VOICEINK_UPDATE_MANIFEST_PATH:-$HOME/Library/Application Support/com.prakashjoshipax.VoiceInk/Updater/staged-candidate.plist}"
+result_path="${VOICEINK_UPDATE_RESULT_PATH:-}"
 stage_root="$(dirname "$manifest_path")"
 work_root="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-update.XXXXXX")"
 candidate_worktree="$work_root/candidate"
@@ -40,9 +53,18 @@ git -C "$repository_path" fetch upstream main
 
 fork_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main)" \
     || fail "The fetched fork does not have origin/main."
-upstream_commit="$(
-    git -C "$repository_path" merge-base "$fork_commit" refs/remotes/upstream/main
-)" || fail "The fetched fork does not share history with upstream/main."
+upstream_commit="$(git -C "$repository_path" rev-parse refs/remotes/upstream/main)" \
+    || fail "The fetched upstream does not have upstream/main."
+git -C "$repository_path" merge-base --is-ancestor "$upstream_commit" "$fork_commit" \
+    || fail "The fetched fork does not contain upstream/main."
+
+if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" \
+    && "$VOICEINK_INSTALLED_FORK_COMMIT" == "$fork_commit" ]]
+then
+    rm -f "$manifest_path"
+    write_preparation_result upToDate
+    exit 0
+fi
 
 recovery_state="${VOICEINK_UPDATE_RECOVERY_STATE_PATH:-$HOME/Library/Application Support/com.prakashjoshipax.VoiceInk.UpdaterRecovery/recovery.plist}"
 if [[ -f "$recovery_state" ]]; then
@@ -132,5 +154,6 @@ manifest_temporary="$manifest_path.tmp.$$"
 /usr/bin/plutil -insert bundlePath -string "$staged_bundle" "$manifest_temporary"
 /usr/bin/plutil -insert preparedAt -date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$manifest_temporary"
 mv "$manifest_temporary" "$manifest_path"
+write_preparation_result candidatePrepared
 
 printf 'Staged VoiceInk candidate %s at %s\n' "$fork_commit" "$staged_bundle"

@@ -44,6 +44,37 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func manualForkCheckRecordsSilentSuccessWhenInstalledForkMatchesFetchedHead() async throws {
+        let suiteName = "UpdaterViewModelTests.fork-up-to-date"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let provenance = SourceProvenance(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98"
+        )
+        let transaction = ForkUpdateTransactionStub(
+            preparationResult: .upToDate(provenance)
+        )
+        let adapter = ForkUpdaterAdapter(transaction: transaction)
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: adapter,
+            sourceProvenance: nil
+        )
+
+        updater.checkForUpdates()
+        try await waitUntil {
+            updater.state.sourceProvenance == provenance && !updater.state.isPreparingUpdate
+        }
+
+        #expect(transaction.prepareCount == 1)
+        #expect(adapter.state.lastUpdateCheckDate != nil)
+        #expect(updater.state.stagedUpdate == nil)
+        #expect(!updater.state.isPresentingStagedUpdate)
+        #expect(updater.state.preparationError == nil)
+    }
+
+    @Test
     func manualForkUpdateStagesCandidateWithoutRequestingAppTermination() async throws {
         let suiteName = "UpdaterViewModelTests.staging"
         let defaults = makeDefaults(suiteName: suiteName)
@@ -133,6 +164,61 @@ struct UpdaterViewModelTests {
 
         #expect(transaction.restartRequestCount == 1)
         #expect(updater.state.isPresentingStagedUpdate)
+    }
+
+    @Test
+    func forkTransactionReturnsTheFetchedProvenanceWithoutRequiringAStagedManifest() async throws {
+        let provenance = SourceProvenance(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98"
+        )
+        let transaction = ForkUpdateTransaction(
+            scriptURL: URL(fileURLWithPath: "/tmp/prepare-local-update.sh"),
+            manifestURL: URL(fileURLWithPath: "/tmp/missing-staged-candidate.plist"),
+            commandRunner: ForkUpdateCommandRunnerStub(result: .upToDate(provenance))
+        )
+
+        let result = try await transaction.prepare()
+
+        #expect(result == .upToDate(provenance))
+    }
+
+    @Test
+    func preparationProcessReportsTheInstalledForkAsUpToDate() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
+        let forkCommit = "0123456789abcdef0123456789abcdef01234567"
+        let upstreamCommit = "fedcba9876543210fedcba9876543210fedcba98"
+        let script = """
+            #!/usr/bin/env bash
+            set -euo pipefail
+            [[ "$VOICEINK_INSTALLED_FORK_COMMIT" == "\(forkCommit)" ]]
+            /usr/bin/plutil -create xml1 "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert outcome -string upToDate "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert forkCommit -string "\(forkCommit)" "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert upstreamCommit -string "\(upstreamCommit)" "$VOICEINK_UPDATE_RESULT_PATH"
+            """
+        try Data(script.utf8).write(to: scriptURL)
+
+        let result = try await ProcessForkUpdateCommandRunner().run(
+            scriptURL: scriptURL,
+            manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+            installedForkCommit: forkCommit,
+            retrySuppressedCandidate: false
+        )
+
+        #expect(
+            result
+                == .upToDate(
+                    SourceProvenance(
+                        forkCommit: forkCommit,
+                        upstreamCommit: upstreamCommit
+                    )
+                )
+        )
     }
 
     @Test
@@ -888,7 +974,7 @@ struct UpdaterViewModelTests {
 
 @MainActor
 private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
-    let stagedCandidate: StagedForkCandidate
+    let preparationResult: ForkUpdatePreparationResult
     let restartResult: StagedForkCandidate?
     private(set) var prepareCount = 0
     private(set) var restartRequestCount = 0
@@ -896,7 +982,15 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
     private(set) var restorePreviousVersionCount = 0
 
     init(stagedCandidate: StagedForkCandidate, restartResult: StagedForkCandidate? = nil) {
-        self.stagedCandidate = stagedCandidate
+        preparationResult = .staged(stagedCandidate)
+        self.restartResult = restartResult
+    }
+
+    init(
+        preparationResult: ForkUpdatePreparationResult,
+        restartResult: StagedForkCandidate? = nil
+    ) {
+        self.preparationResult = preparationResult
         self.restartResult = restartResult
     }
 
@@ -904,9 +998,9 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
         nil
     }
 
-    func prepare() async throws -> StagedForkCandidate {
+    func prepare() async throws -> ForkUpdatePreparationResult {
         prepareCount += 1
-        return stagedCandidate
+        return preparationResult
     }
 
     func requestRestart(for candidate: StagedForkCandidate) async throws -> StagedForkCandidate? {
@@ -920,11 +1014,20 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
 }
 
 private struct ForkUpdateCommandRunnerStub: ForkUpdateCommandRunning {
+    let result: ForkUpdateCommandResult
+
+    init(result: ForkUpdateCommandResult = .candidatePrepared) {
+        self.result = result
+    }
+
     func run(
         scriptURL: URL,
         manifestURL: URL,
+        installedForkCommit: String?,
         retrySuppressedCandidate: Bool
-    ) async throws {}
+    ) async throws -> ForkUpdateCommandResult {
+        result
+    }
 }
 
 private final class ForkUpdateRestartRecorder: @unchecked Sendable {

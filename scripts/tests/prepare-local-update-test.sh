@@ -11,6 +11,7 @@ upstream_bare="$fixture_root/upstream.git"
 seed_clone="$fixture_root/seed"
 canonical_clone="$fixture_root/canonical"
 manifest_path="$fixture_root/staging/staged-candidate.plist"
+result_path="$fixture_root/staging/preparation-result.plist"
 recovery_state="$fixture_root/recovery/recovery.plist"
 
 git init --bare --initial-branch=main "$fork_bare" >/dev/null
@@ -102,6 +103,29 @@ EOF
 
 chmod +x "$fake_bin/xcodebuild" "$fake_bin/codesign"
 
+up_to_date_manifest="$fixture_root/up-to-date/staged-candidate.plist"
+up_to_date_result="$fixture_root/up-to-date/preparation-result.plist"
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$up_to_date_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$up_to_date_result" \
+    VOICEINK_INSTALLED_FORK_COMMIT="$candidate_sha" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+
+if [[ -e "$up_to_date_manifest" || -e "$xcode_log" || ! -f "$up_to_date_result" ]]; then
+    printf 'prepare-local-update-test: exact installed fork did not stop before build and staging\n' >&2
+    exit 1
+fi
+if [[ "$(/usr/bin/plutil -extract outcome raw "$up_to_date_result")" != "upToDate" \
+    || "$(/usr/bin/plutil -extract forkCommit raw "$up_to_date_result")" != "$candidate_sha" \
+    || "$(/usr/bin/plutil -extract upstreamCommit raw "$up_to_date_result")" != "$upstream_sha" ]]
+then
+    printf 'prepare-local-update-test: exact installed fork reported the wrong provenance\n' >&2
+    exit 1
+fi
+
 mkdir -p "$(dirname "$recovery_state")"
 /usr/bin/plutil -create xml1 "$recovery_state"
 /usr/bin/plutil -insert previousForkCommit -string "$upstream_sha" "$recovery_state"
@@ -128,6 +152,7 @@ PATH="$fake_bin:$PATH" \
     XCODE_LOG="$xcode_log" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
     VOICEINK_UPDATE_MANIFEST_PATH="$manifest_path" \
+    VOICEINK_UPDATE_RESULT_PATH="$result_path" \
     VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
     VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE=1 \
     /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
@@ -137,6 +162,10 @@ PATH="$fake_bin:$PATH" \
 [[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
 [[ "$(/usr/bin/plutil -extract forkCommit raw "$manifest_path")" == "$candidate_sha" ]]
 [[ "$(/usr/bin/plutil -extract upstreamCommit raw "$manifest_path")" == "$upstream_sha" ]]
+if [[ "$(/usr/bin/plutil -extract outcome raw "$result_path")" != "candidatePrepared" ]]; then
+    printf 'prepare-local-update-test: staged candidate did not report preparation success\n' >&2
+    exit 1
+fi
 if /usr/bin/plutil -extract suppressedForkCommit raw "$recovery_state" >/dev/null 2>&1; then
     printf 'prepare-local-update-test: explicit retry did not clear candidate suppression\n' >&2
     exit 1
