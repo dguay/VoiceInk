@@ -371,6 +371,70 @@ fi
 [[ "$(git -C "$canonical_clone" rev-parse HEAD)" == "$before_head" ]]
 [[ "$(git -C "$canonical_clone" status --porcelain)" == "" ]]
 [[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
-grep -Fq "CONFLICT" "$fixture_root/conflict-output.log"
+if [[ "$(grep -Fc 'The fetched fork conflicts with upstream/main. Resolve the shared fork before retrying.' "$fixture_root/conflict-output.log")" -ne 1 ]]; then
+    printf 'prepare-local-update-test: first Mac did not receive one actionable conflict\n' >&2
+    exit 1
+fi
+
+second_canonical_clone="$fixture_root/canonical-second-mac"
+second_conflict_manifest="$fixture_root/conflict-second-mac/staged-candidate.plist"
+git clone "$fork_bare" "$second_canonical_clone" >/dev/null
+git -C "$second_canonical_clone" remote add upstream "$upstream_bare"
+second_before_head="$(git -C "$second_canonical_clone" rev-parse HEAD)"
+
+if PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$second_canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$second_canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$second_conflict_manifest" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/conflict-second-mac-output.log" 2>&1
+then
+    printf 'prepare-local-update-test: second Mac produced a conflicting candidate\n' >&2
+    exit 1
+fi
+[[ ! -e "$second_conflict_manifest" ]]
+[[ "$(git -C "$second_canonical_clone" rev-parse HEAD)" == "$second_before_head" ]]
+[[ "$(git -C "$second_canonical_clone" status --porcelain)" == "" ]]
+[[ "$(git -C "$second_canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+if [[ "$(grep -Fc 'The fetched fork conflicts with upstream/main. Resolve the shared fork before retrying.' "$fixture_root/conflict-second-mac-output.log")" -ne 1 ]]; then
+    printf 'prepare-local-update-test: second Mac did not receive one actionable conflict\n' >&2
+    exit 1
+fi
+
+history_fork_bare="$fixture_root/history-fork.git"
+history_seed="$fixture_root/history-seed"
+history_clone="$fixture_root/history-clone"
+history_manifest="$fixture_root/history/staged-candidate.plist"
+git init --bare --initial-branch=main "$history_fork_bare" >/dev/null
+git init --initial-branch=main "$history_seed" >/dev/null
+git -C "$history_seed" config user.name "VoiceInk Updater Test"
+git -C "$history_seed" config user.email "updater-test@example.com"
+printf 'published\n' > "$history_seed/version"
+git -C "$history_seed" add version
+git -C "$history_seed" commit -m "test: seed published history" >/dev/null
+git -C "$history_seed" remote add origin "$history_fork_bare"
+git -C "$history_seed" push -u origin main >/dev/null
+git clone "$history_fork_bare" "$history_clone" >/dev/null
+git -C "$history_clone" remote add upstream "$history_fork_bare"
+printf 'installed-only\n' > "$history_seed/version"
+git -C "$history_seed" add version
+git -C "$history_seed" commit -m "test: record installed-only history" >/dev/null
+installed_only_sha="$(git -C "$history_seed" rev-parse HEAD)"
+
+if PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$history_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$history_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$history_manifest" \
+    VOICEINK_INSTALLED_FORK_COMMIT="$installed_only_sha" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/history-output.log" 2>&1
+then
+    printf 'prepare-local-update-test: older fork history was accepted\n' >&2
+    exit 1
+fi
+[[ ! -e "$history_manifest" ]]
+grep -Fq "does not descend from the installed VoiceInk revision" "$fixture_root/history-output.log"
 
 printf 'prepare-local-update-test: PASS\n'

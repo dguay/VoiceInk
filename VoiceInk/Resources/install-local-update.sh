@@ -80,6 +80,11 @@ fi
     || fail "No VoiceInk clone is registered. Run 'make bootstrap' from the clone first."
 repository_path="$("$git_command" -C "$repository_path" rev-parse --show-toplevel 2>/dev/null)" \
     || fail "The registered VoiceInk clone is unavailable. Run 'make bootstrap' again."
+installed_fork_sha="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null)" \
+    || fail "The installed VoiceInk bundle has no fork provenance."
+"$git_command" -C "$repository_path" merge-base --is-ancestor \
+    "$installed_fork_sha" "$approved_sha" \
+    || stale "the approved candidate does not descend from the installed VoiceInk revision."
 
 manifest_candidate_ref="$(/usr/bin/plutil -extract candidateRef raw "$manifest_path" 2>/dev/null || true)"
 candidate_ref="${manifest_candidate_ref:-refs/voiceink-updater/candidates/$approved_sha}"
@@ -104,43 +109,141 @@ refresh_fork_head() {
         || return 1
 }
 
+discard_staged_candidate() {
+    local discard_bundle
+    local discard_stage
+
+    discard_bundle="$(/usr/bin/plutil -extract bundlePath raw "$manifest_path" 2>/dev/null || true)"
+    discard_stage="$(dirname "$discard_bundle")"
+    if [[ "$(dirname "$discard_stage")" == "$stage_root/candidates" \
+        && "$(basename "$discard_bundle")" == "VoiceInk.app" ]]
+    then
+        /bin/rm -rf "$discard_stage"
+    fi
+    /bin/rm -f "$manifest_path"
+    if [[ "$("$git_command" -C "$repository_path" rev-parse "$candidate_ref" 2>/dev/null || true)" == "$approved_sha" ]]; then
+        "$git_command" -C "$repository_path" update-ref -d "$candidate_ref" "$approved_sha"
+    fi
+}
+
+require_safe_fork_history() {
+    if ! "$git_command" -C "$repository_path" merge-base --is-ancestor \
+        "$installed_fork_sha" "$latest_fork_sha"
+    then
+        discard_staged_candidate
+        stale "origin/main does not descend from the installed VoiceInk revision. Automatic downgrade or history replacement is blocked."
+    fi
+}
+
 preflight_local_publication() {
     local_main_sha="$("$git_command" -C "$repository_path" rev-parse refs/heads/main)" \
         || fail "The VoiceInk clone does not have a local main branch."
     "$git_command" -C "$repository_path" merge-base --is-ancestor \
         "$local_main_sha" "$approved_sha" \
         || stale "Local main cannot fast-forward to the verified candidate."
-    if [[ "$("$git_command" -C "$repository_path" symbolic-ref --quiet --short HEAD || true)" == "main" ]]; then
-        [[ -z "$("$git_command" -C "$repository_path" status --porcelain)" ]] \
-            || stale "The VoiceInk clone changed during preparation; local main cannot be published safely."
-    fi
+    [[ -z "$("$git_command" -C "$repository_path" status --porcelain)" ]] \
+        || stale "The VoiceInk clone changed during preparation; local main cannot be published safely."
 }
 
 advance_local_main() {
-    if [[ "$local_main_sha" == "$approved_sha" ]]; then
+    local publication_head_sha="$1"
+
+    if [[ "$local_main_sha" == "$publication_head_sha" ]]; then
         return
     fi
 
     if [[ "$("$git_command" -C "$repository_path" symbolic-ref --quiet --short HEAD || true)" == "main" ]]; then
-        "$git_command" -C "$repository_path" merge --ff-only "$approved_sha"
+        "$git_command" -C "$repository_path" merge --ff-only "$publication_head_sha"
     else
         "$git_command" -C "$repository_path" update-ref \
-            refs/heads/main "$approved_sha" "$local_main_sha"
+            refs/heads/main "$publication_head_sha" "$local_main_sha"
     fi
 }
 
 revalidate_fork() {
     refresh_fork_head
-    [[ "$latest_fork_sha" == "$fork_base_sha" ]] \
-        || stale "origin/main changed after preparation. Prepare the new candidate before restarting."
+    require_safe_fork_history
+    if [[ "$latest_fork_sha" != "$fork_base_sha" ]]; then
+        discard_staged_candidate
+        stale "origin/main changed after preparation. Prepare and approve the new candidate before restarting."
+    fi
+}
+
+recompute_after_peer_push() {
+    local recompute_root
+    local recompute_succeeded
+    local recompute_worktree
+
+    # Recompute only the Git candidate after a peer wins the publication race.
+    # Any changed head invalidates the built bundle and its user approval, so
+    # this worktree must never stage or install the recomputed commit.
+    require_safe_fork_history
+    recomputed_fork_sha="$latest_fork_sha"
+    if "$git_command" -C "$repository_path" merge-base --is-ancestor \
+        "$manifest_upstream_sha" "$latest_fork_sha"
+    then
+        return
+    fi
+
+    recompute_root="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-recompute.XXXXXX")"
+    recompute_worktree="$recompute_root/candidate"
+    if ! "$git_command" -C "$repository_path" worktree add --detach \
+        "$recompute_worktree" "$latest_fork_sha" >/dev/null
+    then
+        /bin/rm -rf "$recompute_root"
+        fail "VoiceInk could not recompute the fork after another Mac published first."
+    fi
+
+    if "$git_command" -C "$repository_path" merge-base --is-ancestor \
+        "$latest_fork_sha" "$manifest_upstream_sha"
+    then
+        if "$git_command" -C "$recompute_worktree" \
+            merge --ff-only "$manifest_upstream_sha" >/dev/null 2>&1
+        then
+            recompute_succeeded=true
+        else
+            recompute_succeeded=false
+        fi
+    else
+        if "$git_command" -C "$recompute_worktree" \
+            -c user.name="VoiceInk Updater" \
+            -c user.email="voiceink-updater@localhost" \
+            merge --no-ff --no-gpg-sign \
+            -m "chore(updater): merge upstream main" \
+            "$manifest_upstream_sha" >/dev/null 2>&1
+        then
+            recompute_succeeded=true
+        else
+            recompute_succeeded=false
+        fi
+    fi
+
+    if [[ "$recompute_succeeded" == true ]]; then
+        recomputed_fork_sha="$("$git_command" -C "$recompute_worktree" rev-parse HEAD)"
+    else
+        "$git_command" -C "$recompute_worktree" merge --abort >/dev/null 2>&1 || true
+    fi
+    "$git_command" -C "$repository_path" worktree remove --force "$recompute_worktree" >/dev/null 2>&1 || true
+    /bin/rm -rf "$recompute_root"
+
+    if [[ "$recompute_succeeded" != true ]]; then
+        discard_staged_candidate
+        fail "Another Mac changed the fork, and the recomputed update conflicts with it. Resolve the shared fork before retrying."
+    fi
 }
 
 publish_verified_candidate() {
     refresh_fork_head
     preflight_local_publication
+    publication_head_sha="$approved_sha"
 
-    [[ "$latest_fork_sha" == "$approved_sha" || "$latest_fork_sha" == "$fork_base_sha" ]] \
-        || stale "origin/main changed before the verified candidate could be published."
+    if [[ "$latest_fork_sha" != "$approved_sha" && "$latest_fork_sha" != "$fork_base_sha" ]]; then
+        recompute_after_peer_push
+        if [[ "$recomputed_fork_sha" != "$approved_sha" ]]; then
+            discard_staged_candidate
+            stale "another Mac changed the fork; prepare and approve a new candidate before retrying."
+        fi
+    fi
 
     if [[ "$latest_fork_sha" != "$approved_sha" ]]; then
         if "$git_command" -C "$repository_path" push origin \
@@ -148,9 +251,27 @@ publish_verified_candidate() {
         then
             publication_succeeded=true
         elif refresh_fork_head; then
-            [[ "$latest_fork_sha" == "$approved_sha" ]] \
-                || stale "another Mac published a different fork update first."
-            publication_succeeded=true
+            if [[ "$latest_fork_sha" == "$approved_sha" ]] \
+                || "$git_command" -C "$repository_path" merge-base --is-ancestor \
+                    "$approved_sha" "$latest_fork_sha"
+            then
+                publication_succeeded=true
+                publication_head_sha="$latest_fork_sha"
+            else
+                recompute_after_peer_push
+                if [[ "$recomputed_fork_sha" != "$approved_sha" ]]; then
+                    discard_staged_candidate
+                    stale "another Mac changed the fork; prepare and approve a new candidate before retrying."
+                fi
+                if "$git_command" -C "$repository_path" push origin \
+                    "$approved_sha:refs/heads/main"
+                then
+                    publication_succeeded=true
+                else
+                    publication_outcome_uncertain=true
+                    fail "VoiceInk could not publish the recomputed candidate after one retry. The verified app was retained for manual reconciliation."
+                fi
+            fi
         else
             publication_outcome_uncertain=true
             fail "VoiceInk could not determine whether publication succeeded. The verified app and staged candidate were retained for retry."
@@ -161,7 +282,7 @@ publish_verified_candidate() {
 
     # A confirmed remote update is the commit boundary. Local convergence may
     # fail and retry, but it must never roll back an app the fork may reference.
-    advance_local_main
+    advance_local_main "$publication_head_sha"
     /bin/rm -rf "$candidate_stage"
     /bin/rm -f "$manifest_path"
     "$git_command" -C "$repository_path" update-ref -d "$candidate_ref" "$approved_sha"
@@ -432,8 +553,7 @@ intent_candidate_sha="$(/usr/bin/plutil -extract candidateForkCommit raw "$recov
     || fail "VoiceInk found an invalid recovery intent."
 intent_credential_generation="$(/usr/bin/plutil -extract credentialGeneration raw "$recovery_temporary/recovery.plist" 2>/dev/null)" \
     || fail "VoiceInk found an invalid recovery intent."
-previous_fork_sha="$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null)" \
-    || fail "The installed VoiceInk bundle has no fork provenance."
+previous_fork_sha="$installed_fork_sha"
 [[ "$intent_previous_sha" == "$previous_fork_sha" \
     && "$intent_candidate_sha" == "$approved_sha" \
     && "$intent_credential_generation" == "$credential_generation" ]] \
