@@ -227,6 +227,38 @@ struct ForkUpdateReliabilityTests {
         #expect(storedBytes <= 6_000)
     }
 
+    @Test
+    func logRetentionPreservesAnUnresolvedPreflightFailureWithoutACandidate() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let now = Date(timeIntervalSince1970: 1_787_400_000)
+        let logger = ForkUpdateLogStore(
+            directoryURL: temporaryDirectory,
+            now: { now },
+            maximumAge: 1,
+            maximumBytes: 1
+        )
+        await logger.record(
+            ForkUpdateLogRecord(
+                timestamp: now.addingTimeInterval(-60),
+                attemptIdentifier: "preflight-failure",
+                stage: .fetch,
+                outcome: .failed,
+                candidateIdentifier: nil,
+                forkCommit: nil,
+                upstreamCommit: nil,
+                retry: 2,
+                message: "The fork could not be reached."
+            )
+        )
+
+        let records = await logger.loadRecords()
+
+        #expect(records.contains { $0.attemptIdentifier == "preflight-failure" })
+    }
+
     @Test @MainActor
     func persistentFailureTakesPrecedenceOverAStagedCandidateOnRelaunch() {
         let candidate = StagedForkCandidate(
