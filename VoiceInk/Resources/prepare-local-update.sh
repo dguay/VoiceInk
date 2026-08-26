@@ -153,6 +153,11 @@ if [[ -f "$recovery_state" ]]; then
     fi
 fi
 
+if [[ "${VOICEINK_UPDATE_DEFER_BUILD:-0}" == 1 ]]; then
+    write_preparation_result buildDeferred
+    exit 0
+fi
+
 if [[ "$worktree_added" == false ]]; then
     git -C "$repository_path" worktree add --detach "$candidate_worktree" "$fork_commit"
     worktree_added=true

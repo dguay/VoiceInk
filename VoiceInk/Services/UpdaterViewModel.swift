@@ -106,10 +106,10 @@ extension UpdaterAdapter {
 
 @MainActor
 enum ProductionUpdaterAdapter {
-    static func make() -> any UpdaterAdapter {
+    static func make(defaults: UserDefaults = .standard) -> any UpdaterAdapter {
         #if LOCAL_BUILD
             if let transaction = ForkUpdateTransaction.production() {
-                ForkUpdaterAdapter(transaction: transaction)
+                ForkUpdaterAdapter(transaction: transaction, defaults: defaults)
             } else {
                 ForkUpdaterAdapter()
             }
@@ -130,6 +130,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
 
     private let defaults: UserDefaults
     private let adapter: any UpdaterAdapter
+    private let automaticUpdateScheduler: (any AutomaticUpdateScheduling)?
     private var isUserInitiatedUpdateCheck = false
 
     @Published private(set) var state: UpdaterState
@@ -139,16 +140,22 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
     }
 
     convenience init(defaults: UserDefaults) {
-        self.init(defaults: defaults, adapter: ProductionUpdaterAdapter.make())
+        self.init(
+            defaults: defaults,
+            adapter: ProductionUpdaterAdapter.make(defaults: defaults),
+            automaticUpdateScheduler: AutomaticUpdateScheduler()
+        )
     }
 
     init(
         defaults: UserDefaults,
         adapter: any UpdaterAdapter,
-        sourceProvenance: SourceProvenance? = SourceProvenance.from(bundle: .main)
+        sourceProvenance: SourceProvenance? = SourceProvenance.from(bundle: .main),
+        automaticUpdateScheduler: (any AutomaticUpdateScheduling)? = nil
     ) {
         self.defaults = defaults
         self.adapter = adapter
+        self.automaticUpdateScheduler = automaticUpdateScheduler
         state = UpdaterState(
             canCheckForUpdates: adapter.state.canCheckForUpdates,
             checksForUpdatesWhenDashboardAppears: Self.initialAutomaticCheckPreference(in: defaults),
@@ -167,6 +174,9 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         }
         adapter.start()
         apply(adapter.state)
+        automaticUpdateScheduler?.start { [weak self] in
+            self?.checkForUpdatesIfDue()
+        }
     }
 
     func setChecksForUpdatesWhenDashboardAppears(_ value: Bool) {
