@@ -30,6 +30,7 @@ struct ForkUpdateReliabilityTests {
                 printf 'fatal: unable to access repository: Could not resolve host\n' >&2
                 exit 1
             fi
+            printf 'fetch\nmerge\n' > "$VOICEINK_UPDATE_PROGRESS_PATH"
             /usr/bin/plutil -create xml1 "$VOICEINK_UPDATE_RESULT_PATH"
             /usr/bin/plutil -insert outcome -string upToDate "$VOICEINK_UPDATE_RESULT_PATH"
             /usr/bin/plutil -insert forkCommit -string \(forkCommit) "$VOICEINK_UPDATE_RESULT_PATH"
@@ -37,10 +38,12 @@ struct ForkUpdateReliabilityTests {
             """
         try Data(script.utf8).write(to: scriptURL)
         let delays = DelayRecorder()
+        let logger = ForkUpdateLogRecorder()
 
         let result = try await ProcessForkUpdateCommandRunner(
             retryDelays: [1, 2],
-            sleep: { delay in await delays.record(delay) }
+            sleep: { delay in await delays.record(delay) },
+            logger: logger
         ).run(
             scriptURL: scriptURL,
             manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
@@ -55,6 +58,9 @@ struct ForkUpdateReliabilityTests {
         )
         #expect(try String(contentsOf: attemptsURL, encoding: .utf8) == "3")
         #expect(await delays.values == [1, 2])
+        let records = await logger.records
+        #expect(records.contains { $0.stage == .fetch && $0.outcome == .succeeded })
+        #expect(records.contains { $0.stage == .merge && $0.outcome == .succeeded })
     }
 
     @Test
@@ -100,6 +106,46 @@ struct ForkUpdateReliabilityTests {
     }
 
     @Test
+    func installationRunnerReportsAnAutomaticRollbackOutcomeSeparately() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("install-local-update.sh")
+        try Data("""
+            #!/usr/bin/env bash
+            printf 'Error: Candidate health verification failed.\n' >&2
+            printf 'VoiceInk automatic rollback succeeded.\n' >&2
+            exit 1
+            """.utf8).write(to: scriptURL)
+        let candidate = StagedForkCandidate(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
+            bundleURL: temporaryDirectory.appendingPathComponent("VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_000)
+        )
+
+        do {
+            _ = try await ProcessForkUpdateInstallationRunner().install(
+                ForkUpdateInstallationRequest(
+                    scriptURL: scriptURL,
+                    candidate: candidate,
+                    manifestURL: temporaryDirectory.appendingPathComponent("candidate.plist"),
+                    targetBundleURL: temporaryDirectory.appendingPathComponent("Installed.app"),
+                    backupBundleURL: temporaryDirectory.appendingPathComponent("Recovery.app"),
+                    parentProcessIdentifier: 1,
+                    credentialGeneration: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                )
+            )
+            Issue.record("Expected the installation helper to fail after rollback")
+        } catch let error as ForkUpdateError {
+            #expect(error.rollbackOutcome == .succeeded)
+            #expect(!error.failureDescription.contains("rollback succeeded"))
+            #expect(error.failureDescription.contains("health verification failed"))
+        }
+    }
+
+    @Test
     func updateLogsRedactSensitiveFieldsAndRetainTheNewestUnresolvedFailure() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -139,7 +185,7 @@ struct ForkUpdateReliabilityTests {
                 forkCommit: "0123456789abcdef0123456789abcdef01234567",
                 upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
                 retry: 1,
-                message: "Authorization: Bearer api-secret transcript=private selectedText=selection clipboard=copy screenshot=image"
+                message: "transcript=very private phrase\nselectedText=multi word selection\nclipboard=copied phrase\nscreenshot=private image\nAuthorization: Bearer api-secret"
             )
         )
         for index in 0 ..< 6 {
@@ -174,10 +220,47 @@ struct ForkUpdateReliabilityTests {
         #expect(records.contains { $0.attemptIdentifier == "unresolved" && $0.retry == 1 })
         #expect(!storedText.contains("api-secret"))
         #expect(!storedText.contains("private"))
+        #expect(!storedText.contains("phrase"))
         #expect(!storedText.contains("selection"))
         #expect(!storedText.contains("clipboard=copy"))
         #expect(!storedText.contains("screenshot=image"))
         #expect(storedBytes <= 6_000)
+    }
+
+    @Test @MainActor
+    func persistentFailureTakesPrecedenceOverAStagedCandidateOnRelaunch() {
+        let candidate = StagedForkCandidate(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
+            bundleURL: URL(fileURLWithPath: "/tmp/VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_000)
+        )
+        let failure = ForkUpdateFailure.reported(
+            stage: .installation,
+            kind: .deterministic,
+            candidateIdentifier: candidate.forkCommit,
+            message: "The previous installation attempt failed."
+        )
+        let adapter = ForkUpdaterAdapter(
+            transaction: ForkUpdateStartupTransactionStub(candidate: candidate, failure: failure)
+        )
+        var presentedFailure: ForkUpdateFailure?
+        var presentedCandidate = false
+        adapter.onEvent = { event in
+            switch event {
+            case .preparationFailed(let receivedFailure):
+                presentedFailure = receivedFailure
+            case .stagedCandidate:
+                presentedCandidate = true
+            default:
+                break
+            }
+        }
+
+        adapter.start()
+
+        #expect(presentedFailure == failure)
+        #expect(!presentedCandidate)
     }
 
     @Test @MainActor
@@ -237,6 +320,34 @@ private actor DelayRecorder {
     func record(_ value: TimeInterval) {
         values.append(value)
     }
+}
+
+private actor ForkUpdateLogRecorder: ForkUpdateLogging {
+    private(set) var records: [ForkUpdateLogRecord] = []
+
+    func record(_ record: ForkUpdateLogRecord) {
+        records.append(record)
+    }
+}
+
+@MainActor
+private final class ForkUpdateStartupTransactionStub: ForkUpdateTransacting {
+    let candidate: StagedForkCandidate
+    let failure: ForkUpdateFailure
+    var canRestorePreviousVersion = false
+
+    init(candidate: StagedForkCandidate, failure: ForkUpdateFailure) {
+        self.candidate = candidate
+        self.failure = failure
+    }
+
+    func loadStagedCandidate() throws -> StagedForkCandidate? { candidate }
+    func loadPersistentFailure() throws -> ForkUpdateFailure? { failure }
+    func prepare(mode: ForkUpdatePreparationMode) async throws -> ForkUpdatePreparationResult {
+        .staged(candidate)
+    }
+    func requestRestart(for candidate: StagedForkCandidate) async throws -> StagedForkCandidate? { nil }
+    func restorePreviousVersion() async throws {}
 }
 
 @MainActor

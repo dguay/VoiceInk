@@ -345,6 +345,8 @@ actor ForkUpdateLogStore: ForkUpdateLogging {
             .url
         let cutoff = now().addingTimeInterval(-maximumAge)
 
+        // Prune expired bundles before enforcing the size cap. Both passes exempt
+        // the newest unresolved failure so a bounded log set still retains recovery evidence.
         for bundle in bundles where bundle.date < cutoff && bundle.url != protectedURL {
             try FileManager.default.removeItem(at: bundle.url)
         }
@@ -362,7 +364,7 @@ actor ForkUpdateLogStore: ForkUpdateLogging {
         var sanitized = String(message.prefix(2_048))
         let patterns = [
             "(?i)bearer\\s+[^\\s,;]+",
-            "(?i)(authorization|api[_-]?key|token|secret|password|credential|transcript|selected[_-]?text|screenshot|clipboard)(\\s*[:=]\\s*|\\s+)[^\\s,;]+",
+            "(?i)(authorization|api[_-]?key|token|secret|password|credential|transcript|selected[_-]?text|screenshot|clipboard)(\\s*[:=]\\s*|\\s+)[^\\r\\n]*",
         ]
         for pattern in patterns {
             guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }

@@ -990,7 +990,14 @@ struct UpdaterViewModelTests {
         try LocalUpdateHealthReporter.reportIfRequested(
             arguments: ["VoiceInk", "--voiceink-update-health-path", healthURL.path],
             bundle: bundle,
-            processIdentifier: 4_321
+            processIdentifier: 4_321,
+            permissionStateProvider: LocalUpdatePermissionStateProviderStub(
+                state: LocalUpdatePermissionState(
+                    microphoneAuthorized: true,
+                    accessibilityAuthorized: false,
+                    screenCaptureAuthorized: true
+                )
+            )
         )
 
         #expect(
@@ -1007,6 +1014,13 @@ struct UpdaterViewModelTests {
         #expect(report.upstreamCommit == "fedcba9876543210fedcba9876543210fedcba98")
         #expect(report.updaterKind == "fork")
         #expect(report.processIdentifier == 4_321)
+        #expect(
+            report.permissionState == LocalUpdatePermissionState(
+                microphoneAuthorized: true,
+                accessibilityAuthorized: false,
+                screenCaptureAuthorized: true
+            )
+        )
     }
 
     @Test
@@ -1155,6 +1169,12 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
 
 private struct ForkUpdatePowerStateStub: ForkUpdatePowerStateProviding {
     let isLowPowerModeEnabled: Bool
+}
+
+private struct LocalUpdatePermissionStateProviderStub: LocalUpdatePermissionStateProviding {
+    let state: LocalUpdatePermissionState
+
+    func currentState() -> LocalUpdatePermissionState { state }
 }
 
 private struct ForkUpdateCommandRunnerStub: ForkUpdateCommandRunning {

@@ -9,6 +9,7 @@ fork_commit=""
 upstream_commit=""
 manifest_path="${VOICEINK_UPDATE_MANIFEST_PATH:-$HOME/Library/Application Support/com.prakashjoshipax.VoiceInk/Updater/staged-candidate.plist}"
 result_path="${VOICEINK_UPDATE_RESULT_PATH:-}"
+progress_path="${VOICEINK_UPDATE_PROGRESS_PATH:-}"
 stage_root="$(dirname "$manifest_path")"
 failure_state_path="${VOICEINK_UPDATE_FAILURE_STATE_PATH:-$stage_root/failure-state.plist}"
 failure_written=false
@@ -82,6 +83,11 @@ record_unhandled_failure() {
 }
 
 trap record_unhandled_failure ERR
+
+record_stage_success() {
+    [[ -n "$progress_path" ]] || return 0
+    printf '%s\n' "$1" >> "$progress_path"
+}
 
 begin_stage() {
     current_stage="$1"
@@ -178,6 +184,7 @@ fork_base_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main
 upstream_commit="$(git -C "$repository_path" rev-parse refs/remotes/upstream/main)" \
     || fail "The fetched upstream does not have upstream/main."
 candidate_identifier="$fork_base_commit:$upstream_commit"
+record_stage_success fetch
 if [[ -f "$failure_state_path" ]]; then
     failed_candidate="$(/usr/bin/plutil -extract candidateIdentifier raw "$failure_state_path" 2>/dev/null || true)"
     if [[ "$failed_candidate" != "$candidate_identifier" ]]; then
@@ -213,6 +220,7 @@ if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" \
 then
     fail "The fetched fork does not descend from the installed VoiceInk revision. Automatic downgrade or history replacement is blocked."
 fi
+record_stage_success merge
 
 if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" \
     && "$VOICEINK_INSTALLED_FORK_COMMIT" == "$fork_commit" ]]
@@ -303,11 +311,13 @@ begin_stage test
         -only-testing:VoiceInkTests \
         test
 ) || fail "VoiceInk unit tests failed for this candidate."
+record_stage_success test
 begin_stage build
 (
     cd "$candidate_worktree"
     xcodebuild "${xcode_arguments[@]}" build
 ) || fail "VoiceInk could not build this candidate."
+record_stage_success build
 
 begin_stage staging
 candidate_bundle="$derived_data/Build/Products/Debug/VoiceInk.app"
@@ -356,6 +366,7 @@ cleanup_candidate_artifacts \
     "$previous_candidate_sha" \
     "$previous_candidate_ref" \
     "$previous_candidate_bundle"
+record_stage_success staging
 write_preparation_result candidatePrepared
 
 printf 'Staged VoiceInk candidate %s at %s\n' "$fork_commit" "$staged_bundle"

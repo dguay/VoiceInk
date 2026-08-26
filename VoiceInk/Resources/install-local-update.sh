@@ -445,6 +445,7 @@ run_automatic_rollback() {
     if [[ "$candidate_stopped" == true && -d "$rollback_bundle" ]] \
         && /bin/bash "$restoration_script" --automatic "$target_bundle" "$rollback_bundle"; then
         rollback_succeeded=true
+        printf 'VoiceInk automatic rollback succeeded.\n' >&2
         return
     fi
     printf 'Error: Automatic rollback could not restore a consistent local state.\n' >&2
@@ -648,6 +649,22 @@ reported_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path" 2>
     || fail "The installed app reported the wrong updater kind."
 [[ "$reported_pid" =~ ^[1-9][0-9]*$ && "$reported_pid" == "$launched_pid" ]] \
     || fail "The installed app reported an invalid process identifier."
+
+verify_permission_preserved() {
+    local key="$1"
+    local label="$2"
+    local previous_value
+    local current_value
+    previous_value="$(/usr/bin/plutil -extract "permissionState.$key" raw "$recovery_root/recovery.plist" 2>/dev/null || true)"
+    [[ "$previous_value" == "true" ]] || return 0
+    current_value="$(/usr/bin/plutil -extract "permissionState.$key" raw "$health_path" 2>/dev/null || true)"
+    [[ "$current_value" == "true" ]] \
+        || fail "The installed app lost $label permission after replacement."
+}
+
+verify_permission_preserved microphoneAuthorized microphone
+verify_permission_preserved accessibilityAuthorized accessibility
+verify_permission_preserved screenCaptureAuthorized "screen capture"
 
 for ((attempt = 0; attempt < stability_seconds * 10; attempt++)); do
     kill -0 "$launched_pid" 2>/dev/null \

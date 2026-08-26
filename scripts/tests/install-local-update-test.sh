@@ -156,6 +156,10 @@ if [[ "${VOICEINK_TEST_SKIP_HEALTH:-0}" != 1 ]]; then
     /usr/bin/plutil -insert upstreamCommit -string "$(/usr/bin/plutil -extract VoiceInkUpstreamCommit raw "$info_plist")" "$health_path"
     /usr/bin/plutil -insert updaterKind -string "$(/usr/bin/plutil -extract VoiceInkUpdaterKind raw "$info_plist")" "$health_path"
     /usr/bin/plutil -insert processIdentifier -integer "$app_pid" "$health_path"
+    /usr/bin/plutil -insert permissionState -dictionary "$health_path"
+    /usr/bin/plutil -insert permissionState.microphoneAuthorized -bool "${VOICEINK_TEST_MICROPHONE_AUTHORIZED:-true}" "$health_path"
+    /usr/bin/plutil -insert permissionState.accessibilityAuthorized -bool "${VOICEINK_TEST_ACCESSIBILITY_AUTHORIZED:-true}" "$health_path"
+    /usr/bin/plutil -insert permissionState.screenCaptureAuthorized -bool "${VOICEINK_TEST_SCREEN_CAPTURE_AUTHORIZED:-true}" "$health_path"
 fi
 if [[ -n "${VOICEINK_TEST_PID_LOG:-}" ]]; then
     printf '%s\n' "$app_pid" > "$VOICEINK_TEST_PID_LOG"
@@ -381,6 +385,10 @@ prepare_recovery_intent() {
     /usr/bin/plutil -insert credentialGeneration -string "$VOICEINK_UPDATE_CREDENTIAL_GENERATION" "$recovery_root.pending/recovery.plist"
     /usr/bin/plutil -insert installInProgress -bool true "$recovery_root.pending/recovery.plist"
     /usr/bin/plutil -insert restoreInProgress -bool false "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert permissionState -dictionary "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert permissionState.microphoneAuthorized -bool true "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert permissionState.accessibilityAuthorized -bool true "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert permissionState.screenCaptureAuthorized -bool true "$recovery_root.pending/recovery.plist"
     chmod 600 "$recovery_root.pending/recovery.plist"
 }
 
@@ -1106,9 +1114,46 @@ rollback_suppressed_sha="$(/usr/bin/plutil -extract suppressedForkCommit raw "$r
 grep -Fqx "$installed_bundle" "$launch_log"
 grep -Fqx "rollback:$installed_bundle" "$launch_log"
 grep -Fq "wrong fork provenance" "$fixture_root/rollback-output.log"
+grep -Fq "VoiceInk automatic rollback succeeded." "$fixture_root/rollback-output.log"
 launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path")"
 
 launched_pid=""
+: > "$launch_log"
+sleep 30 &
+parent_pid=$!
+
+prepare_recovery_intent
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
+    VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
+    VOICEINK_UPDATE_STABILITY_SECONDS=1 \
+    VOICEINK_TEST_MICROPHONE_AUTHORIZED=false \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/permission-regression-output.log" 2>&1
+permission_regression_status=$?
+set -e
+
+[[ "$permission_regression_status" -ne 0 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: approved parent survived permission regression\n' >&2
+    exit 1
+fi
+parent_pid=""
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+grep -Fq "lost microphone permission after replacement" "$fixture_root/permission-regression-output.log"
+grep -Fq "VoiceInk automatic rollback succeeded." "$fixture_root/permission-regression-output.log"
+
 : > "$launch_log"
 pid_log="$fixture_root/timed-out-pid.log"
 sleep 30 &
