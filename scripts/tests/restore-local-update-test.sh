@@ -235,6 +235,11 @@ set -e
 [[ ! -s "$launch_log" ]]
 grep -Fq "could not prove a consistent" "$fixture_root/failed-compensation-replacement.log"
 
+# Reset the fixture to the candidate generation before testing a fresh
+# automatic rollback that fails during state staging.
+printf 'candidate\n' > "$installed_bundle/Contents/version"
+/usr/bin/plutil -replace VoiceInkForkCommit -string "$candidate_sha" "$installed_bundle/Contents/Info.plist"
+
 : > "$launch_log"
 set +e
 PATH="$fake_bin:$PATH" \

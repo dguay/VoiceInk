@@ -130,14 +130,12 @@ struct LocalUpdateCredentialSnapshotStore: ForkUpdateCredentialSnapshotting, For
 
 struct SecurityLocalUpdateCredentialPersistence: LocalUpdateCredentialPersisting {
     func readRecords(service: String) throws -> [LocalUpdateCredentialRecord] {
-        var query: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecReturnAttributes as String: kCFBooleanTrue as Any,
-            kSecReturnData as String: kCFBooleanTrue as Any,
             kSecMatchLimit as String: kSecMatchLimitAll,
         ]
-        query[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
 
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -148,14 +146,13 @@ struct SecurityLocalUpdateCredentialPersistence: LocalUpdateCredentialPersisting
 
         return try items.map { item in
             guard
-                let account = item[kSecAttrAccount as String] as? String,
-                let data = item[kSecValueData as String] as? Data
+                let account = item[kSecAttrAccount as String] as? String
             else {
                 throw ForkUpdateError(message: "VoiceInk could not decode its credential snapshot.")
             }
             return LocalUpdateCredentialRecord(
                 account: account,
-                data: data,
+                data: try read(account: account, service: service),
                 accessibility: item[kSecAttrAccessible as String] as? String
             )
         }
