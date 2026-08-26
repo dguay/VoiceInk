@@ -174,6 +174,9 @@ recompute_after_peer_push() {
     local recompute_succeeded
     local recompute_worktree
 
+    # Recompute only the Git candidate after a peer wins the publication race.
+    # Any changed head invalidates the built bundle and its user approval, so
+    # this worktree must never stage or install the recomputed commit.
     require_safe_fork_history
     recomputed_fork_sha="$latest_fork_sha"
     if "$git_command" -C "$repository_path" merge-base --is-ancestor \

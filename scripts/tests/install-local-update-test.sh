@@ -304,6 +304,9 @@ if [[ " $* " == *" push origin "* && " $* " == *":refs/heads/main "* ]]; then
         /usr/bin/git -C "$VOICEINK_TEST_PEER_CLONE" push origin main >/dev/null
         : > "$VOICEINK_TEST_PEER_PUSHED_PATH"
     fi
+    if [[ "${VOICEINK_TEST_FAIL_AFTER_PEER_PUSH:-0}" == 1 ]]; then
+        exit 1
+    fi
     if [[ "${VOICEINK_TEST_REJECT_PUSH:-0}" == 1 ]]; then
         exit 1
     fi
@@ -487,18 +490,26 @@ git -C "$seed_clone" commit -m "chore(updater): merge upstream main" >/dev/null
 new_sha="$(git -C "$seed_clone" rev-parse HEAD)"
 git -C "$canonical_clone" fetch "$seed_clone" "$new_sha" >/dev/null
 candidate_ref="refs/voiceink-updater/candidates/$new_sha-$(date +%s)-$$"
-git -C "$canonical_clone" update-ref "$candidate_ref" "$new_sha"
 staged_bundle="$fixture_root/staging/candidates/$new_sha/VoiceInk.app"
-mkdir -p "$staged_bundle/Contents"
-printf 'newer-candidate\n' > "$staged_bundle/Contents/version"
-/usr/bin/plutil -create xml1 "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -insert VoiceInkForkCommit -string "$new_sha" "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -insert VoiceInkUpstreamCommit -string "$upstream_sha" "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -insert VoiceInkUpdaterKind -string fork "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -replace forkCommit -string "$new_sha" "$manifest_path"
-/usr/bin/plutil -insert forkBaseCommit -string "$fork_base_sha" "$manifest_path"
-/usr/bin/plutil -insert candidateRef -string "$candidate_ref" "$manifest_path"
-/usr/bin/plutil -replace bundlePath -string "$staged_bundle" "$manifest_path"
+
+stage_publishable_candidate() {
+    local candidate_version="$1"
+    git -C "$canonical_clone" update-ref "$candidate_ref" "$new_sha"
+    mkdir -p "$staged_bundle/Contents"
+    printf '%s\n' "$candidate_version" > "$staged_bundle/Contents/version"
+    /usr/bin/plutil -create xml1 "$staged_bundle/Contents/Info.plist"
+    /usr/bin/plutil -insert VoiceInkForkCommit -string "$new_sha" "$staged_bundle/Contents/Info.plist"
+    /usr/bin/plutil -insert VoiceInkUpstreamCommit -string "$upstream_sha" "$staged_bundle/Contents/Info.plist"
+    /usr/bin/plutil -insert VoiceInkUpdaterKind -string fork "$staged_bundle/Contents/Info.plist"
+    /usr/bin/plutil -create xml1 "$manifest_path"
+    /usr/bin/plutil -insert forkCommit -string "$new_sha" "$manifest_path"
+    /usr/bin/plutil -insert forkBaseCommit -string "$fork_base_sha" "$manifest_path"
+    /usr/bin/plutil -insert upstreamCommit -string "$upstream_sha" "$manifest_path"
+    /usr/bin/plutil -insert candidateRef -string "$candidate_ref" "$manifest_path"
+    /usr/bin/plutil -insert bundlePath -string "$staged_bundle" "$manifest_path"
+}
+
+stage_publishable_candidate newer-candidate
 publish_log="$fixture_root/publish.log"
 
 git -C "$canonical_clone" config user.name "VoiceInk Local Divergence Test"
@@ -569,6 +580,46 @@ grep -Fq "changed during preparation" "$fixture_root/dirty-install-output.log"
 rm "$canonical_clone/uncommitted-local-work"
 git -C "$canonical_clone" switch main >/dev/null
 git -C "$canonical_clone" branch -D local-work >/dev/null
+
+unsafe_history_repo="$fixture_root/unsafe-history"
+git init --initial-branch=main "$unsafe_history_repo" >/dev/null
+git -C "$unsafe_history_repo" config user.name "VoiceInk Unsafe History Test"
+git -C "$unsafe_history_repo" config user.email "unsafe-history@example.com"
+printf 'unrelated history\n' > "$unsafe_history_repo/version"
+git -C "$unsafe_history_repo" add version
+git -C "$unsafe_history_repo" commit -m "test: replace fork history" >/dev/null
+unsafe_history_sha="$(git -C "$unsafe_history_repo" rev-parse HEAD)"
+git --git-dir="$fork_bare" fetch "$unsafe_history_repo" main >/dev/null
+git --git-dir="$fork_bare" update-ref refs/heads/main "$unsafe_history_sha" "$fork_base_sha"
+
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_AVAILABLE_DISK_KIB=0 \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/unsafe-history-output.log" 2>&1
+unsafe_history_status=$?
+set -e
+
+[[ "$unsafe_history_status" -eq 75 ]]
+kill -0 "$parent_pid"
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$old_sha" ]]
+[[ ! -e "$manifest_path" ]]
+[[ ! -e "$staged_bundle" ]]
+if git -C "$canonical_clone" rev-parse "$candidate_ref" >/dev/null 2>&1; then
+    printf 'install-local-update-test: unsafe-history candidate reference survived\n' >&2
+    exit 1
+fi
+grep -Fq "does not descend from the installed VoiceInk revision" "$fixture_root/unsafe-history-output.log"
+
+git --git-dir="$fork_bare" update-ref refs/heads/main "$fork_base_sha" "$unsafe_history_sha"
+stage_publishable_candidate newer-candidate
 
 prepare_recovery_intent
 set +e
@@ -651,19 +702,7 @@ new_sha="$conflict_candidate_sha"
 upstream_sha="$conflict_candidate_sha"
 candidate_ref="refs/voiceink-updater/candidates/$new_sha-$(date +%s)-$$"
 staged_bundle="$fixture_root/staging/candidates/$new_sha/VoiceInk.app"
-git -C "$canonical_clone" update-ref "$candidate_ref" "$new_sha"
-mkdir -p "$staged_bundle/Contents"
-printf 'conflicting-candidate\n' > "$staged_bundle/Contents/version"
-/usr/bin/plutil -create xml1 "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -insert VoiceInkForkCommit -string "$new_sha" "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -insert VoiceInkUpstreamCommit -string "$upstream_sha" "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -insert VoiceInkUpdaterKind -string fork "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -create xml1 "$manifest_path"
-/usr/bin/plutil -insert forkCommit -string "$new_sha" "$manifest_path"
-/usr/bin/plutil -insert forkBaseCommit -string "$fork_base_sha" "$manifest_path"
-/usr/bin/plutil -insert upstreamCommit -string "$upstream_sha" "$manifest_path"
-/usr/bin/plutil -insert candidateRef -string "$candidate_ref" "$manifest_path"
-/usr/bin/plutil -insert bundlePath -string "$staged_bundle" "$manifest_path"
+stage_publishable_candidate conflicting-candidate
 
 sleep 30 &
 parent_pid=$!
@@ -723,19 +762,82 @@ new_sha="$original_new_sha"
 upstream_sha="$original_upstream_sha"
 candidate_ref="$original_candidate_ref"
 staged_bundle="$original_staged_bundle"
-git -C "$canonical_clone" update-ref "$candidate_ref" "$new_sha"
-mkdir -p "$staged_bundle/Contents"
-printf 'newer-candidate\n' > "$staged_bundle/Contents/version"
-/usr/bin/plutil -create xml1 "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -insert VoiceInkForkCommit -string "$new_sha" "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -insert VoiceInkUpstreamCommit -string "$upstream_sha" "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -insert VoiceInkUpdaterKind -string fork "$staged_bundle/Contents/Info.plist"
-/usr/bin/plutil -create xml1 "$manifest_path"
-/usr/bin/plutil -insert forkCommit -string "$new_sha" "$manifest_path"
-/usr/bin/plutil -insert forkBaseCommit -string "$fork_base_sha" "$manifest_path"
-/usr/bin/plutil -insert upstreamCommit -string "$upstream_sha" "$manifest_path"
-/usr/bin/plutil -insert candidateRef -string "$candidate_ref" "$manifest_path"
-/usr/bin/plutil -insert bundlePath -string "$staged_bundle" "$manifest_path"
+stage_publishable_candidate newer-candidate
+
+converged_peer_clone="$fixture_root/converged-peer"
+converged_peer_pushed_path="$fixture_root/converged-peer-pushed"
+converged_fetch_log="$fixture_root/converged-fetch.log"
+git clone "$fork_bare" "$converged_peer_clone" >/dev/null
+git -C "$converged_peer_clone" config user.name "VoiceInk Peer Test"
+git -C "$converged_peer_clone" config user.email "peer-test@example.com"
+git -C "$converged_peer_clone" fetch "$canonical_clone" "$new_sha" >/dev/null
+git -C "$converged_peer_clone" merge --ff-only "$new_sha" >/dev/null
+printf 'peer descendant\n' > "$converged_peer_clone/peer-descendant"
+git -C "$converged_peer_clone" add peer-descendant
+git -C "$converged_peer_clone" commit -m "test: publish after approved candidate" >/dev/null
+converged_peer_sha="$(git -C "$converged_peer_clone" rev-parse HEAD)"
+
+sleep 30 &
+parent_pid=$!
+: > "$launch_log"
+: > "$publish_log"
+prepare_recovery_intent
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_GIT_COMMAND="$fake_bin/git-require-health-before-push" \
+    VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+    VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+    VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
+    VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
+    VOICEINK_UPDATE_STABILITY_SECONDS=1 \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    VOICEINK_TEST_REQUIRED_HEALTH_PATH="$health_path" \
+    VOICEINK_TEST_REQUIRED_PUBLISH_SHA="$new_sha" \
+    VOICEINK_TEST_EXPECTED_LOCAL_MAIN_BEFORE_PUSH="$old_sha" \
+    VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
+    VOICEINK_TEST_PEER_CLONE="$converged_peer_clone" \
+    VOICEINK_TEST_PEER_PUSHED_PATH="$converged_peer_pushed_path" \
+    VOICEINK_TEST_FAIL_AFTER_PEER_PUSH=1 \
+    VOICEINK_TEST_FETCH_LOG="$converged_fetch_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/converged-peer-output.log" 2>&1
+
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: approved parent survived peer convergence\n' >&2
+    exit 1
+fi
+parent_pid=""
+[[ "$(< "$installed_bundle/Contents/version")" == "newer-candidate" ]]
+[[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$converged_peer_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$converged_peer_sha" ]]
+[[ ! -e "$manifest_path" ]]
+[[ ! -e "$staged_bundle" ]]
+if git -C "$canonical_clone" rev-parse "$candidate_ref" >/dev/null 2>&1; then
+    printf 'install-local-update-test: converged candidate reference survived\n' >&2
+    exit 1
+fi
+if [[ "$(grep -c '^fetch$' "$converged_fetch_log")" -ne 4 ]]; then
+    printf 'install-local-update-test: peer convergence did not use one reconciliation fetch\n' >&2
+    exit 1
+fi
+
+converged_launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path")"
+kill "$converged_launched_pid"
+/bin/rm -rf "$installed_bundle"
+/usr/bin/ditto "$backup_bundle" "$installed_bundle"
+git --git-dir="$fork_bare" update-ref refs/heads/main "$fork_base_sha" "$converged_peer_sha"
+git -C "$canonical_clone" switch --detach "$old_sha" >/dev/null
+git -C "$canonical_clone" branch -f main "$old_sha"
+git -C "$canonical_clone" switch main >/dev/null
+stage_publishable_candidate newer-candidate
 
 sleep 30 &
 parent_pid=$!
