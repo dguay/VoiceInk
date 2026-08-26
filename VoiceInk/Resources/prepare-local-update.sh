@@ -39,10 +39,15 @@ work_root="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-update.XXXXXX")"
 candidate_worktree="$work_root/candidate"
 derived_data="$work_root/DerivedData"
 worktree_added=false
+candidate_ref=""
+candidate_staged=false
 
 cleanup() {
     if [[ "$worktree_added" == true ]]; then
         git -C "$repository_path" worktree remove --force "$candidate_worktree" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$candidate_ref" && "$candidate_staged" == false ]]; then
+        git -C "$repository_path" update-ref -d "$candidate_ref" >/dev/null 2>&1 || true
     fi
     rm -rf "$work_root"
 }
@@ -51,12 +56,23 @@ trap cleanup EXIT
 git -C "$repository_path" fetch origin main
 git -C "$repository_path" fetch upstream main
 
-fork_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main)" \
+fork_base_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main)" \
     || fail "The fetched fork does not have origin/main."
 upstream_commit="$(git -C "$repository_path" rev-parse refs/remotes/upstream/main)" \
     || fail "The fetched upstream does not have upstream/main."
-git -C "$repository_path" merge-base --is-ancestor "$upstream_commit" "$fork_commit" \
-    || fail "The fetched fork does not contain upstream/main."
+
+fork_commit="$fork_base_commit"
+if ! git -C "$repository_path" merge-base --is-ancestor "$upstream_commit" "$fork_base_commit"; then
+    git -C "$repository_path" worktree add --detach "$candidate_worktree" "$fork_base_commit"
+    worktree_added=true
+    if git -C "$repository_path" merge-base --is-ancestor "$fork_base_commit" "$upstream_commit"; then
+        git -C "$candidate_worktree" merge --ff-only "$upstream_commit"
+    else
+        git -C "$candidate_worktree" merge --no-ff --no-gpg-sign \
+            -m "chore(updater): merge upstream main" "$upstream_commit"
+    fi
+    fork_commit="$(git -C "$candidate_worktree" rev-parse HEAD)"
+fi
 
 if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" \
     && "$VOICEINK_INSTALLED_FORK_COMMIT" == "$fork_commit" ]]
@@ -81,8 +97,10 @@ if [[ -f "$recovery_state" ]]; then
     fi
 fi
 
-git -C "$repository_path" worktree add --detach "$candidate_worktree" "$fork_commit"
-worktree_added=true
+if [[ "$worktree_added" == false ]]; then
+    git -C "$repository_path" worktree add --detach "$candidate_worktree" "$fork_commit"
+    worktree_added=true
+fi
 
 signing_identity="${LOCAL_CODESIGN_IDENTITY:-}"
 if [[ -z "$signing_identity" ]]; then
@@ -150,10 +168,14 @@ mkdir -p "$stage_root"
 manifest_temporary="$manifest_path.tmp.$$"
 /usr/bin/plutil -create xml1 "$manifest_temporary"
 /usr/bin/plutil -insert forkCommit -string "$fork_commit" "$manifest_temporary"
+/usr/bin/plutil -insert forkBaseCommit -string "$fork_base_commit" "$manifest_temporary"
 /usr/bin/plutil -insert upstreamCommit -string "$upstream_commit" "$manifest_temporary"
 /usr/bin/plutil -insert bundlePath -string "$staged_bundle" "$manifest_temporary"
 /usr/bin/plutil -insert preparedAt -date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$manifest_temporary"
+candidate_ref="refs/voiceink-updater/candidates/$fork_commit"
+git -C "$repository_path" update-ref "$candidate_ref" "$fork_commit"
 mv "$manifest_temporary" "$manifest_path"
+candidate_staged=true
 write_preparation_result candidatePrepared
 
 printf 'Staged VoiceInk candidate %s at %s\n' "$fork_commit" "$staged_bundle"

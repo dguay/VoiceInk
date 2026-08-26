@@ -20,6 +20,7 @@ manifest_path="$2"
 target_bundle="$3"
 backup_bundle="$4"
 parent_pid="$5"
+stage_root="$(dirname "$manifest_path")"
 git_command="${VOICEINK_UPDATE_GIT_COMMAND:-git}"
 credential_generation="${VOICEINK_UPDATE_CREDENTIAL_GENERATION:-}"
 credential_snapshot_deleter="${VOICEINK_UPDATE_CREDENTIAL_SNAPSHOT_DELETER:-}"
@@ -68,6 +69,8 @@ manifest_sha="$(/usr/bin/plutil -extract forkCommit raw "$manifest_path" 2>/dev/
     || stale "the staged candidate manifest is invalid."
 [[ "$manifest_sha" == "$approved_sha" ]] \
     || stale "the approved candidate is no longer staged."
+fork_base_sha="$(/usr/bin/plutil -extract forkBaseCommit raw "$manifest_path" 2>/dev/null || true)"
+fork_base_sha="${fork_base_sha:-$approved_sha}"
 
 repository_path="${VOICEINK_REPOSITORY_PATH:-}"
 if [[ -z "$repository_path" ]]; then
@@ -78,20 +81,74 @@ fi
 repository_path="$("$git_command" -C "$repository_path" rev-parse --show-toplevel 2>/dev/null)" \
     || fail "The registered VoiceInk clone is unavailable. Run 'make bootstrap' again."
 
+candidate_ref="refs/voiceink-updater/candidates/$approved_sha"
+if [[ "$fork_base_sha" != "$approved_sha" ]]; then
+    [[ "$("$git_command" -C "$repository_path" rev-parse "$candidate_ref" 2>/dev/null || true)" == "$approved_sha" ]] \
+        || stale "the unpublished candidate is no longer available. Prepare it again."
+    "$git_command" -C "$repository_path" merge-base --is-ancestor \
+        "$fork_base_sha" "$approved_sha" \
+        || stale "the unpublished candidate does not extend the fetched fork."
+fi
+
 revalidate_fork() {
     "$git_command" -C "$repository_path" fetch origin main
     latest_fork_sha="$("$git_command" -C "$repository_path" rev-parse refs/remotes/origin/main)" \
         || fail "The fetched fork does not have origin/main."
-    [[ "$latest_fork_sha" == "$approved_sha" ]] \
+    [[ "$latest_fork_sha" == "$fork_base_sha" ]] \
         || stale "origin/main changed after preparation. Prepare the new candidate before restarting."
+}
+
+publish_verified_candidate() {
+    "$git_command" -C "$repository_path" fetch origin main
+    latest_fork_sha="$("$git_command" -C "$repository_path" rev-parse refs/remotes/origin/main)" \
+        || fail "The fetched fork does not have origin/main."
+
+    if [[ "$latest_fork_sha" != "$approved_sha" ]]; then
+        [[ "$latest_fork_sha" == "$fork_base_sha" ]] \
+            || stale "origin/main changed before the verified candidate could be published."
+        if ! "$git_command" -C "$repository_path" push origin \
+            "$approved_sha:refs/heads/main"
+        then
+            "$git_command" -C "$repository_path" fetch origin main
+            latest_fork_sha="$("$git_command" -C "$repository_path" rev-parse refs/remotes/origin/main)" \
+                || fail "The fetched fork does not have origin/main."
+            [[ "$latest_fork_sha" == "$approved_sha" ]] \
+                || stale "another Mac published a different fork update first."
+        fi
+    fi
+
+    "$git_command" -C "$repository_path" fetch origin main
+    [[ "$("$git_command" -C "$repository_path" rev-parse refs/remotes/origin/main)" == "$approved_sha" ]] \
+        || fail "The fork did not retain the verified candidate after publication."
+    "$git_command" -C "$repository_path" merge-base --is-ancestor \
+        refs/heads/main "$approved_sha" \
+        || fail "Local main cannot fast-forward to the published candidate."
+
+    if [[ "$("$git_command" -C "$repository_path" symbolic-ref --quiet --short HEAD || true)" == "main" ]]; then
+        [[ -z "$("$git_command" -C "$repository_path" status --porcelain)" ]] \
+            || fail "The VoiceInk clone changed during installation; local main was not updated."
+        "$git_command" -C "$repository_path" merge --ff-only "$approved_sha"
+    else
+        local_main_sha="$("$git_command" -C "$repository_path" rev-parse refs/heads/main)"
+        "$git_command" -C "$repository_path" update-ref \
+            refs/heads/main "$approved_sha" "$local_main_sha"
+    fi
+    "$git_command" -C "$repository_path" update-ref -d "$candidate_ref" "$approved_sha"
 }
 
 revalidate_fork
 
 manifest_upstream_sha="$(/usr/bin/plutil -extract upstreamCommit raw "$manifest_path" 2>/dev/null)" \
     || fail "The staged candidate manifest has no upstream provenance."
+"$git_command" -C "$repository_path" merge-base --is-ancestor \
+    "$manifest_upstream_sha" "$approved_sha" \
+    || stale "the candidate does not contain its recorded upstream revision."
 staged_bundle="$(/usr/bin/plutil -extract bundlePath raw "$manifest_path" 2>/dev/null)" \
     || fail "The staged candidate manifest has no bundle path."
+candidate_stage="$(dirname "$staged_bundle")"
+[[ "$(dirname "$candidate_stage")" == "$stage_root/candidates" \
+    && "$(basename "$staged_bundle")" == "VoiceInk.app" ]] \
+    || fail "The staged candidate bundle is outside the updater staging directory."
 
 [[ -d "$staged_bundle" ]] || fail "The staged candidate bundle is missing."
 [[ -d "$target_bundle" ]] || fail "The installed VoiceInk bundle is missing."
@@ -114,7 +171,6 @@ codesign --verify --deep --strict "$staged_bundle" \
 
 target_parent="$(dirname "$target_bundle")"
 backup_parent="$(dirname "$backup_bundle")"
-stage_root="$(dirname "$manifest_path")"
 recovery_root="$backup_parent"
 recovery_parent="$(dirname "$recovery_root")"
 application_support="${VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH:-$HOME/Library/Application Support/com.prakashjoshipax.VoiceInk}"
@@ -453,6 +509,8 @@ if [[ -d "$previous_recovery" ]]; then
     /bin/rm -rf "$previous_recovery" \
         || fail "VoiceInk could not remove the obsolete filesystem recovery snapshot."
 fi
+publish_verified_candidate
+/bin/rm -rf "$candidate_stage"
 /bin/rm -f "$manifest_path"
 printf 'Installed VoiceInk candidate %s and preserved the previous bundle at %s\n' \
     "$approved_sha" "$backup_bundle"

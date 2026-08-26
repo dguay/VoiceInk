@@ -242,4 +242,83 @@ fi
 grep -Fq "does not contain the local fork updater" "$fixture_root/updater-output.log"
 [[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
 
+printf 'upstream-only\n' > "$seed_clone/upstream-marker"
+git -C "$seed_clone" add upstream-marker
+git -C "$seed_clone" commit -m "feat: advance upstream" >/dev/null
+git -C "$seed_clone" push upstream main >/dev/null
+upstream_fast_forward_sha="$(git -C "$seed_clone" rev-parse HEAD)"
+fast_forward_manifest="$fixture_root/fast-forward/staged-candidate.plist"
+
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$fast_forward_manifest" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+
+[[ "$(/usr/bin/plutil -extract forkCommit raw "$fast_forward_manifest")" == "$upstream_fast_forward_sha" ]]
+[[ "$(/usr/bin/plutil -extract forkBaseCommit raw "$fast_forward_manifest")" == "$candidate_sha" ]]
+[[ "$(/usr/bin/plutil -extract upstreamCommit raw "$fast_forward_manifest")" == "$upstream_fast_forward_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/voiceink-updater/candidates/$upstream_fast_forward_sha)" == "$upstream_fast_forward_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse HEAD)" == "$before_head" ]]
+[[ "$(git -C "$canonical_clone" status --porcelain)" == "" ]]
+[[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+
+fork_writer="$fixture_root/fork-writer"
+git clone "$fork_bare" "$fork_writer" >/dev/null
+git -C "$fork_writer" config user.name "VoiceInk Fork Writer"
+git -C "$fork_writer" config user.email "fork-writer@example.com"
+printf 'fork-only\n' > "$fork_writer/fork-marker"
+git -C "$fork_writer" add fork-marker
+git -C "$fork_writer" commit -m "feat: advance fork" >/dev/null
+git -C "$fork_writer" push origin main >/dev/null
+diverged_fork_sha="$(git -C "$fork_writer" rev-parse HEAD)"
+merge_manifest="$fixture_root/merge/staged-candidate.plist"
+
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$merge_manifest" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+
+merge_candidate_sha="$(/usr/bin/plutil -extract forkCommit raw "$merge_manifest")"
+[[ "$(/usr/bin/plutil -extract forkBaseCommit raw "$merge_manifest")" == "$diverged_fork_sha" ]]
+[[ "$(/usr/bin/plutil -extract upstreamCommit raw "$merge_manifest")" == "$upstream_fast_forward_sha" ]]
+[[ "$(git -C "$canonical_clone" show -s --format=%s "$merge_candidate_sha")" == "chore(updater): merge upstream main" ]]
+[[ "$(git -C "$canonical_clone" show -s --format='%P' "$merge_candidate_sha")" == "$diverged_fork_sha $upstream_fast_forward_sha" ]]
+[[ "$(git -C "$canonical_clone" show -s --format=%s "$upstream_fast_forward_sha")" == "feat: advance upstream" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/remotes/origin/main)" == "$diverged_fork_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/voiceink-updater/candidates/$merge_candidate_sha)" == "$merge_candidate_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse HEAD)" == "$before_head" ]]
+[[ "$(git -C "$canonical_clone" status --porcelain)" == "" ]]
+[[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+
+printf 'fork-conflict\n' > "$fork_writer/README.md"
+git -C "$fork_writer" add README.md
+git -C "$fork_writer" commit -m "feat: change fork readme" >/dev/null
+git -C "$fork_writer" push origin main >/dev/null
+printf 'upstream-conflict\n' > "$seed_clone/README.md"
+git -C "$seed_clone" add README.md
+git -C "$seed_clone" commit -m "feat: change upstream readme" >/dev/null
+git -C "$seed_clone" push upstream main >/dev/null
+conflict_manifest="$fixture_root/conflict/staged-candidate.plist"
+
+if PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$conflict_manifest" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/conflict-output.log" 2>&1
+then
+    printf 'prepare-local-update-test: conflicting histories produced a candidate\n' >&2
+    exit 1
+fi
+[[ ! -e "$conflict_manifest" ]]
+[[ "$(git -C "$canonical_clone" rev-parse HEAD)" == "$before_head" ]]
+[[ "$(git -C "$canonical_clone" status --porcelain)" == "" ]]
+[[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+grep -Fq "CONFLICT" "$fixture_root/conflict-output.log"
+
 printf 'prepare-local-update-test: PASS\n'

@@ -259,6 +259,20 @@ fi
 exec /usr/bin/git "$@"
 EOF
 
+cat > "$fake_bin/git-require-health-before-push" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ " $* " == *" push origin "* && " $* " == *":refs/heads/main "* ]]; then
+    [[ " $* " != *" --force"* ]]
+    [[ -f "$VOICEINK_TEST_REQUIRED_HEALTH_PATH" ]]
+    [[ "$(/usr/bin/plutil -extract forkCommit raw "$VOICEINK_TEST_REQUIRED_HEALTH_PATH")" == "$VOICEINK_TEST_REQUIRED_PUBLISH_SHA" ]]
+    printf 'push-after-health\n' >> "$VOICEINK_TEST_PUBLISH_LOG"
+fi
+
+exec /usr/bin/git "$@"
+EOF
+
 chmod +x \
     "$fake_bin/codesign" \
     "$fake_bin/launch-voiceink" \
@@ -273,7 +287,8 @@ chmod +x \
     "$fake_bin/replace-bundle" \
     "$fake_bin/fail-replacement" \
     "$fake_bin/fail-pending-recovery-move" \
-    "$fake_bin/git-with-late-update"
+    "$fake_bin/git-with-late-update" \
+    "$fake_bin/git-require-health-before-push"
 
 credential_log="$fixture_root/credential-restore.log"
 credential_create_log="$fixture_root/credential-create.log"
@@ -393,10 +408,31 @@ grep -Fq "could not relaunch the previous version" "$fixture_root/relaunch-failu
 sleep 30 &
 parent_pid=$!
 : > "$launch_log"
+
+fork_base_sha="$new_sha"
+printf 'verified-before-publish\n' > "$seed_clone/verified-candidate"
+git -C "$seed_clone" add verified-candidate
+git -C "$seed_clone" commit -m "chore(updater): merge upstream main" >/dev/null
+new_sha="$(git -C "$seed_clone" rev-parse HEAD)"
+git -C "$canonical_clone" fetch "$seed_clone" "$new_sha" >/dev/null
+git -C "$canonical_clone" update-ref "refs/voiceink-updater/candidates/$new_sha" "$new_sha"
+staged_bundle="$fixture_root/staging/candidates/$new_sha/VoiceInk.app"
+mkdir -p "$staged_bundle/Contents"
+printf 'newer-candidate\n' > "$staged_bundle/Contents/version"
+/usr/bin/plutil -create xml1 "$staged_bundle/Contents/Info.plist"
+/usr/bin/plutil -insert VoiceInkForkCommit -string "$new_sha" "$staged_bundle/Contents/Info.plist"
+/usr/bin/plutil -insert VoiceInkUpstreamCommit -string "$upstream_sha" "$staged_bundle/Contents/Info.plist"
+/usr/bin/plutil -insert VoiceInkUpdaterKind -string fork "$staged_bundle/Contents/Info.plist"
+/usr/bin/plutil -replace forkCommit -string "$new_sha" "$manifest_path"
+/usr/bin/plutil -insert forkBaseCommit -string "$fork_base_sha" "$manifest_path"
+/usr/bin/plutil -replace bundlePath -string "$staged_bundle" "$manifest_path"
+publish_log="$fixture_root/publish.log"
+
 prepare_recovery_intent
 
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_GIT_COMMAND="$fake_bin/git-require-health-before-push" \
     VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
     VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
     VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
@@ -406,6 +442,9 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
     VOICEINK_UPDATE_STABILITY_SECONDS=1 \
     VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    VOICEINK_TEST_REQUIRED_HEALTH_PATH="$health_path" \
+    VOICEINK_TEST_REQUIRED_PUBLISH_SHA="$new_sha" \
+    VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
     /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
     "$new_sha" \
     "$manifest_path" \
@@ -430,8 +469,19 @@ parent_pid=""
 credential_generation="$(/usr/bin/plutil -extract credentialGeneration raw "$recovery_root/recovery.plist")"
 [[ "$(< "$credential_create_log")" == "$credential_generation" ]]
 [[ ! -e "$manifest_path" ]]
+[[ ! -e "$staged_bundle" ]]
 [[ "$(< "$launch_log")" == "$installed_bundle" ]]
+[[ "$(< "$publish_log")" == "push-after-health" ]]
+[[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$new_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$new_sha" ]]
+if git -C "$canonical_clone" rev-parse "refs/voiceink-updater/candidates/$new_sha" >/dev/null 2>&1; then
+    printf 'install-local-update-test: published candidate reference was not cleaned up\n' >&2
+    exit 1
+fi
 launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path")"
+
+mkdir -p "$(dirname "$staged_bundle")"
+/usr/bin/ditto "$installed_bundle" "$staged_bundle"
 
 kill "$launched_pid"
 launched_pid=""
