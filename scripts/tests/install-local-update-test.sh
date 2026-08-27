@@ -156,6 +156,10 @@ if [[ "${VOICEINK_TEST_SKIP_HEALTH:-0}" != 1 ]]; then
     /usr/bin/plutil -insert upstreamCommit -string "$(/usr/bin/plutil -extract VoiceInkUpstreamCommit raw "$info_plist")" "$health_path"
     /usr/bin/plutil -insert updaterKind -string "$(/usr/bin/plutil -extract VoiceInkUpdaterKind raw "$info_plist")" "$health_path"
     /usr/bin/plutil -insert processIdentifier -integer "$app_pid" "$health_path"
+    /usr/bin/plutil -insert permissionState -dictionary "$health_path"
+    /usr/bin/plutil -insert permissionState.microphoneAuthorized -bool "${VOICEINK_TEST_MICROPHONE_AUTHORIZED:-true}" "$health_path"
+    /usr/bin/plutil -insert permissionState.accessibilityAuthorized -bool "${VOICEINK_TEST_ACCESSIBILITY_AUTHORIZED:-true}" "$health_path"
+    /usr/bin/plutil -insert permissionState.screenCaptureAuthorized -bool "${VOICEINK_TEST_SCREEN_CAPTURE_AUTHORIZED:-true}" "$health_path"
 fi
 if [[ -n "${VOICEINK_TEST_PID_LOG:-}" ]]; then
     printf '%s\n' "$app_pid" > "$VOICEINK_TEST_PID_LOG"
@@ -174,6 +178,19 @@ cat > "$fake_bin/relaunch-voiceink" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'rollback:%s\n' "$1" >> "$VOICEINK_TEST_LAUNCH_LOG"
+if [[ -n "${VOICEINK_TEST_OUTCOME_ORDER_LOG:-}" ]]; then
+    printf 'relaunch\n' >> "$VOICEINK_TEST_OUTCOME_ORDER_LOG"
+fi
+EOF
+
+cat > "$fake_bin/record-outcome" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cp "$1" "$VOICEINK_TEST_OUTCOME_REPORT"
+rm "$1"
+if [[ -n "${VOICEINK_TEST_OUTCOME_ORDER_LOG:-}" ]]; then
+    printf 'outcome\n' >> "$VOICEINK_TEST_OUTCOME_ORDER_LOG"
+fi
 EOF
 
 cat > "$fake_bin/fail-relaunch" <<'EOF'
@@ -341,6 +358,7 @@ chmod +x \
     "$fake_bin/codesign" \
     "$fake_bin/launch-voiceink" \
     "$fake_bin/relaunch-voiceink" \
+    "$fake_bin/record-outcome" \
     "$fake_bin/fail-relaunch" \
     "$fake_bin/fail-snapshot" \
     "$fake_bin/restore-preferences" \
@@ -381,6 +399,10 @@ prepare_recovery_intent() {
     /usr/bin/plutil -insert credentialGeneration -string "$VOICEINK_UPDATE_CREDENTIAL_GENERATION" "$recovery_root.pending/recovery.plist"
     /usr/bin/plutil -insert installInProgress -bool true "$recovery_root.pending/recovery.plist"
     /usr/bin/plutil -insert restoreInProgress -bool false "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert permissionState -dictionary "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert permissionState.microphoneAuthorized -bool true "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert permissionState.accessibilityAuthorized -bool true "$recovery_root.pending/recovery.plist"
+    /usr/bin/plutil -insert permissionState.screenCaptureAuthorized -bool true "$recovery_root.pending/recovery.plist"
     chmod 600 "$recovery_root.pending/recovery.plist"
 }
 
@@ -918,6 +940,8 @@ parent_pid=$!
 : > "$publish_log"
 prepare_recovery_intent
 push_completed_path="$fixture_root/push-completed"
+outcome_report="$fixture_root/install-outcome.plist"
+outcome_order_log="$fixture_root/install-outcome-order.log"
 
 PATH="$fake_bin:$PATH" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -927,6 +951,7 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
     VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
     VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_UPDATE_OUTCOME_RECORDER="$fake_bin/record-outcome" \
     VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
     VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
     VOICEINK_UPDATE_STABILITY_SECONDS=1 \
@@ -936,6 +961,8 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_TEST_EXPECTED_LOCAL_MAIN_BEFORE_PUSH="$old_sha" \
     VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
     VOICEINK_TEST_PUSH_COMPLETED_PATH="$push_completed_path" \
+    VOICEINK_TEST_OUTCOME_REPORT="$outcome_report" \
+    VOICEINK_TEST_OUTCOME_ORDER_LOG="$outcome_order_log" \
     /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
     "$new_sha" \
     "$manifest_path" \
@@ -964,6 +991,8 @@ credential_generation="$(/usr/bin/plutil -extract credentialGeneration raw "$rec
 [[ "$(< "$launch_log")" == "$installed_bundle" ]]
 [[ "$(< "$publish_log")" == "push-after-health" ]]
 [[ -f "$push_completed_path" ]]
+[[ "$(/usr/bin/plutil -extract outcome raw "$outcome_report")" == "succeeded" ]]
+[[ "$(< "$outcome_order_log")" == "outcome" ]]
 [[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$new_sha" ]]
 [[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$new_sha" ]]
 if git -C "$canonical_clone" rev-parse "$candidate_ref" >/dev/null 2>&1; then
@@ -1109,6 +1138,50 @@ grep -Fq "wrong fork provenance" "$fixture_root/rollback-output.log"
 launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path")"
 
 launched_pid=""
+: > "$launch_log"
+: > "$outcome_order_log"
+sleep 30 &
+parent_pid=$!
+
+prepare_recovery_intent
+set +e
+PATH="$fake_bin:$PATH" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+    VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
+    VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+    VOICEINK_UPDATE_OUTCOME_RECORDER="$fake_bin/record-outcome" \
+    VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
+    VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
+    VOICEINK_UPDATE_STABILITY_SECONDS=1 \
+    VOICEINK_TEST_MICROPHONE_AUTHORIZED=false \
+    VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+    VOICEINK_TEST_OUTCOME_REPORT="$outcome_report" \
+    VOICEINK_TEST_OUTCOME_ORDER_LOG="$outcome_order_log" \
+    /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+    "$new_sha" \
+    "$manifest_path" \
+    "$installed_bundle" \
+    "$backup_bundle" \
+    "$parent_pid" \
+    > "$fixture_root/permission-regression-output.log" 2>&1
+permission_regression_status=$?
+set -e
+
+[[ "$permission_regression_status" -ne 0 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: approved parent survived permission regression\n' >&2
+    exit 1
+fi
+parent_pid=""
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+grep -Fq "lost microphone permission after replacement" "$fixture_root/permission-regression-output.log"
+[[ "$(/usr/bin/plutil -extract outcome raw "$outcome_report")" == "failed" ]]
+[[ "$(/usr/bin/plutil -extract failureStage raw "$outcome_report")" == "permission" ]]
+[[ "$(/usr/bin/plutil -extract rollbackOutcome raw "$outcome_report")" == "succeeded" ]]
+[[ "$(sed -n '1p' "$outcome_order_log")" == "outcome" ]]
+[[ "$(sed -n '2p' "$outcome_order_log")" == "relaunch" ]]
+
 : > "$launch_log"
 pid_log="$fixture_root/timed-out-pid.log"
 sleep 30 &

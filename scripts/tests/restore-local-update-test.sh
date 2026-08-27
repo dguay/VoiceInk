@@ -24,6 +24,8 @@ application_support="$fixture_root/Library/Application Support/com.prakashjoship
 preferences="$fixture_root/Library/Preferences/com.prakashjoshipax.VoiceInk.plist"
 launch_log="$fixture_root/launch.log"
 credential_log="$fixture_root/credentials.log"
+rollback_report="$fixture_root/rollback-report.plist"
+rollback_order_log="$fixture_root/rollback-order.log"
 fake_bin="$fixture_root/bin"
 
 mkdir -p \
@@ -104,6 +106,17 @@ cat > "$fake_bin/relaunch-voiceink" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$1" > "$VOICEINK_TEST_LAUNCH_LOG"
+if [[ -n "${VOICEINK_TEST_ROLLBACK_ORDER_LOG:-}" ]]; then
+    printf 'relaunch\n' >> "$VOICEINK_TEST_ROLLBACK_ORDER_LOG"
+fi
+EOF
+
+cat > "$fake_bin/record-outcome" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+/bin/cp "$1" "$VOICEINK_TEST_ROLLBACK_REPORT"
+/bin/rm "$1"
+printf 'outcome\n' >> "$VOICEINK_TEST_ROLLBACK_ORDER_LOG"
 EOF
 
 chmod +x \
@@ -114,7 +127,14 @@ chmod +x \
     "$fake_bin/fail-snapshot" \
     "$fake_bin/fail-atomic-replace" \
     "$fake_bin/fail-compensation-replace" \
+    "$fake_bin/record-outcome" \
     "$fake_bin/relaunch-voiceink"
+
+export VOICEINK_UPDATE_ROLLBACK_RESULT_PATH="$fixture_root/rollback-result.plist"
+export VOICEINK_UPDATE_OUTCOME_RECORDER="$fake_bin/record-outcome"
+export VOICEINK_TEST_ROLLBACK_REPORT="$rollback_report"
+export VOICEINK_TEST_ROLLBACK_ORDER_LOG="$rollback_order_log"
+: > "$rollback_order_log"
 
 sleep 30 &
 parent_pid=$!
@@ -143,6 +163,10 @@ parent_pid=""
 [[ "$(< "$preferences")" == "previous-preferences" ]]
 [[ "$(< "$credential_log")" == "restored:$credential_generation" ]]
 [[ "$(< "$launch_log")" == "$installed_bundle" ]]
+[[ "$(/usr/bin/plutil -extract outcome raw "$rollback_report")" == "succeeded" ]]
+[[ "$(/usr/bin/plutil -extract initiator raw "$rollback_report")" == "manual" ]]
+[[ "$(sed -n '1p' "$rollback_order_log")" == "outcome" ]]
+[[ "$(sed -n '2p' "$rollback_order_log")" == "relaunch" ]]
 [[ "$(/usr/bin/plutil -extract suppressedForkCommit raw "$recovery_root/recovery.plist")" == "$candidate_sha" ]]
 [[ -d "$backup_bundle" ]]
 [[ -d "$recovery_root/Application Support" ]]
@@ -182,6 +206,8 @@ parent_pid=""
 [[ "$(< "$preferences")" == "candidate-preferences" ]]
 [[ ! -s "$launch_log" ]]
 grep -Fq "could not prove a consistent" "$fixture_root/failed-restore.log"
+[[ "$(/usr/bin/plutil -extract outcome raw "$rollback_report")" == "failed" ]]
+[[ "$(tail -n 1 "$rollback_order_log")" == "outcome" ]]
 
 # A failed atomic replacement must never remove the app at its canonical path.
 : > "$launch_log"

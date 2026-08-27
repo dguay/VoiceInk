@@ -2,13 +2,17 @@
 
 set -euo pipefail
 
+failure_message=""
+
 fail() {
-    printf 'Error: %s\n' "$*" >&2
+    failure_message="$*"
+    printf 'Error: %s\n' "$failure_message" >&2
     exit 1
 }
 
 automatic=false
 resume=false
+defer_relaunch="${VOICEINK_UPDATE_DEFER_RELAUNCH:-0}"
 if [[ "${1:-}" == "--resume" ]]; then
     [[ "$#" -eq 3 ]] \
         || fail "Usage: restore-local-update.sh --resume TARGET_BUNDLE BACKUP_BUNDLE"
@@ -41,6 +45,9 @@ relauncher="${VOICEINK_UPDATE_RELAUNCHER:-}"
 preferences_restorer="${VOICEINK_UPDATE_PREFERENCES_RESTORER:-}"
 credential_restorer="${VOICEINK_UPDATE_CREDENTIAL_RESTORER:-}"
 atomic_replacer="${VOICEINK_UPDATE_RESTORE_ATOMIC_REPLACER:-}"
+rollback_result_path="${VOICEINK_UPDATE_ROLLBACK_RESULT_PATH:-}"
+rollback_attempt_identifier="${VOICEINK_UPDATE_ROLLBACK_ATTEMPT_IDENTIFIER:-}"
+outcome_recorder="${VOICEINK_UPDATE_OUTCOME_RECORDER:-}"
 
 [[ -d "$target_bundle" ]] || fail "The installed VoiceInk bundle is missing."
 [[ -d "$backup_bundle" ]] || fail "The previous VoiceInk bundle is missing."
@@ -70,6 +77,8 @@ else
         || fail "The recovery state does not belong to the installed VoiceInk version."
 fi
 candidate_sha="$recorded_candidate"
+candidate_upstream="$(/usr/bin/plutil -extract VoiceInkUpstreamCommit raw "$target_bundle/Contents/Info.plist" 2>/dev/null || true)"
+rollback_attempt_identifier="${rollback_attempt_identifier:-rollback-$candidate_sha}"
 
 umask 077
 transaction_root="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-restore.XXXXXX")"
@@ -87,6 +96,10 @@ bundle_replacement_started=false
 recovery_state_mutation_started=false
 credential_replacement_started=false
 restore_complete=false
+needs_relaunch=false
+if [[ "$automatic" == true && "$resume" == false ]]; then
+    needs_relaunch=true
+fi
 
 replace_bundle_atomically() {
     local replacement_bundle="$1"
@@ -110,6 +123,97 @@ _ = try FileManager.default.replaceItemAt(
 SWIFT
 }
 
+persist_rollback_outcome() {
+    local outcome="succeeded"
+    local temporary="$rollback_result_path.tmp.$$"
+    [[ "$result" -eq 0 ]] || outcome="failed"
+    [[ -n "$rollback_result_path" ]] || return 1
+    mkdir -p "$(dirname "$rollback_result_path")"
+    /usr/bin/plutil -create xml1 "$temporary"
+    /usr/bin/plutil -insert attemptIdentifier -string "$rollback_attempt_identifier" "$temporary"
+    /usr/bin/plutil -insert candidateIdentifier -string "$candidate_sha" "$temporary"
+    /usr/bin/plutil -insert forkCommit -string "$candidate_sha" "$temporary"
+    if [[ -n "$candidate_upstream" ]]; then
+        /usr/bin/plutil -insert upstreamCommit -string "$candidate_upstream" "$temporary"
+    fi
+    /usr/bin/plutil -insert outcome -string "$outcome" "$temporary"
+    /usr/bin/plutil -insert initiator -string manual "$temporary"
+    if [[ "$outcome" == "failed" ]]; then
+        /usr/bin/plutil -insert message -string \
+            "${failure_message:-VoiceInk could not restore the previous version.}" "$temporary"
+    fi
+    chmod 600 "$temporary"
+    mv "$temporary" "$rollback_result_path"
+}
+
+record_rollback_outcome() {
+    if [[ -n "$outcome_recorder" ]]; then
+        "$outcome_recorder" "$rollback_result_path"
+        return
+    fi
+    outcome_executable="$rejected_bundle_sibling/Contents/MacOS/VoiceInk"
+    if [[ ! -x "$outcome_executable" ]]; then
+        outcome_executable="$target_bundle/Contents/MacOS/VoiceInk"
+    fi
+    [[ -x "$outcome_executable" ]] \
+        && "$outcome_executable" --voiceink-record-rollback-outcome "$rollback_result_path"
+}
+
+relaunch_target() {
+    if [[ -n "$relauncher" ]]; then
+        "$relauncher" "$target_bundle"
+    else
+        /usr/bin/open -n "$target_bundle"
+    fi
+}
+
+compensate_failed_restore() {
+    compensation_failed=false
+    if [[ "$bundle_replacement_started" == true && -d "$rejected_bundle_sibling" ]]; then
+        replace_bundle_atomically "$rejected_bundle_sibling" "$failed_restore_bundle_sibling" \
+            || compensation_failed=true
+    fi
+    if [[ "$application_support_replacement_started" == true && -d "$rejected_application_support" ]]; then
+        /bin/rm -rf "$application_support" || compensation_failed=true
+        mv "$rejected_application_support" "$application_support" || compensation_failed=true
+    fi
+    if [[ "$preferences_replacement_started" == true && -f "$rejected_preferences" ]]; then
+        if [[ -n "$preferences_restorer" ]]; then
+            "$preferences_restorer" "$rejected_preferences" "$preferences" >/dev/null 2>&1 \
+                || compensation_failed=true
+        else
+            /usr/bin/defaults import com.prakashjoshipax.VoiceInk "$rejected_preferences" >/dev/null 2>&1 \
+                || compensation_failed=true
+        fi
+    fi
+    if [[ "$recovery_state_mutation_started" == true && -f "$rejected_recovery_state" ]]; then
+        /bin/cp "$rejected_recovery_state" "$recovery_state" || compensation_failed=true
+    fi
+    if [[ "$compensation_failed" == true || "$credential_replacement_started" == true ]]; then
+        printf 'Error: VoiceInk stopped because rollback compensation could not prove a consistent credential and filesystem generation.\n' >&2
+        result=2
+        needs_relaunch=false
+    fi
+}
+
+record_manual_rollback_if_needed() {
+    [[ "$automatic" == false && "$parent_terminated" == true ]] || return 0
+    if ! persist_rollback_outcome; then
+        printf 'Error: VoiceInk could not persist the rollback outcome.\n' >&2
+        result=2
+    elif ! record_rollback_outcome; then
+        printf 'Error: VoiceInk deferred rollback outcome import until the next launch.\n' >&2
+    fi
+}
+
+cleanup_restore_artifacts() {
+    /bin/rm -rf \
+        "$transaction_root" \
+        "$restored_bundle" \
+        "$rejected_bundle_sibling" \
+        "$failed_restore_bundle_sibling"
+}
+
 finish_restore() {
     result=$?
     trap - EXIT
@@ -121,45 +225,15 @@ finish_restore() {
         printf 'Error: VoiceInk could not resume the interrupted rollback. Relaunch VoiceInk to retry.\n' >&2
         result=2
     elif [[ "$result" -ne 0 && "$parent_terminated" == true && "$restore_complete" == false ]]; then
-        compensation_failed=false
-        if [[ "$bundle_replacement_started" == true && -d "$rejected_bundle_sibling" ]]; then
-            replace_bundle_atomically "$rejected_bundle_sibling" "$failed_restore_bundle_sibling" \
-                || compensation_failed=true
-        fi
-        if [[ "$application_support_replacement_started" == true && -d "$rejected_application_support" ]]; then
-            /bin/rm -rf "$application_support" || compensation_failed=true
-            mv "$rejected_application_support" "$application_support" || compensation_failed=true
-        fi
-        if [[ "$preferences_replacement_started" == true && -f "$rejected_preferences" ]]; then
-            if [[ -n "$preferences_restorer" ]]; then
-                "$preferences_restorer" "$rejected_preferences" "$preferences" >/dev/null 2>&1 \
-                    || compensation_failed=true
-            else
-                /usr/bin/defaults import com.prakashjoshipax.VoiceInk "$rejected_preferences" >/dev/null 2>&1 \
-                    || compensation_failed=true
-            fi
-        fi
-        if [[ "$recovery_state_mutation_started" == true && -f "$rejected_recovery_state" ]]; then
-            /bin/cp "$rejected_recovery_state" "$recovery_state" || compensation_failed=true
-        fi
-        if [[ "$compensation_failed" == false && "$credential_replacement_started" == false ]]; then
-            if [[ -n "$relauncher" ]]; then
-                "$relauncher" "$target_bundle" >/dev/null 2>&1 || compensation_failed=true
-            else
-                /usr/bin/open -n "$target_bundle" >/dev/null 2>&1 || compensation_failed=true
-            fi
-        fi
-        if [[ "$compensation_failed" == true || "$credential_replacement_started" == true ]]; then
-            printf 'Error: VoiceInk stopped because rollback compensation could not prove a consistent credential and filesystem generation.\n' >&2
-            result=2
-        fi
+        compensate_failed_restore
     fi
 
-    /bin/rm -rf \
-        "$transaction_root" \
-        "$restored_bundle" \
-        "$rejected_bundle_sibling" \
-        "$failed_restore_bundle_sibling"
+    record_manual_rollback_if_needed
+    cleanup_restore_artifacts
+    if [[ "$needs_relaunch" == true && "$defer_relaunch" != 1 ]] && ! relaunch_target; then
+        printf 'Error: VoiceInk could not relaunch after the rollback transaction.\n' >&2
+        result=2
+    fi
     exit "$result"
 }
 trap finish_restore EXIT
@@ -191,6 +265,9 @@ if [[ "$automatic" == false ]]; then
         && fail "VoiceInk did not terminate before the restoration timeout."
 fi
 parent_terminated=true
+if [[ "$automatic" == false ]]; then
+    needs_relaunch=true
+fi
 
 # This marker is the durable commit record for rollback. If the helper or Mac
 # stops after this point, the next pre-initialization launch repeats the restore
@@ -256,14 +333,6 @@ credential_replacement_started=false
 /usr/bin/plutil -replace restoreInProgress -bool false "$recovery_state" \
     || fail "VoiceInk could not commit the completed rollback state."
 restore_complete=true
-
-if [[ "$resume" == false ]]; then
-    if [[ -n "$relauncher" ]]; then
-        "$relauncher" "$target_bundle"
-    else
-        /usr/bin/open -n "$target_bundle"
-    fi
-fi
 
 printf 'Restored VoiceInk %s and suppressed rejected candidate %s\n' \
     "$(/usr/bin/plutil -extract previousForkCommit raw "$recovery_state")" \

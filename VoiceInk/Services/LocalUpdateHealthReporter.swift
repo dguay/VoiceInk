@@ -1,10 +1,34 @@
+import ApplicationServices
+import AVFoundation
+import CoreGraphics
 import Foundation
+
+struct LocalUpdatePermissionState: Codable, Equatable, Sendable {
+    let microphoneAuthorized: Bool
+    let accessibilityAuthorized: Bool
+    let screenCaptureAuthorized: Bool
+}
+
+protocol LocalUpdatePermissionStateProviding {
+    func currentState() -> LocalUpdatePermissionState
+}
+
+struct SystemLocalUpdatePermissionStateProvider: LocalUpdatePermissionStateProviding {
+    func currentState() -> LocalUpdatePermissionState {
+        LocalUpdatePermissionState(
+            microphoneAuthorized: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+            accessibilityAuthorized: AXIsProcessTrusted(),
+            screenCaptureAuthorized: CGPreflightScreenCaptureAccess()
+        )
+    }
+}
 
 struct LocalUpdateHealthReport: Codable, Equatable {
     let forkCommit: String
     let upstreamCommit: String
     let updaterKind: String
     let processIdentifier: Int32
+    let permissionState: LocalUpdatePermissionState
 }
 
 enum LocalUpdateHealthReporter {
@@ -17,7 +41,8 @@ enum LocalUpdateHealthReporter {
     static func reportIfRequested(
         arguments: [String] = CommandLine.arguments,
         bundle: Bundle = .main,
-        processIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier
+        processIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier,
+        permissionStateProvider: any LocalUpdatePermissionStateProviding = SystemLocalUpdatePermissionStateProvider()
     ) throws {
         guard
             let argumentIndex = arguments.firstIndex(of: healthPathArgument),
@@ -33,7 +58,8 @@ enum LocalUpdateHealthReporter {
             forkCommit: provenance.forkCommit,
             upstreamCommit: provenance.upstreamCommit,
             updaterKind: updaterKind,
-            processIdentifier: processIdentifier
+            processIdentifier: processIdentifier,
+            permissionState: permissionStateProvider.currentState()
         )
         let healthURL = URL(fileURLWithPath: arguments[argumentIndex + 1])
         try PropertyListEncoder().encode(report).write(to: healthURL, options: .atomic)
