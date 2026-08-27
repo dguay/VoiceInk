@@ -7,6 +7,10 @@ failure_kind=""
 candidate_identifier=""
 fork_commit=""
 upstream_commit=""
+repository_path=""
+origin_repository=""
+upstream_repository=""
+conflict_paths=()
 manifest_path="${VOICEINK_UPDATE_MANIFEST_PATH:-$HOME/Library/Application Support/com.prakashjoshipax.VoiceInk/Updater/staged-candidate.plist}"
 result_path="${VOICEINK_UPDATE_RESULT_PATH:-}"
 progress_path="${VOICEINK_UPDATE_PROGRESS_PATH:-}"
@@ -66,6 +70,24 @@ write_failure_result() {
     fi
     if [[ -n "$upstream_commit" ]]; then
         /usr/bin/plutil -insert upstreamCommit -string "$upstream_commit" "$failure_temporary"
+    fi
+    if [[ -n "$repository_path" ]]; then
+        /usr/bin/plutil -insert repositoryPath -string "$repository_path" "$failure_temporary"
+    fi
+    if [[ -n "$origin_repository" ]]; then
+        /usr/bin/plutil -insert originRepository -string "$origin_repository" "$failure_temporary"
+    fi
+    if [[ -n "$upstream_repository" ]]; then
+        /usr/bin/plutil -insert upstreamRepository -string "$upstream_repository" "$failure_temporary"
+    fi
+    /usr/bin/plutil -insert conflicts -array "$failure_temporary"
+    local conflict_index=0
+    local conflict_path
+    if (( ${#conflict_paths[@]} > 0 )); then
+        for conflict_path in "${conflict_paths[@]}"; do
+            /usr/bin/plutil -insert "conflicts.$conflict_index" -string "$conflict_path" "$failure_temporary"
+            conflict_index=$((conflict_index + 1))
+        done
     fi
     mv "$failure_temporary" "$result_path"
 
@@ -130,6 +152,12 @@ fi
     || fail "No VoiceInk clone is registered. Run 'make bootstrap' from the clone first."
 repository_path="$(git -C "$repository_path" rev-parse --show-toplevel 2>/dev/null)" \
     || fail "The registered VoiceInk clone is unavailable. Run 'make bootstrap' again."
+origin_repository="$(git -C "$repository_path" remote get-url origin 2>/dev/null)" \
+    || fail "The registered VoiceInk clone does not have an origin remote."
+upstream_repository="$(git -C "$repository_path" remote get-url upstream 2>/dev/null)" \
+    || fail "The registered VoiceInk clone does not have an upstream remote."
+fork_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main 2>/dev/null || true)"
+upstream_commit="$(git -C "$repository_path" rev-parse refs/remotes/upstream/main 2>/dev/null || true)"
 
 [[ -z "$(git -C "$repository_path" status --porcelain)" ]] \
     || fail "The VoiceInk clone has uncommitted changes. Commit or stash them before preparing an update."
@@ -184,13 +212,13 @@ trap cleanup EXIT
 begin_stage fetch
 git -C "$repository_path" fetch origin main \
     || fail "VoiceInk could not fetch origin/main."
+fork_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main)" \
+    || fail "The fetched fork does not have origin/main."
 git -C "$repository_path" fetch upstream main \
     || fail "VoiceInk could not fetch upstream/main."
-
-fork_base_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main)" \
-    || fail "The fetched fork does not have origin/main."
 upstream_commit="$(git -C "$repository_path" rev-parse refs/remotes/upstream/main)" \
     || fail "The fetched upstream does not have upstream/main."
+fork_base_commit="$fork_commit"
 candidate_identifier="$fork_base_commit:$upstream_commit"
 record_stage_success fetch
 if [[ -f "$failure_state_path" ]]; then
@@ -215,6 +243,9 @@ if ! git -C "$repository_path" merge-base --is-ancestor "$upstream_commit" "$for
             -m "chore(updater): merge upstream main" "$upstream_commit" \
             >/dev/null 2>&1
         then
+            while IFS= read -r conflict_path; do
+                [[ -n "$conflict_path" ]] && conflict_paths+=("$conflict_path")
+            done < <(git -C "$candidate_worktree" diff --name-only --diff-filter=U)
             fail "The fetched fork conflicts with upstream/main. Resolve the shared fork before retrying."
         fi
     fi

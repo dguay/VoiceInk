@@ -25,6 +25,7 @@ struct ForkUpdateFailure: Codable, Equatable, LocalizedError, Sendable {
     let candidateIdentifier: String?
     let message: String
     let recoverySuggestion: String
+    let attemptContext: ForkUpdateAttemptContext?
 
     var errorDescription: String? { message }
 
@@ -34,6 +35,7 @@ struct ForkUpdateFailure: Codable, Equatable, LocalizedError, Sendable {
         case candidateIdentifier
         case message
         case recoverySuggestion
+        case attemptContext
     }
 
     init(
@@ -41,13 +43,15 @@ struct ForkUpdateFailure: Codable, Equatable, LocalizedError, Sendable {
         kind: ForkUpdateFailureKind,
         candidateIdentifier: String?,
         message: String,
-        recoverySuggestion: String
+        recoverySuggestion: String,
+        attemptContext: ForkUpdateAttemptContext? = nil
     ) {
         self.stage = stage
         self.kind = kind
         self.candidateIdentifier = candidateIdentifier
         self.message = message
         self.recoverySuggestion = recoverySuggestion
+        self.attemptContext = attemptContext
     }
 
     init(from decoder: any Decoder) throws {
@@ -67,6 +71,10 @@ struct ForkUpdateFailure: Codable, Equatable, LocalizedError, Sendable {
             recoverySuggestion: try container.decodeIfPresent(
                 String.self,
                 forKey: .recoverySuggestion
+            ),
+            attemptContext: try container.decodeIfPresent(
+                ForkUpdateAttemptContext.self,
+                forKey: .attemptContext
             )
         )
     }
@@ -76,7 +84,8 @@ struct ForkUpdateFailure: Codable, Equatable, LocalizedError, Sendable {
         kind: ForkUpdateFailureKind,
         candidateIdentifier: String?,
         message: String,
-        recoverySuggestion: String? = nil
+        recoverySuggestion: String? = nil,
+        attemptContext: ForkUpdateAttemptContext? = nil
     ) -> ForkUpdateFailure {
         if let recoverySuggestion {
             return ForkUpdateFailure(
@@ -84,7 +93,8 @@ struct ForkUpdateFailure: Codable, Equatable, LocalizedError, Sendable {
                 kind: kind,
                 candidateIdentifier: candidateIdentifier,
                 message: message,
-                recoverySuggestion: recoverySuggestion
+                recoverySuggestion: recoverySuggestion,
+                attemptContext: attemptContext
             )
         }
         let suggestion: String
@@ -107,7 +117,19 @@ struct ForkUpdateFailure: Codable, Equatable, LocalizedError, Sendable {
             kind: kind,
             candidateIdentifier: candidateIdentifier,
             message: message,
-            recoverySuggestion: suggestion
+            recoverySuggestion: suggestion,
+            attemptContext: attemptContext
+        )
+    }
+
+    func withAttemptContext(_ context: ForkUpdateAttemptContext) -> ForkUpdateFailure {
+        ForkUpdateFailure(
+            stage: stage,
+            kind: kind,
+            candidateIdentifier: candidateIdentifier,
+            message: message,
+            recoverySuggestion: recoverySuggestion,
+            attemptContext: context
         )
     }
 
@@ -432,32 +454,8 @@ struct ForkUpdateLogArchive {
             forkCommit: record.forkCommit,
             upstreamCommit: record.upstreamCommit,
             retry: record.retry,
-            message: record.message.map(Self.sanitize)
+            message: record.message.map(ForkUpdateLogRedactor.sanitize)
         )
-    }
-
-    private static func sanitize(_ message: String) -> String {
-        var sanitized = String(message.prefix(2_048))
-        let replacements = [
-            ("(?i)bearer\\s+[^\\s,;]+", "Bearer [REDACTED]"),
-            ("(?i)(https?://)[^\\s/@]+:[^\\s/@]+@", "$1[REDACTED]@"),
-            ("(?i)(https?://)[^\\s/@]+@", "$1[REDACTED]@"),
-            ("(?i)(github_pat_|gh[pousr]_)[A-Za-z0-9_]{20,}", "[REDACTED]"),
-            (
-                "(?i)(authorization|api[_-]?key|token|secret|password|credential|transcript|selected[_-]?text|screenshot|clipboard)(\\s*[:=]\\s*|\\s+)[^\\r\\n]*",
-                "$1=[REDACTED]"
-            ),
-        ]
-        for (pattern, template) in replacements {
-            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
-            let range = NSRange(sanitized.startIndex..., in: sanitized)
-            sanitized = expression.stringByReplacingMatches(
-                in: sanitized,
-                range: range,
-                withTemplate: template
-            )
-        }
-        return sanitized
     }
 
     private struct BundleEvidence {

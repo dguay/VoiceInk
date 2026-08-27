@@ -213,6 +213,111 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func resumeCommandRevalidatesTheSavedAttemptBeforeStaging() async throws {
+        let suiteName = "UpdaterViewModelTests.resume-recovery"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let contextStore = ForkUpdateAttemptContextStore(directoryURL: temporaryDirectory)
+        let context = ForkUpdateAttemptContext(
+            attemptIdentifier: "attempt-14",
+            repositoryPath: "/Users/tester/git/VoiceInk",
+            originRepository: "dguay/VoiceInk",
+            upstreamRepository: "Beingpax/VoiceInk",
+            installedForkCommit: nil,
+            forkCommit: "1111111111111111111111111111111111111111",
+            upstreamCommit: "2222222222222222222222222222222222222222",
+            stage: .test,
+            conflicts: [],
+            logs: ["VoiceInk updater tests failed."]
+        )
+        let failure = ForkUpdateFailure(
+            stage: .test,
+            kind: .deterministic,
+            candidateIdentifier: "candidate",
+            message: "VoiceInk updater tests failed.",
+            recoverySuggestion: "Fix the tests, then resume the update.",
+            attemptContext: context
+        )
+        let candidate = StagedForkCandidate(
+            forkCommit: "3333333333333333333333333333333333333333",
+            upstreamCommit: "2222222222222222222222222222222222222222",
+            bundleURL: temporaryDirectory.appendingPathComponent("VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_000)
+        )
+        let transaction = ForkUpdateTransactionStub(
+            preparationResult: .staged(candidate),
+            persistentFailure: failure
+        )
+        let resumeRequests = ForkUpdateResumeRequestObserverStub()
+        let adapter = ForkUpdaterAdapter(
+            transaction: transaction,
+            resumeRequestObserver: resumeRequests
+        )
+        let updater: any UpdaterModule = UpdaterViewModel(defaults: defaults, adapter: adapter)
+        try contextStore.persist(context)
+
+        let handled = try ForkUpdateResumeCommand.runIfRequested(
+            arguments: ["VoiceInk", ForkUpdateResumeCommand.argument, contextStore.contextURL.path],
+            post: resumeRequests.send
+        )
+        try await waitUntil { updater.state.stagedUpdate == candidate }
+
+        #expect(handled)
+        #expect(transaction.preparationModes == [.manual])
+        #expect(transaction.restartRequestCount == 0)
+        #expect(updater.state.failure == nil)
+        #expect(updater.state.stagedUpdate == candidate)
+    }
+
+    @Test
+    func publishedRepairClearsTheStaleFailureAfterRefetch() async throws {
+        let suiteName = "UpdaterViewModelTests.published-repair"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let context = ForkUpdateAttemptContext(
+            attemptIdentifier: "attempt-14",
+            repositoryPath: "/Users/tester/git/VoiceInk",
+            originRepository: "dguay/VoiceInk",
+            upstreamRepository: "Beingpax/VoiceInk",
+            installedForkCommit: nil,
+            forkCommit: "1111111111111111111111111111111111111111",
+            upstreamCommit: "2222222222222222222222222222222222222222",
+            stage: .merge,
+            conflicts: ["VoiceInk/Services/ForkUpdater.swift"],
+            logs: ["The candidate conflicts with upstream."]
+        )
+        let failure = ForkUpdateFailure(
+            stage: .merge,
+            kind: .deterministic,
+            candidateIdentifier: "candidate",
+            message: "The candidate conflicts with upstream.",
+            recoverySuggestion: "Wait for the published repair.",
+            attemptContext: context
+        )
+        let transaction = ForkUpdateTransactionStub(
+            preparationResult: .buildDeferred(
+                candidateIdentifier: "3333333333333333333333333333333333333333:2222222222222222222222222222222222222222"
+            ),
+            persistentFailure: failure
+        )
+        let adapter = ForkUpdaterAdapter(
+            transaction: transaction,
+            powerState: ForkUpdatePowerStateStub(isLowPowerModeEnabled: true)
+        )
+        let updater: any UpdaterModule = UpdaterViewModel(defaults: defaults, adapter: adapter)
+
+        adapter.checkForUpdateInformation()
+        try await waitUntil { !updater.state.isPreparingUpdate }
+
+        #expect(transaction.preparationModes == [.automatic(deferBuild: true)])
+        #expect(transaction.clearPersistentFailureCount == 1)
+        #expect(updater.state.failure == nil)
+    }
+
+    @Test
     func localUpdateFailureReplacesTheStagedActionWithItsError() {
         let suiteName = "UpdaterViewModelTests.local-update-failure"
         let defaults = makeDefaults(suiteName: suiteName)
@@ -236,6 +341,56 @@ struct UpdaterViewModelTests {
         #expect(updater.state.stagedUpdate == nil)
         #expect(!updater.state.isPresentingStagedUpdate)
         #expect(updater.state.preparationError == "VoiceInk could not read credentials.")
+    }
+
+    @Test
+    func fixFailedUpdateLaunchesRecoveryAndReportsNonblockingCodexWarnings() throws {
+        let suiteName = "UpdaterViewModelTests.codex-recovery"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let adapter = OfficialUpdaterAdapterStub(canCheckForUpdates: true)
+        let recoveryLauncher = ForkUpdateRecoveryLauncherRecorder()
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: adapter,
+            recoveryLauncher: recoveryLauncher
+        )
+        let context = ForkUpdateAttemptContext(
+            attemptIdentifier: "attempt-14",
+            repositoryPath: "/Users/tester/git/VoiceInk",
+            originRepository: "dguay/VoiceInk",
+            upstreamRepository: "Beingpax/VoiceInk",
+            installedForkCommit: nil,
+            forkCommit: "1111111111111111111111111111111111111111",
+            upstreamCommit: "2222222222222222222222222222222222222222",
+            stage: .test,
+            conflicts: [],
+            logs: ["VoiceInk updater tests failed."]
+        )
+        let failure = ForkUpdateFailure(
+            stage: .test,
+            kind: .deterministic,
+            candidateIdentifier: "candidate",
+            message: "VoiceInk updater tests failed.",
+            recoverySuggestion: "Fix the tests, then resume the update.",
+            attemptContext: context
+        )
+        adapter.send(.preparationFailed(failure))
+
+        updater.fixFailedUpdate()
+
+        #expect(recoveryLauncher.launchedContexts == [context])
+        #expect(updater.state.recoveryWarning == nil)
+
+        recoveryLauncher.error = ForkUpdateError(message: "Codex is not installed or authenticated.")
+        updater.fixFailedUpdate()
+
+        #expect(updater.state.recoveryWarning == "Codex is not installed or authenticated.")
+        #expect(updater.state.failure == failure)
+        #expect(updater.state.canCheckForUpdates)
+
+        updater.checkForUpdates()
+        #expect(adapter.userInitiatedCheckCount == 1)
     }
 
     @Test
@@ -1128,27 +1283,44 @@ struct UpdaterViewModelTests {
 private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
     let preparationResult: ForkUpdatePreparationResult
     let restartResult: StagedForkCandidate?
+    let persistentFailure: ForkUpdateFailure?
     private(set) var prepareCount = 0
     private(set) var preparationModes: [ForkUpdatePreparationMode] = []
     private(set) var restartRequestCount = 0
+    private(set) var clearPersistentFailureCount = 0
     var canRestorePreviousVersion = false
     private(set) var restorePreviousVersionCount = 0
 
-    init(stagedCandidate: StagedForkCandidate, restartResult: StagedForkCandidate? = nil) {
+    init(
+        stagedCandidate: StagedForkCandidate,
+        restartResult: StagedForkCandidate? = nil,
+        persistentFailure: ForkUpdateFailure? = nil
+    ) {
         preparationResult = .staged(stagedCandidate)
         self.restartResult = restartResult
+        self.persistentFailure = persistentFailure
     }
 
     init(
         preparationResult: ForkUpdatePreparationResult,
-        restartResult: StagedForkCandidate? = nil
+        restartResult: StagedForkCandidate? = nil,
+        persistentFailure: ForkUpdateFailure? = nil
     ) {
         self.preparationResult = preparationResult
         self.restartResult = restartResult
+        self.persistentFailure = persistentFailure
     }
 
     func loadStagedCandidate() throws -> StagedForkCandidate? {
         nil
+    }
+
+    func loadPersistentFailure() throws -> ForkUpdateFailure? {
+        persistentFailure
+    }
+
+    func clearPersistentFailure() throws {
+        clearPersistentFailureCount += 1
     }
 
     func prepare(mode: ForkUpdatePreparationMode) async throws -> ForkUpdatePreparationResult {
@@ -1169,6 +1341,19 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
 
 private struct ForkUpdatePowerStateStub: ForkUpdatePowerStateProviding {
     let isLowPowerModeEnabled: Bool
+}
+
+@MainActor
+private final class ForkUpdateResumeRequestObserverStub: ForkUpdateResumeRequestObserving {
+    private var handler: ((String) -> Void)?
+
+    func observe(_ handler: @escaping (String) -> Void) {
+        self.handler = handler
+    }
+
+    func send(_ attemptIdentifier: String) {
+        handler?(attemptIdentifier)
+    }
 }
 
 private struct LocalUpdatePermissionStateProviderStub: LocalUpdatePermissionStateProviding {
@@ -1311,6 +1496,17 @@ private struct PrecleaningFailureInstallationRunner: ForkUpdateInstalling {
         )
         try FileManager.default.removeItem(at: pendingRecovery)
         throw ForkUpdateError(message: "Injected installer failure.")
+    }
+}
+
+@MainActor
+private final class ForkUpdateRecoveryLauncherRecorder: ForkUpdateRecoveryLaunching {
+    private(set) var launchedContexts: [ForkUpdateAttemptContext] = []
+    var error: Error?
+
+    func launchRecovery(for context: ForkUpdateAttemptContext) throws {
+        if let error { throw error }
+        launchedContexts.append(context)
     }
 }
 

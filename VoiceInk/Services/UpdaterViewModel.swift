@@ -45,6 +45,7 @@ struct UpdaterState: Equatable {
     var isPresentingStagedUpdate: Bool
     var preparationError: String?
     var failure: ForkUpdateFailure?
+    var recoveryWarning: String?
 }
 
 @MainActor
@@ -61,6 +62,7 @@ protocol UpdaterModule: AnyObject {
     func cancelRestorePreviousVersion()
     func restorePreviousVersion()
     func openUpdateLogs()
+    func fixFailedUpdate()
 }
 
 struct UpdaterAdapterState: Equatable {
@@ -85,6 +87,7 @@ enum UpdaterAdapterEvent: Equatable {
     case forkUpToDate(SourceProvenance)
     case stagedCandidate(StagedForkCandidate)
     case preparationFailed(ForkUpdateFailure)
+    case failedAttemptCleared
     case rollbackReported(LocalUpdateRollbackNotice)
     case rollbackCompleted
 }
@@ -139,6 +142,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
     private let automaticUpdateScheduler: (any AutomaticUpdateScheduling)?
     private let notificationDeliverer: any ForkUpdateNotificationDelivering
     private let logOpener: any ForkUpdateLogOpening
+    private let recoveryLauncher: any ForkUpdateRecoveryLaunching
     private var isUserInitiatedUpdateCheck = false
 
     @Published private(set) var state: UpdaterState
@@ -161,13 +165,15 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         sourceProvenance: SourceProvenance? = SourceProvenance.from(bundle: .main),
         automaticUpdateScheduler: (any AutomaticUpdateScheduling)? = nil,
         notificationDeliverer: any ForkUpdateNotificationDelivering = AppForkUpdateNotificationDeliverer(),
-        logOpener: any ForkUpdateLogOpening = WorkspaceForkUpdateLogOpener()
+        logOpener: any ForkUpdateLogOpening = WorkspaceForkUpdateLogOpener(),
+        recoveryLauncher: (any ForkUpdateRecoveryLaunching)? = nil
     ) {
         self.defaults = defaults
         self.adapter = adapter
         self.automaticUpdateScheduler = automaticUpdateScheduler
         self.notificationDeliverer = notificationDeliverer
         self.logOpener = logOpener
+        self.recoveryLauncher = recoveryLauncher ?? CodexForkUpdateRecoveryLauncher()
         state = UpdaterState(
             canCheckForUpdates: adapter.state.canCheckForUpdates,
             checksForUpdatesWhenDashboardAppears: Self.initialAutomaticCheckPreference(in: defaults),
@@ -179,7 +185,8 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             isPreparingUpdate: adapter.state.sessionInProgress,
             isPresentingStagedUpdate: false,
             preparationError: nil,
-            failure: nil
+            failure: nil,
+            recoveryWarning: nil
         )
 
         adapter.onEvent = { [weak self] event in
@@ -224,6 +231,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
 
         state.preparationError = nil
         state.failure = nil
+        state.recoveryWarning = nil
         defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
 
         // Any explicit check is interaction with the currently advertised update.
@@ -274,6 +282,19 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         logOpener.openLogs()
     }
 
+    func fixFailedUpdate() {
+        guard let context = state.failure?.attemptContext else {
+            state.recoveryWarning = "VoiceInk could not find the saved failed update attempt. Retry the update first."
+            return
+        }
+        do {
+            try recoveryLauncher.launchRecovery(for: context)
+            state.recoveryWarning = nil
+        } catch {
+            state.recoveryWarning = error.localizedDescription
+        }
+    }
+
     private func handle(_ event: UpdaterAdapterEvent) {
         switch event {
         case .stateChanged(let adapterState):
@@ -290,12 +311,14 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.isPresentingStagedUpdate = false
             state.preparationError = nil
             state.failure = nil
+            state.recoveryWarning = nil
             defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
         case .stagedCandidate(let candidate):
             state.stagedUpdate = candidate
             state.isPresentingStagedUpdate = true
             state.preparationError = nil
             state.failure = nil
+            state.recoveryWarning = nil
             defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
             notifyCandidateIfNeeded(candidate)
         case .preparationFailed(let failure):
@@ -303,11 +326,18 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.isPresentingStagedUpdate = false
             state.preparationError = failure.message
             state.failure = failure
+            state.recoveryWarning = nil
             notifyFailureIfNeeded(failure)
+        case .failedAttemptCleared:
+            state.preparationError = nil
+            state.failure = nil
+            state.recoveryWarning = nil
+            defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
         case .rollbackReported(let notice):
             if notice.initiator == .manual, notice.outcome == .succeeded {
                 state.failure = nil
                 state.preparationError = nil
+                state.recoveryWarning = nil
             }
             let title: String
             switch (notice.initiator, notice.outcome) {
@@ -332,6 +362,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         case .rollbackCompleted:
             state.failure = nil
             state.preparationError = nil
+            state.recoveryWarning = nil
             defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
             notificationDeliverer.deliver(
                 ForkUpdateUserNotification(
@@ -381,9 +412,15 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
                 identifier: identifier,
                 kind: kind,
                 title: failure.message,
-                actionLabel: "Open Logs"
+                actionLabel: failure.attemptContext == nil ? "Open Logs" : "Fix VoiceInk Update"
             ),
-            action: { [weak self] in self?.openUpdateLogs() }
+            action: { [weak self] in
+                if failure.attemptContext == nil {
+                    self?.openUpdateLogs()
+                } else {
+                    self?.fixFailedUpdate()
+                }
+            }
         )
     }
 
