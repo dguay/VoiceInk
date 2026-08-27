@@ -314,9 +314,19 @@ struct SettingsView: View {
                             Button("Retry") {
                                 updaterViewModel.checkForUpdates()
                             }
+                            if failure.attemptContext != nil {
+                                Button("Fix VoiceInk Update") {
+                                    updaterViewModel.fixFailedUpdate()
+                                }
+                            }
                             Button("Open Update Logs") {
                                 updaterViewModel.openUpdateLogs()
                             }
+                        }
+                        if let warning = updaterViewModel.state.recoveryWarning {
+                            Text(warning)
+                                .foregroundStyle(.orange)
+                                .textSelection(.enabled)
                         }
                     }
                     .font(.caption)

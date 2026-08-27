@@ -5,6 +5,56 @@ import Testing
 @Suite(.serialized)
 struct ForkUpdateReliabilityTests {
     @Test
+    func preparationFailureCarriesStructuredAttemptContext() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let resultPath = "$VOICEINK_UPDATE_RESULT_PATH"
+        let script = """
+        #!/bin/bash
+        /usr/bin/plutil -create xml1 "\(resultPath)"
+        /usr/bin/plutil -insert outcome -string failure "\(resultPath)"
+        /usr/bin/plutil -insert stage -string merge "\(resultPath)"
+        /usr/bin/plutil -insert kind -string deterministic "\(resultPath)"
+        /usr/bin/plutil -insert message -string 'The candidate conflicts with upstream.' "\(resultPath)"
+        /usr/bin/plutil -insert candidateIdentifier -string '1111111111111111111111111111111111111111:2222222222222222222222222222222222222222' "\(resultPath)"
+        /usr/bin/plutil -insert forkCommit -string 1111111111111111111111111111111111111111 "\(resultPath)"
+        /usr/bin/plutil -insert upstreamCommit -string 2222222222222222222222222222222222222222 "\(resultPath)"
+        /usr/bin/plutil -insert repositoryPath -string /Users/tester/git/VoiceInk "\(resultPath)"
+        /usr/bin/plutil -insert originRepository -string dguay/VoiceInk "\(resultPath)"
+        /usr/bin/plutil -insert upstreamRepository -string Beingpax/VoiceInk "\(resultPath)"
+        /usr/bin/plutil -insert conflicts -json '["VoiceInk/Services/ForkUpdater.swift"]' "\(resultPath)"
+        printf 'token=super-secret\nmerge conflict\n' >&2
+        exit 1
+        """
+        let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
+        try Data(script.utf8).write(to: scriptURL)
+        let runner = ProcessForkUpdateCommandRunner(retryDelays: [])
+
+        do {
+            _ = try await runner.run(
+                scriptURL: scriptURL,
+                manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+                installedForkCommit: "0000000000000000000000000000000000000000",
+                mode: .manual
+            )
+            Issue.record("Expected the updater command to fail")
+        } catch let failure as ForkUpdateFailure {
+            let context = try #require(failure.attemptContext)
+            #expect(context.repositoryPath == "/Users/tester/git/VoiceInk")
+            #expect(context.originRepository == "dguay/VoiceInk")
+            #expect(context.upstreamRepository == "Beingpax/VoiceInk")
+            #expect(context.installedForkCommit == "0000000000000000000000000000000000000000")
+            #expect(context.forkCommit == "1111111111111111111111111111111111111111")
+            #expect(context.upstreamCommit == "2222222222222222222222222222222222222222")
+            #expect(context.stage == .merge)
+            #expect(context.conflicts == ["VoiceInk/Services/ForkUpdater.swift"])
+            #expect(context.logs == ["token=[REDACTED]\nmerge conflict"])
+        }
+    }
+
+    @Test
     func transientNetworkFailureRetriesWithinTheBound() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -464,6 +514,86 @@ struct ForkUpdateReliabilityTests {
         #expect(!storedText.contains("git-password"))
         #expect(!storedText.contains("ghp_"))
         #expect(storedBytes <= 6_000)
+    }
+
+    @Test
+    func failedAttemptContextPersistsRecoveryEvidenceWithRedactedLogs() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let store = ForkUpdateAttemptContextStore(directoryURL: temporaryDirectory)
+        let context = ForkUpdateAttemptContext(
+            attemptIdentifier: "attempt-14",
+            repositoryPath: "/Users/tester/git/VoiceInk",
+            originRepository: "dguay/VoiceInk",
+            upstreamRepository: "Beingpax/VoiceInk",
+            installedForkCommit: "0000000000000000000000000000000000000000",
+            forkCommit: "1111111111111111111111111111111111111111",
+            upstreamCommit: "2222222222222222222222222222222222222222",
+            stage: .merge,
+            conflicts: ["VoiceInk/Services/ForkUpdater.swift"],
+            logs: ["merge failed token=super-secret", "selectedText=private words"]
+        )
+
+        let contextURL = try store.persist(context)
+        let persisted = try store.load()
+        let storedText = try String(contentsOf: contextURL, encoding: .utf8)
+
+        #expect(persisted.attemptIdentifier == "attempt-14")
+        #expect(persisted.repositoryPath == "/Users/tester/git/VoiceInk")
+        #expect(persisted.originRepository == "dguay/VoiceInk")
+        #expect(persisted.upstreamRepository == "Beingpax/VoiceInk")
+        #expect(persisted.installedForkCommit == "0000000000000000000000000000000000000000")
+        #expect(persisted.forkCommit == "1111111111111111111111111111111111111111")
+        #expect(persisted.upstreamCommit == "2222222222222222222222222222222222222222")
+        #expect(persisted.stage == .merge)
+        #expect(persisted.conflicts == ["VoiceInk/Services/ForkUpdater.swift"])
+        #expect(persisted.logs == ["merge failed token=[REDACTED]", "selectedText=[REDACTED]"])
+        #expect(!storedText.contains("super-secret"))
+        #expect(!storedText.contains("private words"))
+    }
+
+    @Test @MainActor
+    func persistentFailureKeepsItsAttemptContextAndClearsItAfterRecovery() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let contextStore = ForkUpdateAttemptContextStore(directoryURL: temporaryDirectory)
+        let context = ForkUpdateAttemptContext(
+            attemptIdentifier: "attempt-14",
+            repositoryPath: "/Users/tester/git/VoiceInk",
+            originRepository: "dguay/VoiceInk",
+            upstreamRepository: "Beingpax/VoiceInk",
+            installedForkCommit: nil,
+            forkCommit: "1111111111111111111111111111111111111111",
+            upstreamCommit: "2222222222222222222222222222222222222222",
+            stage: .test,
+            conflicts: [],
+            logs: ["VoiceInk updater tests failed."]
+        )
+        let failure = ForkUpdateFailure(
+            stage: .test,
+            kind: .deterministic,
+            candidateIdentifier: "candidate",
+            message: "VoiceInk updater tests failed.",
+            recoverySuggestion: "Fix the tests, then resume the update.",
+            attemptContext: context
+        )
+        let transaction = ForkUpdateTransaction(
+            scriptURL: temporaryDirectory.appendingPathComponent("prepare-local-update.sh"),
+            manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+            attemptContextStore: contextStore
+        )
+
+        try transaction.persistFailure(failure)
+
+        #expect(try transaction.loadPersistentFailure() == failure)
+        #expect(try contextStore.load() == context)
+
+        try transaction.clearPersistentFailure()
+
+        #expect(try transaction.loadPersistentFailure() == nil)
+        #expect(!FileManager.default.fileExists(atPath: contextStore.contextURL.path))
     }
 
     @Test

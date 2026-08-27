@@ -28,6 +28,7 @@ git -C "$seed_clone" push -u origin main >/dev/null
 git -C "$seed_clone" push upstream main >/dev/null
 git clone "$fork_bare" "$canonical_clone" >/dev/null
 git -C "$canonical_clone" remote add upstream "$upstream_bare"
+canonical_repository_path="$(cd "$canonical_clone" && pwd -P)"
 
 printf 'keep this work\n' > "$canonical_clone/uncommitted.txt"
 before_status="$(git -C "$canonical_clone" status --porcelain)"
@@ -71,7 +72,7 @@ set -euo pipefail
 [[ -f "$PWD/candidate-marker" ]]
 printf '%s|%s\n' "$PWD" "$*" >> "$XCODE_LOG"
 
-if [[ "${XCODE_SHOULD_FAIL:-0}" == 1 && " $* " == *" -only-testing:VoiceInkTests/UpdaterViewModelTests test "* ]]; then
+if [[ "${XCODE_SHOULD_FAIL:-0}" == 1 ]]; then
     printf 'error: deterministic updater test failure\n' >&2
     exit 1
 fi
@@ -158,7 +159,11 @@ fi
 failure_manifest="$fixture_root/failure/staged-candidate.plist"
 failure_result="$fixture_root/failure/preparation-result.plist"
 failure_state="$fixture_root/failure/failure-state.plist"
-xcode_count_before_failure="$(wc -l < "$xcode_log" 2>/dev/null || printf '0')"
+if [[ -f "$xcode_log" ]]; then
+    xcode_count_before_failure="$(wc -l < "$xcode_log")"
+else
+    xcode_count_before_failure=0
+fi
 if PATH="$fake_bin:$PATH" \
     CANONICAL_PATH="$canonical_clone" \
     XCODE_LOG="$xcode_log" \
@@ -176,6 +181,9 @@ fi
 xcode_count_after_failure="$(wc -l < "$xcode_log")"
 if [[ "$(/usr/bin/plutil -extract stage raw "$failure_result" 2>/dev/null || true)" != "test" \
     || "$(/usr/bin/plutil -extract candidateIdentifier raw "$failure_result" 2>/dev/null || true)" != "$candidate_sha:$upstream_sha" \
+    || "$(/usr/bin/plutil -extract repositoryPath raw "$failure_result" 2>/dev/null || true)" != "$canonical_repository_path" \
+    || "$(/usr/bin/plutil -extract originRepository raw "$failure_result" 2>/dev/null || true)" != "$fork_bare" \
+    || "$(/usr/bin/plutil -extract upstreamRepository raw "$failure_result" 2>/dev/null || true)" != "$upstream_bare" \
     || "$xcode_count_after_failure" -ne $((xcode_count_before_failure + 1)) ]]
 then
     printf 'prepare-local-update-test: deterministic failure result was not recorded\n' >&2
@@ -468,12 +476,14 @@ git -C "$seed_clone" add README.md
 git -C "$seed_clone" commit -m "feat: change upstream readme" >/dev/null
 git -C "$seed_clone" push upstream main >/dev/null
 conflict_manifest="$fixture_root/conflict/staged-candidate.plist"
+conflict_result="$fixture_root/conflict/preparation-result.plist"
 
 if PATH="$fake_bin:$PATH" \
     CANONICAL_PATH="$canonical_clone" \
     XCODE_LOG="$xcode_log" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
     VOICEINK_UPDATE_MANIFEST_PATH="$conflict_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$conflict_result" \
     /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
     > "$fixture_root/conflict-output.log" 2>&1
 then
@@ -484,6 +494,15 @@ fi
 [[ "$(git -C "$canonical_clone" rev-parse HEAD)" == "$before_head" ]]
 [[ "$(git -C "$canonical_clone" status --porcelain)" == "" ]]
 [[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+if [[ "$(/usr/bin/plutil -extract stage raw "$conflict_result" 2>/dev/null || true)" != "merge" \
+    || "$(/usr/bin/plutil -extract repositoryPath raw "$conflict_result" 2>/dev/null || true)" != "$canonical_repository_path" \
+    || "$(/usr/bin/plutil -extract originRepository raw "$conflict_result" 2>/dev/null || true)" != "$fork_bare" \
+    || "$(/usr/bin/plutil -extract upstreamRepository raw "$conflict_result" 2>/dev/null || true)" != "$upstream_bare" \
+    || "$(/usr/bin/plutil -extract conflicts.0 raw "$conflict_result" 2>/dev/null || true)" != "README.md" ]]
+then
+    printf 'prepare-local-update-test: merge conflict context was incomplete\n' >&2
+    exit 1
+fi
 if [[ "$(grep -Fc 'The fetched fork conflicts with upstream/main. Resolve the shared fork before retrying.' "$fixture_root/conflict-output.log")" -ne 1 ]]; then
     printf 'prepare-local-update-test: first Mac did not receive one actionable conflict\n' >&2
     exit 1

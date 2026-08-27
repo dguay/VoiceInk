@@ -214,6 +214,11 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         let kind: ForkUpdateFailureKind?
         let candidateIdentifier: String?
         let message: String?
+        let repositoryPath: String?
+        let originRepository: String?
+        let upstreamRepository: String?
+        let conflicts: [String]?
+        let attemptContext: ForkUpdateAttemptContext?
     }
 
     private let retryDelays: [TimeInterval]
@@ -260,7 +265,8 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                         scriptURL: scriptURL,
                         manifestURL: manifestURL,
                         installedForkCommit: installedForkCommit,
-                        mode: mode
+                        mode: mode,
+                        attemptIdentifier: attemptIdentifier
                     )
                     await Self.recordCompletedStages(
                         execution.completedStages,
@@ -329,7 +335,8 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         scriptURL: URL,
         manifestURL: URL,
         installedForkCommit: String?,
-        mode: ForkUpdatePreparationMode
+        mode: ForkUpdatePreparationMode,
+        attemptIdentifier: String
     ) throws -> Execution {
         let process = Process()
         process.qualityOfService = mode.isAutomatic ? .utility : .userInitiated
@@ -367,7 +374,9 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
             throw try executionFailure(
                 outputURL: outputURL,
                 resultURL: resultURL,
-                progressURL: progressURL
+                progressURL: progressURL,
+                attemptIdentifier: attemptIdentifier,
+                installedForkCommit: installedForkCommit
             )
         }
 
@@ -407,7 +416,9 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
     private static func executionFailure(
         outputURL: URL,
         resultURL: URL,
-        progressURL: URL
+        progressURL: URL,
+        attemptIdentifier: String,
+        installedForkCommit: String?
     ) throws -> ExecutionFailure {
         let fallbackMessage = try tailMessage(at: outputURL)
             ?? "VoiceInk could not prepare the local update."
@@ -417,7 +428,13 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         )
         let failure: ForkUpdateFailure
         if let report, report.outcome == "failure" {
-            failure = Self.failure(from: report, fallbackMessage: fallbackMessage)
+            failure = Self.failure(
+                from: report,
+                fallbackMessage: fallbackMessage,
+                attemptIdentifier: attemptIdentifier,
+                installedForkCommit: installedForkCommit,
+                redactedLog: ForkUpdateLogRedactor.sanitize(fallbackMessage)
+            )
         } else {
             failure = ForkUpdateFailure.classify(message: fallbackMessage)
         }
@@ -538,26 +555,44 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         }
     }
 
-    private static func failure(from report: Report, fallbackMessage: String) -> ForkUpdateFailure {
+    private static func failure(
+        from report: Report,
+        fallbackMessage: String,
+        attemptIdentifier: String? = nil,
+        installedForkCommit: String? = nil,
+        redactedLog: String? = nil
+    ) -> ForkUpdateFailure {
         let outputClassification = ForkUpdateFailure.classify(
             message: fallbackMessage,
             defaultStage: report.stage ?? .preflight,
             candidateIdentifier: report.candidateIdentifier
         )
         if outputClassification.kind == .transient {
-            return .reported(
+            return withAttemptContext(
+                .reported(
                 stage: outputClassification.stage,
                 kind: .transient,
                 candidateIdentifier: report.candidateIdentifier,
                 message: report.message ?? "VoiceInk could not reach an update dependency."
+                ),
+                from: report,
+                attemptIdentifier: attemptIdentifier,
+                installedForkCommit: installedForkCommit,
+                redactedLog: redactedLog
             )
         }
         if outputClassification.stage == .toolchain {
-            return .reported(
-                stage: .toolchain,
-                kind: .deterministic,
-                candidateIdentifier: report.candidateIdentifier,
-                message: "The installed Xcode toolchain is incompatible with this VoiceInk revision."
+            return withAttemptContext(
+                .reported(
+                    stage: .toolchain,
+                    kind: .deterministic,
+                    candidateIdentifier: report.candidateIdentifier,
+                    message: "The installed Xcode toolchain is incompatible with this VoiceInk revision."
+                ),
+                from: report,
+                attemptIdentifier: attemptIdentifier,
+                installedForkCommit: installedForkCommit,
+                redactedLog: redactedLog
             )
         }
         let classified = ForkUpdateFailure.classify(
@@ -565,11 +600,44 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
             defaultStage: report.stage ?? outputClassification.stage,
             candidateIdentifier: report.candidateIdentifier
         )
-        return .reported(
-            stage: report.stage ?? classified.stage,
-            kind: report.kind ?? classified.kind,
-            candidateIdentifier: report.candidateIdentifier,
-            message: report.message ?? fallbackMessage
+        return withAttemptContext(
+            .reported(
+                stage: report.stage ?? classified.stage,
+                kind: report.kind ?? classified.kind,
+                candidateIdentifier: report.candidateIdentifier,
+                message: report.message ?? fallbackMessage
+            ),
+            from: report,
+            attemptIdentifier: attemptIdentifier,
+            installedForkCommit: installedForkCommit,
+            redactedLog: redactedLog
+        )
+    }
+
+    private static func withAttemptContext(
+        _ failure: ForkUpdateFailure,
+        from report: Report,
+        attemptIdentifier: String?,
+        installedForkCommit: String?,
+        redactedLog: String?
+    ) -> ForkUpdateFailure {
+        if let context = report.attemptContext {
+            return failure.withAttemptContext(context)
+        }
+        guard let attemptIdentifier else { return failure }
+        return failure.withAttemptContext(
+            ForkUpdateAttemptContext(
+                attemptIdentifier: attemptIdentifier,
+                repositoryPath: report.repositoryPath ?? "",
+                originRepository: report.originRepository ?? "",
+                upstreamRepository: report.upstreamRepository ?? "",
+                installedForkCommit: installedForkCommit,
+                forkCommit: report.forkCommit,
+                upstreamCommit: report.upstreamCommit,
+                stage: report.stage ?? failure.stage,
+                conflicts: report.conflicts ?? [],
+                logs: redactedLog.map { [$0] } ?? []
+            )
         )
     }
 
@@ -823,6 +891,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
     private let restorationRunner: any ForkUpdateRestoring
     private let logger: any ForkUpdateLogging
     private let permissionStateProvider: any LocalUpdatePermissionStateProviding
+    private let attemptContextStore: ForkUpdateAttemptContextStore
 
     init(
         scriptURL: URL,
@@ -837,7 +906,8 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         installationRunner: any ForkUpdateInstalling = ProcessForkUpdateInstallationRunner(),
         restorationRunner: any ForkUpdateRestoring = ProcessForkUpdateRestorationRunner(),
         logger: any ForkUpdateLogging = ForkUpdateLogStore.shared,
-        permissionStateProvider: any LocalUpdatePermissionStateProviding = SystemLocalUpdatePermissionStateProvider()
+        permissionStateProvider: any LocalUpdatePermissionStateProviding = SystemLocalUpdatePermissionStateProvider(),
+        attemptContextStore: ForkUpdateAttemptContextStore = ForkUpdateAttemptContextStore()
     ) {
         self.scriptURL = scriptURL
         self.manifestURL = manifestURL
@@ -852,6 +922,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         self.restorationRunner = restorationRunner
         self.logger = logger
         self.permissionStateProvider = permissionStateProvider
+        self.attemptContextStore = attemptContextStore
     }
 
     static func production(
@@ -936,16 +1007,25 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try PropertyListEncoder().encode(failure).write(to: failureURL, options: .atomic)
+        let redactedFailure = failure.attemptContext.map { failure.withAttemptContext($0.redacted) }
+            ?? failure
+        try PropertyListEncoder().encode(redactedFailure).write(to: failureURL, options: .atomic)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
             ofItemAtPath: failureURL.path
         )
+        if let context = failure.attemptContext {
+            try attemptContextStore.persist(context)
+        } else {
+            try attemptContextStore.clear()
+        }
     }
 
     func clearPersistentFailure() throws {
-        guard FileManager.default.fileExists(atPath: persistentFailureURL.path) else { return }
-        try FileManager.default.removeItem(at: persistentFailureURL)
+        if FileManager.default.fileExists(atPath: persistentFailureURL.path) {
+            try FileManager.default.removeItem(at: persistentFailureURL)
+        }
+        try attemptContextStore.clear()
     }
 
     func clearPersistentRollbackNotice() throws {
@@ -1394,7 +1474,9 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
     private let powerState: any ForkUpdatePowerStateProviding
     private let defaults: UserDefaults
     private let now: () -> Date
+    private let resumeRequestObserver: (any ForkUpdateResumeRequestObserving)?
     private var stagedCandidate: StagedForkCandidate?
+    private var observesResumeRequests = false
 
     init(
         powerState: any ForkUpdatePowerStateProviding = SystemForkUpdatePowerState(),
@@ -1405,6 +1487,7 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
         self.powerState = powerState
         self.defaults = defaults
         self.now = now
+        resumeRequestObserver = nil
         state = .unavailable
     }
 
@@ -1412,12 +1495,15 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
         transaction: any ForkUpdateTransacting,
         powerState: any ForkUpdatePowerStateProviding = SystemForkUpdatePowerState(),
         defaults: UserDefaults = .standard,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        resumeRequestObserver: (any ForkUpdateResumeRequestObserving)? = nil
     ) {
         self.transaction = transaction
         self.powerState = powerState
         self.defaults = defaults
         self.now = now
+        self.resumeRequestObserver = resumeRequestObserver
+            ?? DistributedForkUpdateResumeRequestObserver()
         state = UpdaterAdapterState(
             canCheckForUpdates: true,
             sessionInProgress: false,
@@ -1431,6 +1517,12 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
     }
 
     func start() {
+        if !observesResumeRequests {
+            observesResumeRequests = true
+            resumeRequestObserver?.observe { [weak self] attemptIdentifier in
+                self?.resumeFailedAttempt(identifier: attemptIdentifier)
+            }
+        }
         onEvent?(.stateChanged(state))
         if let failure = try? transaction?.loadPersistentFailure() {
             onEvent?(.preparationFailed(failure))
@@ -1449,6 +1541,16 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
     }
 
     func checkForUpdates() {
+        startPreparation(mode: .manual)
+    }
+
+    private func resumeFailedAttempt(identifier: String) {
+        guard let transaction, !state.sessionInProgress else { return }
+        guard let failure = try? transaction.loadPersistentFailure(),
+              failure.attemptContext?.attemptIdentifier == identifier
+        else {
+            return
+        }
         startPreparation(mode: .manual)
     }
 
