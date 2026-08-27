@@ -97,6 +97,9 @@ recovery_state_mutation_started=false
 credential_replacement_started=false
 restore_complete=false
 needs_relaunch=false
+if [[ "$automatic" == true && "$resume" == false ]]; then
+    needs_relaunch=true
+fi
 
 replace_bundle_atomically() {
     local replacement_bundle="$1"
