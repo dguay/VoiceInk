@@ -309,13 +309,22 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
                 state.failure = nil
                 state.preparationError = nil
             }
+            let title: String
+            switch (notice.initiator, notice.outcome) {
+            case (.automatic, .succeeded):
+                title = "VoiceInk restored the previous version after the update failed."
+            case (.automatic, _):
+                title = "VoiceInk could not complete the automatic rollback."
+            case (.manual, .succeeded):
+                title = "VoiceInk restored the previous version."
+            case (.manual, _):
+                title = "VoiceInk could not restore the previous version."
+            }
             notificationDeliverer.deliver(
                 ForkUpdateUserNotification(
                     identifier: "rollback-\(notice.initiator.rawValue)-\(notice.candidateIdentifier)-\(notice.outcome.rawValue)",
                     kind: notice.outcome == .succeeded ? .rollbackSucceeded : .rollbackFailed,
-                    title: notice.outcome == .succeeded
-                        ? "VoiceInk restored the previous version after the update failed."
-                        : "VoiceInk could not complete the automatic rollback.",
+                    title: title,
                     actionLabel: "Open Logs"
                 ),
                 action: { [weak self] in self?.openUpdateLogs() }

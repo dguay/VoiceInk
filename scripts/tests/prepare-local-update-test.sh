@@ -182,6 +182,30 @@ then
     exit 1
 fi
 /bin/cp "$failure_result" "$failure_state"
+/usr/bin/plutil -insert kind -string transient "$failure_state"
+
+set +e
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    XCODE_SHOULD_FAIL=1 \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$failure_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$failure_result" \
+    VOICEINK_UPDATE_FAILURE_STATE_PATH="$failure_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/failure-transient-retry.log" 2>&1
+transient_retry_status=$?
+set -e
+xcode_count_after_transient_retry="$(wc -l < "$xcode_log")"
+if [[ "$transient_retry_status" -eq 0 \
+    || "$xcode_count_after_transient_retry" -ne $((xcode_count_after_failure + 1)) ]]
+then
+    printf 'prepare-local-update-test: persisted transient failure did not retry\n' >&2
+    exit 1
+fi
+
+/bin/cp "$failure_result" "$failure_state"
 /usr/bin/plutil -insert kind -string deterministic "$failure_state"
 
 PATH="$fake_bin:$PATH" \
@@ -193,7 +217,7 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_UPDATE_FAILURE_STATE_PATH="$failure_state" \
     /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
 if [[ "$(/usr/bin/plutil -extract outcome raw "$failure_result" 2>/dev/null || true)" != "failureSuppressed" \
-    || "$(wc -l < "$xcode_log")" -ne "$xcode_count_after_failure" ]]
+    || "$(wc -l < "$xcode_log")" -ne "$xcode_count_after_transient_retry" ]]
 then
     printf 'prepare-local-update-test: unchanged deterministic failure reran automatically\n' >&2
     exit 1
@@ -209,7 +233,7 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE=1 \
     /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
 if [[ ! -f "$failure_manifest" || -e "$failure_state" \
-    || "$(wc -l < "$xcode_log")" -ne $((xcode_count_after_failure + 3)) ]]
+    || "$(wc -l < "$xcode_log")" -ne $((xcode_count_after_transient_retry + 3)) ]]
 then
     printf 'prepare-local-update-test: explicit retry did not rerun the failed stage\n' >&2
     exit 1

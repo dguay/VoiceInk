@@ -101,10 +101,14 @@ exit_if_stage_failure_is_unchanged() {
     [[ -f "$failure_state_path" ]] || return 0
 
     local failed_candidate
+    local failed_kind
     local failed_stage
     failed_candidate="$(/usr/bin/plutil -extract candidateIdentifier raw "$failure_state_path" 2>/dev/null || true)"
+    failed_kind="$(/usr/bin/plutil -extract kind raw "$failure_state_path" 2>/dev/null || true)"
     failed_stage="$(/usr/bin/plutil -extract stage raw "$failure_state_path" 2>/dev/null || true)"
-    [[ "$failed_candidate" == "$candidate_identifier" && "$failed_stage" == "$current_stage" ]] \
+    [[ "$failed_kind" == "deterministic" \
+        && "$failed_candidate" == "$candidate_identifier" \
+        && "$failed_stage" == "$current_stage" ]] \
         || return 0
 
     write_suppressed_result

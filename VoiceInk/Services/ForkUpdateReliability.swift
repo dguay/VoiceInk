@@ -337,9 +337,9 @@ struct ForkUpdateLogArchive {
     }
 
     private func records(in url: URL) throws -> [ForkUpdateLogRecord] {
-        try String(contentsOf: url, encoding: .utf8)
-            .split(separator: "\n")
-            .compactMap { try? JSONDecoder().decode(ForkUpdateLogRecord.self, from: Data($0.utf8)) }
+        try Data(contentsOf: url)
+            .split(separator: 0x0A)
+            .compactMap { try? JSONDecoder().decode(ForkUpdateLogRecord.self, from: Data($0)) }
     }
 
     private func prune() throws {
@@ -363,7 +363,9 @@ struct ForkUpdateLogArchive {
             }
             let wasResolved = last.candidateIdentifier.map { candidate in
                 successfulCandidates.contains {
-                    $0.candidateIdentifier == candidate && $0.timestamp >= last.timestamp
+                    $0.candidateIdentifier == candidate
+                        && $0.stage == last.stage
+                        && $0.timestamp >= last.timestamp
                 }
             } ?? false
             return BundleEvidence(
@@ -436,17 +438,23 @@ struct ForkUpdateLogArchive {
 
     private static func sanitize(_ message: String) -> String {
         var sanitized = String(message.prefix(2_048))
-        let patterns = [
-            "(?i)bearer\\s+[^\\s,;]+",
-            "(?i)(authorization|api[_-]?key|token|secret|password|credential|transcript|selected[_-]?text|screenshot|clipboard)(\\s*[:=]\\s*|\\s+)[^\\r\\n]*",
+        let replacements = [
+            ("(?i)bearer\\s+[^\\s,;]+", "Bearer [REDACTED]"),
+            ("(?i)(https?://)[^\\s/@]+:[^\\s/@]+@", "$1[REDACTED]@"),
+            ("(?i)(https?://)[^\\s/@]+@", "$1[REDACTED]@"),
+            ("(?i)(github_pat_|gh[pousr]_)[A-Za-z0-9_]{20,}", "[REDACTED]"),
+            (
+                "(?i)(authorization|api[_-]?key|token|secret|password|credential|transcript|selected[_-]?text|screenshot|clipboard)(\\s*[:=]\\s*|\\s+)[^\\r\\n]*",
+                "$1=[REDACTED]"
+            ),
         ]
-        for pattern in patterns {
+        for (pattern, template) in replacements {
             guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
             let range = NSRange(sanitized.startIndex..., in: sanitized)
             sanitized = expression.stringByReplacingMatches(
                 in: sanitized,
                 range: range,
-                withTemplate: "$1=[REDACTED]"
+                withTemplate: template
             )
         }
         return sanitized

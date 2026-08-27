@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct StagedForkCandidate: Codable, Equatable {
@@ -189,6 +190,20 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
     private struct ExecutionFailure: Error {
         let failure: ForkUpdateFailure
         let completedStages: [ForkUpdateStage]
+        let forkCommit: String?
+        let upstreamCommit: String?
+
+        init(
+            failure: ForkUpdateFailure,
+            completedStages: [ForkUpdateStage],
+            forkCommit: String? = nil,
+            upstreamCommit: String? = nil
+        ) {
+            self.failure = failure
+            self.completedStages = completedStages
+            self.forkCommit = forkCommit
+            self.upstreamCommit = upstreamCommit
+        }
     }
 
     private struct Report: Decodable {
@@ -262,6 +277,9 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                     return execution.result
                 } catch let executionFailure as ExecutionFailure {
                     let failure = executionFailure.failure
+                    let identifierProvenance = Self.provenance(
+                        from: failure.candidateIdentifier
+                    )
                     await Self.recordCompletedStages(
                         executionFailure.completedStages,
                         result: nil,
@@ -276,7 +294,12 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                                 for: failure,
                                 attemptIdentifier: attemptIdentifier,
                                 outcome: .failed,
-                                retry: attempt
+                                retry: attempt,
+                                forkCommit: executionFailure.forkCommit
+                                    ?? identifierProvenance?.forkCommit
+                                    ?? installedForkCommit,
+                                upstreamCommit: executionFailure.upstreamCommit
+                                    ?? identifierProvenance?.upstreamCommit
                             )
                         )
                         throw failure
@@ -286,7 +309,12 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                             for: failure,
                             attemptIdentifier: attemptIdentifier,
                             outcome: .retrying,
-                            retry: attempt + 1
+                            retry: attempt + 1,
+                            forkCommit: executionFailure.forkCommit
+                                ?? identifierProvenance?.forkCommit
+                                ?? installedForkCommit,
+                            upstreamCommit: executionFailure.upstreamCommit
+                                ?? identifierProvenance?.upstreamCommit
                         )
                     )
                     try await sleep(retryDelays[attempt])
@@ -395,7 +423,9 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         }
         return ExecutionFailure(
             failure: failure,
-            completedStages: completedStages(at: progressURL)
+            completedStages: completedStages(at: progressURL),
+            forkCommit: report?.forkCommit,
+            upstreamCommit: report?.upstreamCommit
         )
     }
 
@@ -407,6 +437,16 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         let message = String(data: try reader.readToEnd() ?? Data(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return message.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private static func provenance(from candidateIdentifier: String?) -> SourceProvenance? {
+        guard let candidateIdentifier else { return nil }
+        let commits = candidateIdentifier.split(separator: ":", omittingEmptySubsequences: false)
+        guard commits.count == 2 else { return nil }
+        return SourceProvenance(
+            forkCommit: String(commits[0]),
+            upstreamCommit: String(commits[1])
+        )
     }
 
     private static func execution(
@@ -588,7 +628,9 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         for failure: ForkUpdateFailure,
         attemptIdentifier: String,
         outcome: ForkUpdateLogOutcome,
-        retry: Int?
+        retry: Int?,
+        forkCommit: String? = nil,
+        upstreamCommit: String? = nil
     ) -> ForkUpdateLogRecord {
         ForkUpdateLogRecord(
             timestamp: Date(),
@@ -596,8 +638,8 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
             stage: failure.stage,
             outcome: outcome,
             candidateIdentifier: failure.candidateIdentifier,
-            forkCommit: nil,
-            upstreamCommit: nil,
+            forkCommit: forkCommit,
+            upstreamCommit: upstreamCommit,
             retry: retry,
             message: failure.message
         )
@@ -605,56 +647,108 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
 }
 
 struct ProcessForkUpdateInstallationRunner: ForkUpdateInstalling {
+    private let retryDelays: [TimeInterval]
+    private let sleep: @Sendable (TimeInterval) async throws -> Void
+    private let logger: any ForkUpdateLogging
+
+    init(
+        retryDelays: [TimeInterval] = [1, 5],
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { delay in
+            try await Task.sleep(for: .seconds(delay))
+        },
+        logger: any ForkUpdateLogging = ForkUpdateLogStore.shared
+    ) {
+        self.retryDelays = retryDelays
+        self.sleep = sleep
+        self.logger = logger
+    }
+
     func install(_ request: ForkUpdateInstallationRequest) async throws -> ForkUpdateInstallationOutcome {
-        try await Task.detached {
-            let process = Process()
-            let outputURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("voiceink-install-\(UUID().uuidString).log")
-            _ = FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-            let output = try FileHandle(forWritingTo: outputURL)
-            defer {
-                try? output.close()
-                try? FileManager.default.removeItem(at: outputURL)
-            }
-
-            process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            process.arguments = [
-                request.scriptURL.path,
-                request.candidate.forkCommit,
-                request.manifestURL.path,
-                request.targetBundleURL.path,
-                request.backupBundleURL.path,
-                String(request.parentProcessIdentifier),
-            ]
-            process.standardOutput = output
-            process.standardError = output
-            var environment = ProcessInfo.processInfo.environment
-            environment["VOICEINK_UPDATE_CREDENTIAL_GENERATION"] = request.credentialGeneration
-            process.environment = environment
-
-            try process.run()
-            process.waitUntilExit()
-
-            switch process.terminationStatus {
-            case 0:
-                return .completed
-            case 75:
-                return .candidateStale
-            default:
-                try output.synchronize()
-                let reader = try FileHandle(forReadingFrom: outputURL)
-                defer { try? reader.close() }
-                let outputSize = try reader.seekToEnd()
-                try reader.seek(toOffset: outputSize > 16_384 ? outputSize - 16_384 : 0)
-                let outputData = try reader.readToEnd() ?? Data()
-                let message = String(data: outputData, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                throw ForkUpdateError(
-                    message: message.flatMap { $0.isEmpty ? nil : $0 }
-                        ?? "VoiceInk could not install the local update."
+        for attempt in 0 ... retryDelays.count {
+            do {
+                return try await Task.detached { try Self.runOnce(request) }.value
+            } catch let failure as ForkUpdateFailure {
+                guard
+                    failure.kind == .transient,
+                    attempt < retryDelays.count,
+                    Darwin.kill(request.parentProcessIdentifier, 0) == 0
+                else {
+                    throw failure
+                }
+                await logger.record(
+                    ForkUpdateLogRecord(
+                        timestamp: Date(),
+                        attemptIdentifier: "installation-\(request.candidate.forkCommit)",
+                        stage: .installation,
+                        outcome: .retrying,
+                        candidateIdentifier: request.candidate.forkCommit,
+                        forkCommit: request.candidate.forkCommit,
+                        upstreamCommit: request.candidate.upstreamCommit,
+                        retry: attempt + 1,
+                        message: failure.message
+                    )
                 )
+                try await sleep(retryDelays[attempt])
             }
-        }.value
+        }
+        throw ForkUpdateError(message: "VoiceInk exhausted its installation retry policy.")
+    }
+
+    private static func runOnce(
+        _ request: ForkUpdateInstallationRequest
+    ) throws -> ForkUpdateInstallationOutcome {
+        let process = Process()
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("voiceink-install-\(UUID().uuidString).log")
+        _ = FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+        let output = try FileHandle(forWritingTo: outputURL)
+        defer {
+            try? output.close()
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [
+            request.scriptURL.path,
+            request.candidate.forkCommit,
+            request.manifestURL.path,
+            request.targetBundleURL.path,
+            request.backupBundleURL.path,
+            String(request.parentProcessIdentifier),
+        ]
+        process.standardOutput = output
+        process.standardError = output
+        var environment = ProcessInfo.processInfo.environment
+        environment["VOICEINK_UPDATE_CREDENTIAL_GENERATION"] = request.credentialGeneration
+        process.environment = environment
+
+        try process.run()
+        process.waitUntilExit()
+        switch process.terminationStatus {
+        case 0:
+            return .completed
+        case 75:
+            return .candidateStale
+        default:
+            try output.synchronize()
+            let message = try tailMessage(at: outputURL)
+                ?? "VoiceInk could not install the local update."
+            throw ForkUpdateFailure.classify(
+                message: message,
+                defaultStage: .installation,
+                candidateIdentifier: request.candidate.forkCommit
+            )
+        }
+    }
+
+    private static func tailMessage(at url: URL) throws -> String? {
+        let reader = try FileHandle(forReadingFrom: url)
+        defer { try? reader.close() }
+        let size = try reader.seekToEnd()
+        try reader.seek(toOffset: size > 16_384 ? size - 16_384 : 0)
+        let message = String(data: try reader.readToEnd() ?? Data(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return message.flatMap { $0.isEmpty ? nil : $0 }
     }
 }
 

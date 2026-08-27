@@ -71,6 +71,8 @@ struct ForkUpdateReliabilityTests {
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
         let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
         let attemptsURL = temporaryDirectory.appendingPathComponent("attempts")
+        let forkCommit = "0123456789abcdef0123456789abcdef01234567"
+        let upstreamCommit = "fedcba9876543210fedcba9876543210fedcba98"
         let script = """
             #!/usr/bin/env bash
             attempts_file="$(dirname "$0")/attempts"
@@ -81,16 +83,21 @@ struct ForkUpdateReliabilityTests {
             /usr/bin/plutil -insert outcome -string failure "$VOICEINK_UPDATE_RESULT_PATH"
             /usr/bin/plutil -insert stage -string fetch "$VOICEINK_UPDATE_RESULT_PATH"
             /usr/bin/plutil -insert message -string 'VoiceInk could not fetch origin/main.' "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert candidateIdentifier -string \(forkCommit):\(upstreamCommit) "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert forkCommit -string \(forkCommit) "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert upstreamCommit -string \(upstreamCommit) "$VOICEINK_UPDATE_RESULT_PATH"
             printf 'fatal: Authentication failed for repository\n' >&2
             exit 1
             """
         try Data(script.utf8).write(to: scriptURL)
         let delays = DelayRecorder()
+        let logger = ForkUpdateLogRecorder()
 
         do {
             _ = try await ProcessForkUpdateCommandRunner(
                 retryDelays: [1, 2],
-                sleep: { delay in await delays.record(delay) }
+                sleep: { delay in await delays.record(delay) },
+                logger: logger
             ).run(
                 scriptURL: scriptURL,
                 manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
@@ -101,6 +108,113 @@ struct ForkUpdateReliabilityTests {
         } catch let failure as ForkUpdateFailure {
             #expect(failure.stage == .fetch)
             #expect(failure.kind == .deterministic)
+        }
+
+        #expect(try String(contentsOf: attemptsURL, encoding: .utf8) == "1")
+        #expect(await delays.values.isEmpty)
+        let records = await logger.records
+        #expect(records.last?.outcome == .failed)
+        #expect(records.last?.forkCommit == forkCommit)
+        #expect(records.last?.upstreamCommit == upstreamCommit)
+    }
+
+    @Test
+    func transientInstallationFailureRetriesOnlyWhileTheParentIsAlive() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("install-local-update.sh")
+        let attemptsURL = temporaryDirectory.appendingPathComponent("attempts")
+        let script = """
+            #!/usr/bin/env bash
+            attempts_file="$(dirname "$0")/attempts"
+            attempts=0
+            [[ ! -f "$attempts_file" ]] || attempts="$(< "$attempts_file")"
+            attempts=$((attempts + 1))
+            printf '%s' "$attempts" > "$attempts_file"
+            if [[ "$attempts" -lt 3 ]]; then
+                printf 'fatal: connection reset while fetching origin/main\n' >&2
+                exit 1
+            fi
+            exit 0
+            """
+        try Data(script.utf8).write(to: scriptURL)
+        let delays = DelayRecorder()
+        let logger = ForkUpdateLogRecorder()
+        let candidate = StagedForkCandidate(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
+            bundleURL: temporaryDirectory.appendingPathComponent("VoiceInk.app"),
+            preparedAt: Date()
+        )
+
+        let outcome = try await ProcessForkUpdateInstallationRunner(
+            retryDelays: [1, 2],
+            sleep: { delay in await delays.record(delay) },
+            logger: logger
+        ).install(
+            ForkUpdateInstallationRequest(
+                scriptURL: scriptURL,
+                candidate: candidate,
+                manifestURL: temporaryDirectory.appendingPathComponent("manifest.plist"),
+                targetBundleURL: temporaryDirectory.appendingPathComponent("Target.app"),
+                backupBundleURL: temporaryDirectory.appendingPathComponent("Backup.app"),
+                parentProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+                credentialGeneration: UUID().uuidString.lowercased()
+            )
+        )
+
+        #expect(outcome == .completed)
+        #expect(try String(contentsOf: attemptsURL, encoding: .utf8) == "3")
+        #expect(await delays.values == [1, 2])
+        #expect(await logger.records.filter { $0.outcome == .retrying }.count == 2)
+    }
+
+    @Test
+    func transientInstallationFailureDoesNotRetryAfterParentExit() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("install-local-update.sh")
+        let attemptsURL = temporaryDirectory.appendingPathComponent("attempts")
+        let script = """
+            #!/usr/bin/env bash
+            attempts_file="$(dirname "$0")/attempts"
+            attempts=0
+            [[ ! -f "$attempts_file" ]] || attempts="$(< "$attempts_file")"
+            printf '%s' "$((attempts + 1))" > "$attempts_file"
+            printf 'fatal: connection reset while publishing origin/main\n' >&2
+            exit 1
+            """
+        try Data(script.utf8).write(to: scriptURL)
+        let delays = DelayRecorder()
+        let candidate = StagedForkCandidate(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
+            bundleURL: temporaryDirectory.appendingPathComponent("VoiceInk.app"),
+            preparedAt: Date()
+        )
+
+        do {
+            _ = try await ProcessForkUpdateInstallationRunner(
+                retryDelays: [1, 2],
+                sleep: { delay in await delays.record(delay) }
+            ).install(
+                ForkUpdateInstallationRequest(
+                    scriptURL: scriptURL,
+                    candidate: candidate,
+                    manifestURL: temporaryDirectory.appendingPathComponent("manifest.plist"),
+                    targetBundleURL: temporaryDirectory.appendingPathComponent("Target.app"),
+                    backupBundleURL: temporaryDirectory.appendingPathComponent("Backup.app"),
+                    parentProcessIdentifier: Int32.max,
+                    credentialGeneration: UUID().uuidString.lowercased()
+                )
+            )
+            Issue.record("Expected the detached installation failure")
+        } catch let failure as ForkUpdateFailure {
+            #expect(failure.kind == .transient)
         }
 
         #expect(try String(contentsOf: attemptsURL, encoding: .utf8) == "1")
@@ -308,7 +422,7 @@ struct ForkUpdateReliabilityTests {
                 forkCommit: "0123456789abcdef0123456789abcdef01234567",
                 upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
                 retry: 1,
-                message: "transcript=very private phrase\nselectedText=multi word selection\nclipboard=copied phrase\nscreenshot=private image\nAuthorization: Bearer api-secret"
+                message: "transcript=very private phrase\nselectedText=multi word selection\nclipboard=copied phrase\nscreenshot=private image\nAuthorization: Bearer api-secret\nhttps://voiceink:git-password@example.com/repo\nghp_abcdefghijklmnopqrstuvwxyz123456"
             )
         )
         for index in 0 ..< 6 {
@@ -347,6 +461,8 @@ struct ForkUpdateReliabilityTests {
         #expect(!storedText.contains("selection"))
         #expect(!storedText.contains("clipboard=copy"))
         #expect(!storedText.contains("screenshot=image"))
+        #expect(!storedText.contains("git-password"))
+        #expect(!storedText.contains("ghp_"))
         #expect(storedBytes <= 6_000)
     }
 
@@ -380,6 +496,50 @@ struct ForkUpdateReliabilityTests {
         let records = await logger.loadRecords()
 
         #expect(records.contains { $0.attemptIdentifier == "preflight-failure" })
+    }
+
+    @Test
+    func successInAnotherStageDoesNotResolveAProtectedFailure() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let now = Date(timeIntervalSince1970: 1_787_400_000)
+        let logger = ForkUpdateLogStore(
+            directoryURL: temporaryDirectory,
+            now: { now },
+            maximumBytes: 350
+        )
+        await logger.record(
+            ForkUpdateLogRecord(
+                timestamp: now,
+                attemptIdentifier: "unresolved-build",
+                stage: .build,
+                outcome: .failed,
+                candidateIdentifier: "candidate",
+                forkCommit: "fork",
+                upstreamCommit: "upstream",
+                retry: nil,
+                message: "The build failed."
+            )
+        )
+        await logger.record(
+            ForkUpdateLogRecord(
+                timestamp: now.addingTimeInterval(1),
+                attemptIdentifier: "later-fetch",
+                stage: .fetch,
+                outcome: .succeeded,
+                candidateIdentifier: "candidate",
+                forkCommit: "fork",
+                upstreamCommit: "upstream",
+                retry: nil,
+                message: nil
+            )
+        )
+
+        let records = await logger.loadRecords()
+
+        #expect(records.contains { $0.attemptIdentifier == "unresolved-build" })
     }
 
     @Test
@@ -427,7 +587,7 @@ struct ForkUpdateReliabilityTests {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
-        try Data("corrupt-without-newline".utf8).write(
+        try Data([0xFF, 0xFE, 0xFD]).write(
             to: temporaryDirectory.appendingPathComponent("attempt-protected.jsonl")
         )
         let logger = ForkUpdateLogStore(directoryURL: temporaryDirectory, maximumBytes: 2_048)
@@ -656,6 +816,7 @@ struct ForkUpdateReliabilityTests {
         )
 
         #expect(notifications.notifications.map(\.kind) == [.permissionRegression, .rollbackSucceeded])
+        #expect(notifications.notifications.last?.title == "VoiceInk restored the previous version.")
         #expect(updater.state.failure == nil)
     }
 }
