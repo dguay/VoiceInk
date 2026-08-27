@@ -87,6 +87,7 @@ enum UpdaterAdapterEvent: Equatable {
     case forkUpToDate(SourceProvenance)
     case stagedCandidate(StagedForkCandidate)
     case preparationFailed(ForkUpdateFailure)
+    case failedAttemptCleared
     case rollbackReported(LocalUpdateRollbackNotice)
     case rollbackCompleted
 }
@@ -327,6 +328,11 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.failure = failure
             state.recoveryWarning = nil
             notifyFailureIfNeeded(failure)
+        case .failedAttemptCleared:
+            state.preparationError = nil
+            state.failure = nil
+            state.recoveryWarning = nil
+            defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
         case .rollbackReported(let notice):
             if notice.initiator == .manual, notice.outcome == .succeeded {
                 state.failure = nil

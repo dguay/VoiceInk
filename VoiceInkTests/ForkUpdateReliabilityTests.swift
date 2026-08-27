@@ -22,8 +22,8 @@ struct ForkUpdateReliabilityTests {
         /usr/bin/plutil -insert forkCommit -string 1111111111111111111111111111111111111111 "\(resultPath)"
         /usr/bin/plutil -insert upstreamCommit -string 2222222222222222222222222222222222222222 "\(resultPath)"
         /usr/bin/plutil -insert repositoryPath -string /Users/tester/git/VoiceInk "\(resultPath)"
-        /usr/bin/plutil -insert originRepository -string dguay/VoiceInk "\(resultPath)"
-        /usr/bin/plutil -insert upstreamRepository -string Beingpax/VoiceInk "\(resultPath)"
+        /usr/bin/plutil -insert originRepository -string https://build-user:origin-secret@github.com/dguay/VoiceInk.git "\(resultPath)"
+        /usr/bin/plutil -insert upstreamRepository -string https://github_pat_abcdefghijklmnopqrstuvwxyz@github.com/Beingpax/VoiceInk.git "\(resultPath)"
         /usr/bin/plutil -insert conflicts -json '["VoiceInk/Services/ForkUpdater.swift"]' "\(resultPath)"
         printf 'token=super-secret\nmerge conflict\n' >&2
         exit 1
@@ -43,8 +43,8 @@ struct ForkUpdateReliabilityTests {
         } catch let failure as ForkUpdateFailure {
             let context = try #require(failure.attemptContext)
             #expect(context.repositoryPath == "/Users/tester/git/VoiceInk")
-            #expect(context.originRepository == "dguay/VoiceInk")
-            #expect(context.upstreamRepository == "Beingpax/VoiceInk")
+            #expect(context.originRepository == "https://[REDACTED]@github.com/dguay/VoiceInk.git")
+            #expect(context.upstreamRepository == "https://[REDACTED]@github.com/Beingpax/VoiceInk.git")
             #expect(context.installedForkCommit == "0000000000000000000000000000000000000000")
             #expect(context.forkCommit == "1111111111111111111111111111111111111111")
             #expect(context.upstreamCommit == "2222222222222222222222222222222222222222")
@@ -525,8 +525,8 @@ struct ForkUpdateReliabilityTests {
         let context = ForkUpdateAttemptContext(
             attemptIdentifier: "attempt-14",
             repositoryPath: "/Users/tester/git/VoiceInk",
-            originRepository: "dguay/VoiceInk",
-            upstreamRepository: "Beingpax/VoiceInk",
+            originRepository: "https://build-user:origin-secret@github.com/dguay/VoiceInk.git",
+            upstreamRepository: "https://github_pat_abcdefghijklmnopqrstuvwxyz@github.com/Beingpax/VoiceInk.git",
             installedForkCommit: "0000000000000000000000000000000000000000",
             forkCommit: "1111111111111111111111111111111111111111",
             upstreamCommit: "2222222222222222222222222222222222222222",
@@ -541,8 +541,8 @@ struct ForkUpdateReliabilityTests {
 
         #expect(persisted.attemptIdentifier == "attempt-14")
         #expect(persisted.repositoryPath == "/Users/tester/git/VoiceInk")
-        #expect(persisted.originRepository == "dguay/VoiceInk")
-        #expect(persisted.upstreamRepository == "Beingpax/VoiceInk")
+        #expect(persisted.originRepository == "https://[REDACTED]@github.com/dguay/VoiceInk.git")
+        #expect(persisted.upstreamRepository == "https://[REDACTED]@github.com/Beingpax/VoiceInk.git")
         #expect(persisted.installedForkCommit == "0000000000000000000000000000000000000000")
         #expect(persisted.forkCommit == "1111111111111111111111111111111111111111")
         #expect(persisted.upstreamCommit == "2222222222222222222222222222222222222222")
@@ -551,6 +551,8 @@ struct ForkUpdateReliabilityTests {
         #expect(persisted.logs == ["merge failed token=[REDACTED]", "selectedText=[REDACTED]"])
         #expect(!storedText.contains("super-secret"))
         #expect(!storedText.contains("private words"))
+        #expect(!storedText.contains("origin-secret"))
+        #expect(!storedText.contains("github_pat_"))
     }
 
     @Test @MainActor

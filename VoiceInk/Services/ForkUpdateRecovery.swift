@@ -17,8 +17,8 @@ struct ForkUpdateAttemptContext: Codable, Equatable, Sendable {
         ForkUpdateAttemptContext(
             attemptIdentifier: attemptIdentifier,
             repositoryPath: repositoryPath,
-            originRepository: originRepository,
-            upstreamRepository: upstreamRepository,
+            originRepository: ForkUpdateLogRedactor.sanitize(originRepository),
+            upstreamRepository: ForkUpdateLogRedactor.sanitize(upstreamRepository),
             installedForkCommit: installedForkCommit,
             forkCommit: forkCommit,
             upstreamCommit: upstreamCommit,

@@ -297,24 +297,24 @@ struct UpdaterViewModelTests {
             recoverySuggestion: "Wait for the published repair.",
             attemptContext: context
         )
-        let publishedProvenance = SourceProvenance(
-            forkCommit: "3333333333333333333333333333333333333333",
-            upstreamCommit: "2222222222222222222222222222222222222222"
-        )
         let transaction = ForkUpdateTransactionStub(
-            preparationResult: .upToDate(publishedProvenance),
+            preparationResult: .buildDeferred(
+                candidateIdentifier: "3333333333333333333333333333333333333333:2222222222222222222222222222222222222222"
+            ),
             persistentFailure: failure
         )
-        let adapter = ForkUpdaterAdapter(transaction: transaction)
+        let adapter = ForkUpdaterAdapter(
+            transaction: transaction,
+            powerState: ForkUpdatePowerStateStub(isLowPowerModeEnabled: true)
+        )
         let updater: any UpdaterModule = UpdaterViewModel(defaults: defaults, adapter: adapter)
 
-        updater.checkForUpdates()
+        adapter.checkForUpdateInformation()
         try await waitUntil { !updater.state.isPreparingUpdate }
 
-        #expect(transaction.preparationModes == [.manual])
+        #expect(transaction.preparationModes == [.automatic(deferBuild: true)])
         #expect(transaction.clearPersistentFailureCount == 1)
         #expect(updater.state.failure == nil)
-        #expect(updater.state.sourceProvenance == publishedProvenance)
     }
 
     @Test

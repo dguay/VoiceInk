@@ -156,6 +156,30 @@ then
     exit 1
 fi
 
+fetch_failure_manifest="$fixture_root/fetch-failure/staged-candidate.plist"
+fetch_failure_result="$fixture_root/fetch-failure/preparation-result.plist"
+git -C "$canonical_clone" remote set-url upstream "$fixture_root/unavailable-upstream.git"
+if PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$fetch_failure_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$fetch_failure_result" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/fetch-failure.log" 2>&1
+then
+    printf 'prepare-local-update-test: unavailable upstream was accepted\n' >&2
+    exit 1
+fi
+git -C "$canonical_clone" remote set-url upstream "$upstream_bare"
+if [[ "$(/usr/bin/plutil -extract stage raw "$fetch_failure_result" 2>/dev/null || true)" != "fetch" \
+    || "$(/usr/bin/plutil -extract forkCommit raw "$fetch_failure_result" 2>/dev/null || true)" != "$candidate_sha" \
+    || "$(/usr/bin/plutil -extract upstreamCommit raw "$fetch_failure_result" 2>/dev/null || true)" != "$upstream_sha" ]]
+then
+    printf 'prepare-local-update-test: fetch failure did not retain known revisions\n' >&2
+    exit 1
+fi
+
 failure_manifest="$fixture_root/failure/staged-candidate.plist"
 failure_result="$fixture_root/failure/preparation-result.plist"
 failure_state="$fixture_root/failure/failure-state.plist"

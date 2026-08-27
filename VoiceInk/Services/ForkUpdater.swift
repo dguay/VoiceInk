@@ -42,7 +42,7 @@ struct StagedForkCandidate: Codable, Equatable {
 
 enum ForkUpdatePreparationResult: Equatable {
     case upToDate(SourceProvenance)
-    case buildDeferred
+    case buildDeferred(candidateIdentifier: String?)
     case staged(StagedForkCandidate)
     case failureSuppressed(ForkUpdateFailure)
 }
@@ -110,7 +110,7 @@ protocol ForkUpdateCommandRunning {
 
 enum ForkUpdateCommandResult: Equatable, Sendable {
     case upToDate(SourceProvenance)
-    case buildDeferred
+    case buildDeferred(candidateIdentifier: String?)
     case candidatePrepared(candidateIdentifier: String?)
     case failureSuppressed(ForkUpdateFailure)
 }
@@ -488,7 +488,10 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                 completedStages: stages
             )
         case "buildDeferred":
-            return Execution(result: .buildDeferred, completedStages: stages)
+            return Execution(
+                result: .buildDeferred(candidateIdentifier: report.candidateIdentifier),
+                completedStages: stages
+            )
         case "candidatePrepared":
             return Execution(
                 result: .candidatePrepared(candidateIdentifier: report.candidateIdentifier),
@@ -535,7 +538,9 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
             candidateIdentifier = candidate
         case .failureSuppressed(let failure):
             candidateIdentifier = failure.candidateIdentifier
-        case .buildDeferred, nil:
+        case .buildDeferred(let candidate):
+            candidateIdentifier = candidate
+        case nil:
             candidateIdentifier = failureCandidateIdentifier
         }
         for stage in stages {
@@ -622,7 +627,7 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         redactedLog: String?
     ) -> ForkUpdateFailure {
         if let context = report.attemptContext {
-            return failure.withAttemptContext(context)
+            return failure.withAttemptContext(context.redacted)
         }
         guard let attemptIdentifier else { return failure }
         return failure.withAttemptContext(
@@ -637,7 +642,7 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                 stage: report.stage ?? failure.stage,
                 conflicts: report.conflicts ?? [],
                 logs: redactedLog.map { [$0] } ?? []
-            )
+            ).redacted
         )
     }
 
@@ -658,13 +663,13 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                 retry: nil,
                 message: nil
             )
-        case .buildDeferred:
+        case .buildDeferred(let candidateIdentifier):
             return ForkUpdateLogRecord(
                 timestamp: Date(),
                 attemptIdentifier: attemptIdentifier,
                 stage: .build,
                 outcome: .succeeded,
-                candidateIdentifier: nil,
+                candidateIdentifier: candidateIdentifier,
                 forkCommit: nil,
                 upstreamCommit: nil,
                 retry: nil,
@@ -1055,8 +1060,8 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
         switch commandResult {
         case .upToDate(let provenance):
             return .upToDate(provenance)
-        case .buildDeferred:
-            return .buildDeferred
+        case .buildDeferred(let candidateIdentifier):
+            return .buildDeferred(candidateIdentifier: candidateIdentifier)
         case .candidatePrepared:
             break
         case .failureSuppressed(let failure):
@@ -1572,8 +1577,12 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
                     try? transaction.clearPersistentFailure()
                     self?.stagedCandidate = nil
                     self?.onEvent?(.forkUpToDate(provenance))
-                case .buildDeferred:
-                    break
+                case .buildDeferred(let candidateIdentifier):
+                    if let failure = try? transaction.loadPersistentFailure(),
+                       failure.candidateIdentifier != candidateIdentifier {
+                        try? transaction.clearPersistentFailure()
+                        self?.onEvent?(.failedAttemptCleared)
+                    }
                 case .staged(let candidate):
                     try? transaction.clearPersistentFailure()
                     self?.stagedCandidate = candidate

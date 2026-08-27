@@ -156,6 +156,8 @@ origin_repository="$(git -C "$repository_path" remote get-url origin 2>/dev/null
     || fail "The registered VoiceInk clone does not have an origin remote."
 upstream_repository="$(git -C "$repository_path" remote get-url upstream 2>/dev/null)" \
     || fail "The registered VoiceInk clone does not have an upstream remote."
+fork_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main 2>/dev/null || true)"
+upstream_commit="$(git -C "$repository_path" rev-parse refs/remotes/upstream/main 2>/dev/null || true)"
 
 [[ -z "$(git -C "$repository_path" status --porcelain)" ]] \
     || fail "The VoiceInk clone has uncommitted changes. Commit or stash them before preparing an update."
@@ -210,13 +212,13 @@ trap cleanup EXIT
 begin_stage fetch
 git -C "$repository_path" fetch origin main \
     || fail "VoiceInk could not fetch origin/main."
+fork_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main)" \
+    || fail "The fetched fork does not have origin/main."
 git -C "$repository_path" fetch upstream main \
     || fail "VoiceInk could not fetch upstream/main."
-
-fork_base_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main)" \
-    || fail "The fetched fork does not have origin/main."
 upstream_commit="$(git -C "$repository_path" rev-parse refs/remotes/upstream/main)" \
     || fail "The fetched upstream does not have upstream/main."
+fork_base_commit="$fork_commit"
 candidate_identifier="$fork_base_commit:$upstream_commit"
 record_stage_success fetch
 if [[ -f "$failure_state_path" ]]; then
