@@ -62,7 +62,7 @@ protocol UpdaterModule: AnyObject {
     func cancelRestorePreviousVersion()
     func restorePreviousVersion()
     func openUpdateLogs()
-    func fixFailedUpdate()
+    func copyFixUpdatePrompt()
 }
 
 struct UpdaterAdapterState: Equatable {
@@ -142,7 +142,9 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
     private let automaticUpdateScheduler: (any AutomaticUpdateScheduling)?
     private let notificationDeliverer: any ForkUpdateNotificationDelivering
     private let logOpener: any ForkUpdateLogOpening
-    private let recoveryLauncher: any ForkUpdateRecoveryLaunching
+    private let contextStore: ForkUpdateAttemptContextStore
+    private let promptCopier: any ForkUpdatePromptCopying
+    private let applicationExecutableURL: URL?
     private var isUserInitiatedUpdateCheck = false
 
     @Published private(set) var state: UpdaterState
@@ -166,14 +168,18 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         automaticUpdateScheduler: (any AutomaticUpdateScheduling)? = nil,
         notificationDeliverer: any ForkUpdateNotificationDelivering = AppForkUpdateNotificationDeliverer(),
         logOpener: any ForkUpdateLogOpening = WorkspaceForkUpdateLogOpener(),
-        recoveryLauncher: (any ForkUpdateRecoveryLaunching)? = nil
+        contextStore: ForkUpdateAttemptContextStore = ForkUpdateAttemptContextStore(),
+        promptCopier: (any ForkUpdatePromptCopying)? = nil,
+        applicationExecutableURL: URL? = Bundle.main.executableURL
     ) {
         self.defaults = defaults
         self.adapter = adapter
         self.automaticUpdateScheduler = automaticUpdateScheduler
         self.notificationDeliverer = notificationDeliverer
         self.logOpener = logOpener
-        self.recoveryLauncher = recoveryLauncher ?? CodexForkUpdateRecoveryLauncher()
+        self.contextStore = contextStore
+        self.promptCopier = promptCopier ?? PasteboardForkUpdatePromptCopier()
+        self.applicationExecutableURL = applicationExecutableURL
         state = UpdaterState(
             canCheckForUpdates: adapter.state.canCheckForUpdates,
             checksForUpdatesWhenDashboardAppears: Self.initialAutomaticCheckPreference(in: defaults),
@@ -282,13 +288,24 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         logOpener.openLogs()
     }
 
-    func fixFailedUpdate() {
+    func copyFixUpdatePrompt() {
         guard let context = state.failure?.attemptContext else {
             state.recoveryWarning = "VoiceInk could not find the saved failed update attempt. Retry the update first."
             return
         }
+        let resumeCommand = applicationExecutableURL.map {
+            ForkUpdateRecoveryPrompt.resumeCommand(
+                executableURL: $0,
+                contextURL: contextStore.contextURL
+            )
+        }
+        let prompt = ForkUpdateRecoveryPrompt.make(
+            context: context,
+            contextURL: contextStore.contextURL,
+            resumeCommand: resumeCommand
+        )
         do {
-            try recoveryLauncher.launchRecovery(for: context)
+            try promptCopier.copy(prompt)
             state.recoveryWarning = nil
         } catch {
             state.recoveryWarning = error.localizedDescription
@@ -412,13 +429,13 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
                 identifier: identifier,
                 kind: kind,
                 title: failure.message,
-                actionLabel: failure.attemptContext == nil ? "Open Logs" : "Fix VoiceInk Update"
+                actionLabel: failure.attemptContext == nil ? "Open Logs" : "Copy fix update prompt"
             ),
             action: { [weak self] in
                 if failure.attemptContext == nil {
                     self?.openUpdateLogs()
                 } else {
-                    self?.fixFailedUpdate()
+                    self?.copyFixUpdatePrompt()
                 }
             }
         )
