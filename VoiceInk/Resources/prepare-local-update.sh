@@ -320,7 +320,7 @@ fi
 xcode_arguments=(
     -project VoiceInk.xcodeproj
     -scheme VoiceInk
-    -configuration Debug
+    -configuration Release
     -derivedDataPath "$derived_data"
     -xcconfig LocalBuild.xcconfig
     -skipPackagePluginValidation
@@ -340,6 +340,7 @@ begin_stage test
 (
     cd "$candidate_worktree"
     xcodebuild "${xcode_arguments[@]}" \
+        ENABLE_TESTABILITY=YES \
         -only-testing:VoiceInkTests/UpdaterViewModelTests \
         test
 ) || fail "VoiceInk updater tests failed for this candidate."
@@ -347,6 +348,7 @@ begin_stage test
 (
     cd "$candidate_worktree"
     xcodebuild "${xcode_arguments[@]}" \
+        ENABLE_TESTABILITY=YES \
         -only-testing:VoiceInkTests \
         test
 ) || fail "VoiceInk unit tests failed for this candidate."
@@ -359,7 +361,7 @@ begin_stage build
 record_stage_success build
 
 begin_stage staging
-candidate_bundle="$derived_data/Build/Products/Debug/VoiceInk.app"
+candidate_bundle="$derived_data/Build/Products/Release/VoiceInk.app"
 [[ -d "$candidate_bundle" ]] || fail "The local build did not produce VoiceInk.app."
 codesign --verify --deep --strict "$candidate_bundle" \
     || fail "The candidate bundle failed signature validation."

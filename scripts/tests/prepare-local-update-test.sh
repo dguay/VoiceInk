@@ -90,7 +90,7 @@ for ((index = 0; index < ${#arguments[@]}; index++)); do
 done
 
 if [[ " ${arguments[*]} " == *" build "* ]]; then
-    app_path="$derived_data/Build/Products/Debug/VoiceInk.app"
+    app_path="$derived_data/Build/Products/Release/VoiceInk.app"
     mkdir -p "$app_path/Contents/MacOS"
     printf 'fixture executable\n' > "$app_path/Contents/MacOS/VoiceInk"
     /usr/bin/plutil -create xml1 "$app_path/Contents/Info.plist"
@@ -319,6 +319,8 @@ staged_bundle="$(/usr/bin/plutil -extract bundlePath raw "$manifest_path")"
 [[ -d "$staged_bundle" ]]
 grep -Fq -- '-only-testing:VoiceInkTests/UpdaterViewModelTests' "$xcode_log"
 grep -Fq -- '-only-testing:VoiceInkTests test' "$xcode_log"
+grep -Fq -- '-configuration Release' "$xcode_log"
+grep -Fq -- 'ENABLE_TESTABILITY=YES' "$xcode_log"
 grep -Fq -- ' build' "$xcode_log"
 
 stable_signing_config="$fixture_root/stable-signing.gitconfig"

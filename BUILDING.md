@@ -17,7 +17,7 @@ open ~/Downloads/VoiceInk.app
 
 `make bootstrap` discovers the clone from its own location, validates `dguay/VoiceInk` as `origin`, adds or validates `Beingpax/VoiceInk` as `upstream`, and records the clone path in global Git configuration as `voiceink.repositoryPath`. It also checks GitHub push access, Xcode and Command Line Tools, 15 GiB of free disk space, and permission to replace `/Applications/VoiceInk.app`. Override the last two checks with `VOICEINK_MIN_FREE_GIB` and `VOICEINK_INSTALLED_APP_PATH` when needed.
 
-A missing or unauthenticated Codex CLI produces a warning but does not stop bootstrap. After preflight checks, bootstrap prepares `whisper.xcframework` in `~/VoiceInk-Dependencies`, builds in `.local-build`, and copies `VoiceInk.app` to `~/Downloads`.
+A missing or unauthenticated Codex CLI produces a warning but does not stop bootstrap. After preflight checks, bootstrap prepares `whisper.xcframework` in `~/VoiceInk-Dependencies`, builds Release in `.local-build`, and copies `VoiceInk.app` to `~/Downloads`.
 
 It uses `LocalBuild.xcconfig`, `VoiceInk.local.entitlements`, and the `LOCAL_BUILD` Swift flag. Without an override, it uses the only available Apple Development identity or falls back to ad-hoc signing when none or multiple are found.
 
@@ -53,7 +53,7 @@ Local builds do not include iCloud dictionary sync or automatic updates. They em
 - `make bootstrap` — register the clone, run local-update preflights, and build with source provenance
 - `make whisper` — prepare `whisper.xcframework`
 - `make build` — build the standard Debug configuration
-- `make dev` — build and launch the app
+- `make dev` — build and launch `VoiceInk Dev.app`
 - `make run` — launch `~/Downloads/VoiceInk.app`, or the first app found in DerivedData
 - `make release` — create the signed release package
 - `make release-setup` — configure release notarization credentials
@@ -67,7 +67,7 @@ make setup
 open VoiceInk.xcodeproj
 ```
 
-Select the `VoiceInk` scheme and use the Debug configuration. Xcode uses the project’s normal signing settings; `LOCAL_BUILD` applies only through `make local`.
+Select the `VoiceInk` scheme. Run builds `VoiceInk Dev.app`; Archive uses Release. `LOCAL_BUILD` applies only through `make local`.
 
 ## Troubleshooting
 

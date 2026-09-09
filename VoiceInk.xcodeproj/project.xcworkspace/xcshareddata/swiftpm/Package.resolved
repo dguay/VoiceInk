@@ -1,5 +1,5 @@
 {
-  "originHash" : "36a14f273cedd455935e54109427ec0c39e0577d60902a4811ccfcfdb29c6546",
+  "originHash" : "15c38058afe4ec7fe9d718e5c988a04a0d0f495adc1485cf989bdc8b7a560ab7",
   "pins" : [
     {
       "identity" : "axswift",
@@ -42,7 +42,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Beingpax/LLMkit.git",
       "state" : {
-        "revision" : "95b29c2e1ad22754c2f21495aafb483874c8f06c"
+        "revision" : "1fc213b8e37ea8b8a755dd30eaf50fa090cd4241"
       }
     },
     {
@@ -51,7 +51,7 @@
       "location" : "https://github.com/Beingpax/mediaremote-adapter",
       "state" : {
         "branch" : "master",
-        "revision" : "b97fa53f0654c8e33519e8a601b0bead3abd310a"
+        "revision" : "cf30c4f1af29b5829d859f088f8dbdf12611a046"
       }
     },
     {
