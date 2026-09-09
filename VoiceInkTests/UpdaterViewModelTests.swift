@@ -904,7 +904,49 @@ struct UpdaterViewModelTests {
     }
 
     @Test
-    func launchRejectsRecoveryGenerationsThatDoNotMatchTheInstalledBundle() throws {
+    func launchDiscardsSettledRecoveryThatDoesNotMatchTheInstalledBundle() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let installedBundle = temporaryDirectory.appendingPathComponent("VoiceInk.app", isDirectory: true)
+        let recoveryRoot = temporaryDirectory.appendingPathComponent("Recovery", isDirectory: true)
+        let generation = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        try FileManager.default.createDirectory(
+            at: installedBundle.appendingPathComponent("Contents", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try PropertyListSerialization.data(
+            fromPropertyList: [
+                SourceProvenance.forkCommitInfoKey: "1111111111111111111111111111111111111111",
+            ],
+            format: .xml,
+            options: 0
+        ).write(to: installedBundle.appendingPathComponent("Contents/Info.plist"))
+        try writeRecoveryState(
+            LocalUpdateRecoveryState(
+                previousForkCommit: "2222222222222222222222222222222222222222",
+                candidateForkCommit: "3333333333333333333333333333333333333333",
+                credentialGeneration: generation,
+                suppressedForkCommit: nil,
+                installInProgress: false,
+                restoreInProgress: false
+            ),
+            marker: "mismatch",
+            at: recoveryRoot
+        )
+        let credentialStore = ForkUpdateCredentialRestorerStub()
+
+        try LocalUpdateRecoveryReconciler(credentialStore: credentialStore).reconcile(
+            installedBundleURL: installedBundle,
+            recoveryRootURL: recoveryRoot
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: recoveryRoot.path))
+        #expect(credentialStore.deletedGenerations == [generation])
+    }
+
+    @Test
+    func launchRejectsAnInProgressRecoveryThatDoesNotMatchTheInstalledBundle() throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let installedBundle = temporaryDirectory.appendingPathComponent("VoiceInk.app", isDirectory: true)
@@ -927,10 +969,10 @@ struct UpdaterViewModelTests {
                 candidateForkCommit: "3333333333333333333333333333333333333333",
                 credentialGeneration: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 suppressedForkCommit: nil,
-                installInProgress: false,
+                installInProgress: true,
                 restoreInProgress: false
             ),
-            marker: "mismatch",
+            marker: "in-progress",
             at: recoveryRoot
         )
 
@@ -939,7 +981,7 @@ struct UpdaterViewModelTests {
                 installedBundleURL: installedBundle,
                 recoveryRootURL: recoveryRoot
             )
-            Issue.record("Expected mismatched recovery generations to stop launch")
+            Issue.record("Expected an in-progress mismatched recovery to stop launch")
         } catch {
             #expect(error.localizedDescription.contains("does not match the installed app"))
         }
