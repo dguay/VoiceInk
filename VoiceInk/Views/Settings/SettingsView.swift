@@ -29,6 +29,7 @@ struct SettingsView: View {
 
     @State private var isMiddleClickExpanded = false
     @State private var isRestoreClipboardExpanded = false
+    @State private var copiedFixUpdatePrompt = false
 
     var body: some View {
         Form {
@@ -315,8 +316,9 @@ struct SettingsView: View {
                                 updaterViewModel.checkForUpdates()
                             }
                             if failure.attemptContext != nil {
-                                Button("Fix VoiceInk Update") {
-                                    updaterViewModel.fixFailedUpdate()
+                                Button(copiedFixUpdatePrompt ? "Copied" : "Copy fix update prompt") {
+                                    updaterViewModel.copyFixUpdatePrompt()
+                                    copiedFixUpdatePrompt = updaterViewModel.state.recoveryWarning == nil
                                 }
                             }
                             Button("Open Update Logs") {
@@ -330,6 +332,9 @@ struct SettingsView: View {
                         }
                     }
                     .font(.caption)
+                    .onChange(of: failure.attemptContext?.attemptIdentifier) { _, _ in
+                        copiedFixUpdatePrompt = false
+                    }
                 } else if let preparationError = updaterViewModel.state.preparationError {
                     Text(preparationError)
                         .font(.caption)

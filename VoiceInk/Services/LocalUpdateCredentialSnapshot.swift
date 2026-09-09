@@ -279,9 +279,21 @@ struct LocalUpdateRecoveryReconciler {
             return
         }
 
-        throw ForkUpdateError(
-            message: "VoiceInk found an updater recovery transaction that does not match the installed app."
-        )
+        let recoveryURLs = [pending, root, previous]
+        for url in recoveryURLs {
+            guard let state = try state(at: url) else { continue }
+            if state.installInProgress == true || state.restoreInProgress == true {
+                throw ForkUpdateError(
+                    message: "VoiceInk found an updater recovery transaction that does not match the installed app."
+                )
+            }
+        }
+        // Settled leftover from a previous updater generation. Copying a local
+        // build over /Applications produces this mismatch; discard it instead
+        // of refusing to launch.
+        for url in recoveryURLs {
+            try removeRecovery(at: url, preserving: nil)
+        }
     }
 
     private func activatePending(
