@@ -479,6 +479,14 @@ private struct HistoryCardRow: View {
     let onShowInfo: () -> Void
 
     @State private var selectedTab: TranscriptionTab = .original
+    @State private var didCopyCollapsedText = false
+
+    private var preferredCopyText: String {
+        guard let enhancedText = transcription.enhancedText, !enhancedText.isEmpty else {
+            return transcription.text
+        }
+        return enhancedText
+    }
 
     private var displayText: String {
         switch selectedTab {
@@ -513,12 +521,29 @@ private struct HistoryCardRow: View {
                 .labelsHidden()
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(transcription.timestamp, format: .dateTime.month(.abbreviated).day().hour().minute())
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
+                    HStack(spacing: 4) {
+                        Text(transcription.timestamp, format: .dateTime.month(.abbreviated).day().hour().minute())
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+
+                        if !isExpanded {
+                            Button {
+                                copyCollapsedText()
+                            } label: {
+                                Image(systemName: didCopyCollapsedText ? "checkmark" : "doc.on.doc")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 14, height: 14)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Copy transcription")
+                            .accessibilityLabel("Copy transcription")
+                        }
+                    }
 
                     if !isExpanded {
-                        Text(transcription.enhancedText ?? transcription.text)
+                        Text(preferredCopyText)
                             .font(.system(size: 13))
                             .lineLimit(2)
                             .foregroundColor(.primary)
@@ -540,6 +565,14 @@ private struct HistoryCardRow: View {
                 expandedContent
                     .padding(.top, 10)
             }
+        }
+    }
+
+    private func copyCollapsedText() {
+        let _ = ClipboardManager.copyToClipboard(preferredCopyText)
+        withAnimation { didCopyCollapsedText = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            withAnimation { didCopyCollapsedText = false }
         }
     }
 
