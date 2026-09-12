@@ -1,5 +1,50 @@
 import SwiftUI
 
+struct DictionaryEdgeActionButton: View {
+    let title: LocalizedStringKey
+    let systemImage: String
+    var shortcut: String? = nil
+    let help: LocalizedStringKey
+    var isDisabled = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .semibold))
+
+                Text(title)
+                    .lineLimit(1)
+
+                if let shortcut {
+                    Text(shortcut)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(AppTheme.Text.muted)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 3)
+                        .background(AppTheme.Surface.controlActive, in: RoundedRectangle(cornerRadius: 5))
+                }
+            }
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(isDisabled ? AppTheme.Text.muted : AppTheme.Text.secondary)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background {
+                RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
+                    .fill(AppTheme.Surface.control)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
+                            .strokeBorder(AppTheme.Border.card, lineWidth: 1)
+                    }
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .help(help)
+    }
+}
+
 struct DictionarySettingsView: View {
     @State private var selectedSection: DictionarySection = .replacements
     @State private var isShowingSettings = false

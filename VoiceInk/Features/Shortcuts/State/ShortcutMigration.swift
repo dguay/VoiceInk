@@ -265,7 +265,7 @@ enum ShortcutMigration {
             return ["retryLastTranscription"]
         case .cancelRecorder:
             return ["cancelRecorder"]
-        case .openHistoryWindow:
+        case .openQuickHistory:
             return ["openHistoryWindow"]
         case .quickAddToDictionary:
             return ["quickAddToDictionary"]

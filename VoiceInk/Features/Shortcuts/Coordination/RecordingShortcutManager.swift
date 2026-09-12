@@ -222,11 +222,8 @@ class RecordingShortcutManager: ObservableObject {
                 serviceRegistry: engine.serviceRegistry,
                 enhancementService: engine.enhancementService
             )
-        case .openHistoryWindow:
-            HistoryWindowController.shared.showHistoryWindow(
-                modelContainer: engine.modelContext.container,
-                engine: engine
-            )
+        case .openQuickHistory:
+            QuickHistoryController.shared.show(modelContext: engine.modelContext, engine: engine)
         case .quickAddToDictionary:
             DictionaryQuickAddManager.shared.toggle(modelContainer: engine.modelContext.container)
         default:

@@ -36,44 +36,24 @@ struct VocabularyView: View {
         UserDefaults.standard.set(sortMode.rawValue, forKey: "vocabularySortMode")
     }
 
-    private var shouldShowAddButton: Bool {
-        !newWord.isEmpty
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                TextField("", text: $newWord, prompt: Text("Add word to vocabulary"))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 13))
-                    .onSubmit { addWords() }
-                    .labelsHidden()
-
-                if shouldShowAddButton {
-                    AddIconButton(
-                        helpText: "Add word",
-                        isDisabled: newWord.isEmpty,
-                        action: addWords
-                    )
-                }
-            }
-            .animation(.easeInOut(duration: 0.2), value: shouldShowAddButton)
-
             if !vocabularyWords.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
-                    Button(action: toggleSort) {
-                        HStack(spacing: 4) {
-                            Text(String(localized: "Vocabulary Words (\(vocabularyWords.count))"))
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(.secondary)
+                    HStack {
+                        Text(String(localized: "Vocabulary Words (\(vocabularyWords.count))"))
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(AppTheme.Text.secondary)
 
-                            Image(systemName: sortMode == .wordAsc ? "chevron.up" : "chevron.down")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                        Spacer()
+
+                        DictionaryEdgeActionButton(
+                            title: sortMode == .wordAsc ? "ASC" : "DESC",
+                            systemImage: sortMode == .wordAsc ? "chevron.up" : "chevron.down",
+                            help: "Sort alphabetically",
+                            action: toggleSort
+                        )
                     }
-                    .buttonStyle(.plain)
-                    .help("Sort alphabetically")
 
                     FlowLayout(spacing: 8) {
                         ForEach(sortedItems) { item in
@@ -85,6 +65,25 @@ struct VocabularyView: View {
                     .padding(.vertical, 4)
                 }
                 .padding(.top, 4)
+            }
+
+            TextField("", text: $newWord, prompt: Text("Add word to vocabulary"))
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13))
+                .onSubmit { addWords() }
+                .labelsHidden()
+
+            HStack {
+                Spacer()
+
+                DictionaryEdgeActionButton(
+                    title: "Add",
+                    systemImage: "plus",
+                    shortcut: "↵",
+                    help: "Add word",
+                    isDisabled: newWord.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    action: addWords
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

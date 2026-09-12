@@ -1,19 +1,24 @@
 import SwiftData
 import SwiftUI
 
-struct InlineHistoryView: View {
+struct HistoryView: View {
+    private struct PaginationCursor {
+        let timestamp: Date
+        let id: UUID
+    }
+
     @Environment(\.modelContext) private var modelContext
     @State private var searchText = ""
     @State private var expandedId: UUID?
     @State private var selectedTranscriptions: Set<Transcription> = []
     @State private var showDeleteConfirmation = false
     @State private var isPanelPresented = false
-    @State private var panelMode: InlineHistoryPanelMode = .info
+    @State private var panelMode: HistoryPanelMode = .info
     @State private var panelTranscriptionId: UUID?
     @State private var displayedTranscriptions: [Transcription] = []
     @State private var isLoading = false
     @State private var hasMoreContent = true
-    @State private var lastTimestamp: Date?
+    @State private var paginationCursor: PaginationCursor?
     @State private var isViewCurrentlyVisible = false
 
     private let exportService = VoiceInkCSVExportService()
@@ -30,31 +35,45 @@ struct InlineHistoryView: View {
         return descriptor
     }
 
-    private func cursorQueryDescriptor(after timestamp: Date? = nil) -> FetchDescriptor<Transcription> {
+    private func cursorQueryDescriptor(after cursor: PaginationCursor? = nil) -> FetchDescriptor<Transcription> {
         var descriptor = FetchDescriptor<Transcription>(
-            sortBy: [SortDescriptor(\Transcription.timestamp, order: .reverse)]
+            sortBy: [
+                SortDescriptor(\Transcription.timestamp, order: .reverse),
+                SortDescriptor(\Transcription.id, order: .reverse),
+            ]
         )
 
-        if let timestamp = timestamp {
-            if !searchText.isEmpty {
+        if !searchText.isEmpty {
+            let query = searchText
+            if let cursor {
+                let cursorTimestamp = cursor.timestamp
+                let cursorID = cursor.id
                 descriptor.predicate = #Predicate<Transcription> { transcription in
-                    (transcription.text.localizedStandardContains(searchText)
-                        || (transcription.enhancedText?.localizedStandardContains(searchText) ?? false))
-                        && transcription.timestamp < timestamp
+                    (transcription.text.localizedStandardContains(query)
+                        || (transcription.enhancedText?.localizedStandardContains(query) ?? false))
+                        && (transcription.timestamp < cursorTimestamp
+                            || (transcription.timestamp == cursorTimestamp && transcription.id < cursorID))
                 }
             } else {
                 descriptor.predicate = #Predicate<Transcription> { transcription in
-                    transcription.timestamp < timestamp
+                    transcription.text.localizedStandardContains(query)
+                        || (transcription.enhancedText?.localizedStandardContains(query) ?? false)
                 }
             }
-        } else if !searchText.isEmpty {
-            descriptor.predicate = #Predicate<Transcription> { transcription in
-                transcription.text.localizedStandardContains(searchText)
-                    || (transcription.enhancedText?.localizedStandardContains(searchText) ?? false)
+        } else {
+            if let cursor {
+                let cursorTimestamp = cursor.timestamp
+                let cursorID = cursor.id
+                descriptor.predicate = #Predicate<Transcription> { transcription in
+                    transcription.timestamp < cursorTimestamp
+                        || (transcription.timestamp == cursorTimestamp && transcription.id < cursorID)
+                }
             }
         }
 
-        descriptor.fetchLimit = pageSize
+        // Fetch one extra row so the UI can determine whether another page exists.
+        descriptor.fetchLimit = pageSize + 1
+
         return descriptor
     }
 
@@ -67,7 +86,7 @@ struct InlineHistoryView: View {
         return displayedTranscriptions.first { $0.id == id }
     }
 
-    private func openPanel(mode: InlineHistoryPanelMode, transcriptionID: UUID? = nil) {
+    private func openPanel(mode: HistoryPanelMode, transcriptionID: UUID? = nil) {
         panelMode = mode
         panelTranscriptionId = transcriptionID
 
@@ -345,11 +364,12 @@ struct InlineHistoryView: View {
         defer { isLoading = false }
 
         do {
-            lastTimestamp = nil
+            paginationCursor = nil
             let items = try modelContext.fetch(cursorQueryDescriptor())
-            displayedTranscriptions = items
-            lastTimestamp = items.last?.timestamp
-            hasMoreContent = items.count == pageSize
+            let page = Array(items.prefix(pageSize))
+            displayedTranscriptions = page
+            paginationCursor = page.last.map { PaginationCursor(timestamp: $0.timestamp, id: $0.id) }
+            hasMoreContent = items.count > pageSize
         } catch {
             print("Error loading transcriptions: \(error)")
         }
@@ -357,16 +377,17 @@ struct InlineHistoryView: View {
 
     @MainActor
     private func loadMoreContent() async {
-        guard !isLoading, hasMoreContent, let lastTimestamp = lastTimestamp else { return }
+        guard !isLoading, hasMoreContent, let paginationCursor else { return }
 
         isLoading = true
         defer { isLoading = false }
 
         do {
-            let newItems = try modelContext.fetch(cursorQueryDescriptor(after: lastTimestamp))
-            displayedTranscriptions.append(contentsOf: newItems)
-            self.lastTimestamp = newItems.last?.timestamp
-            hasMoreContent = newItems.count == pageSize
+            let items = try modelContext.fetch(cursorQueryDescriptor(after: paginationCursor))
+            let page = Array(items.prefix(pageSize))
+            displayedTranscriptions.append(contentsOf: page)
+            self.paginationCursor = page.last.map { PaginationCursor(timestamp: $0.timestamp, id: $0.id) }
+            hasMoreContent = items.count > pageSize
         } catch {
             print("Error loading more transcriptions: \(error)")
         }
@@ -375,7 +396,7 @@ struct InlineHistoryView: View {
     @MainActor
     private func resetPagination() {
         displayedTranscriptions = []
-        lastTimestamp = nil
+        paginationCursor = nil
         hasMoreContent = true
         isLoading = false
     }
@@ -462,7 +483,7 @@ struct InlineHistoryView: View {
     }
 }
 
-private enum InlineHistoryPanelMode {
+private enum HistoryPanelMode {
     case info
     case analysis
     case historySettings

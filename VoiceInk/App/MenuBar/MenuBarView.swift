@@ -124,8 +124,8 @@ struct MenuBarView: View {
             }
             .keyboardShortcut("c", modifiers: [.command, .shift])
 
-            Button("History") {
-                menuBarManager.openHistoryWindow()
+            Button("Quick History") {
+                menuBarManager.openQuickHistory()
             }
             .keyboardShortcut("h", modifiers: [.command, .shift])
 

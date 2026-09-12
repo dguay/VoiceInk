@@ -160,7 +160,7 @@ class ImportExportService {
             retryLastTranscriptionShortcut: ShortcutStore.shortcut(for: .retryLastTranscription).map(
                 ShortcutBackup.init),
             cancelRecorderShortcut: ShortcutStore.shortcut(for: .cancelRecorder).map(ShortcutBackup.init),
-            openHistoryWindowShortcut: ShortcutStore.shortcut(for: .openHistoryWindow).map(ShortcutBackup.init),
+            openHistoryWindowShortcut: ShortcutStore.shortcut(for: .openQuickHistory).map(ShortcutBackup.init),
             quickAddToDictionaryShortcut: ShortcutStore.shortcut(for: .quickAddToDictionary).map(ShortcutBackup.init),
             primaryRecordingShortcutRawValue: recordingShortcutManager.primaryRecordingShortcut.rawValue,
             secondaryRecordingShortcutRawValue: recordingShortcutManager.secondaryRecordingShortcut.rawValue,

@@ -119,7 +119,7 @@ enum BackupImporter {
             ShortcutStore.setShortcut(cancelShortcut.shortcut, for: .cancelRecorder)
         }
         if let historyShortcut = general.openHistoryWindowShortcut {
-            ShortcutStore.setShortcut(historyShortcut.shortcut, for: .openHistoryWindow)
+            ShortcutStore.setShortcut(historyShortcut.shortcut, for: .openQuickHistory)
         }
         if let dictionaryShortcut = general.quickAddToDictionaryShortcut {
             ShortcutStore.setShortcut(dictionaryShortcut.shortcut, for: .quickAddToDictionary)
