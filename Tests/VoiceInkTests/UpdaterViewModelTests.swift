@@ -213,6 +213,62 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func alreadyInstalledStagedCandidateIsNotOfferedForRestart() async throws {
+        let suiteName = "UpdaterViewModelTests.already-installed-staged"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let provenance = SourceProvenance(
+            forkCommit: "fb95d5cc19a16968ad345777163f603dcbf42c91",
+            upstreamCommit: "247f445ba270dcb445b7a6ed26197c8a0692ba30"
+        )
+        let candidate = StagedForkCandidate(
+            forkCommit: provenance.forkCommit,
+            upstreamCommit: provenance.upstreamCommit,
+            bundleURL: URL(fileURLWithPath: "/tmp/VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_000)
+        )
+        let transaction = ForkUpdateTransactionStub(stagedCandidate: candidate)
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: ForkUpdaterAdapter(transaction: transaction),
+            sourceProvenance: provenance
+        )
+
+        updater.checkForUpdates()
+        try await waitUntil { !updater.state.isPreparingUpdate }
+
+        #expect(updater.state.stagedUpdate == nil)
+        #expect(!updater.state.isPresentingStagedUpdate)
+        #expect(updater.state.sourceProvenance == provenance)
+    }
+
+    @Test
+    func restartClearsThePromptWhenInstallationFindsNothingToApply() async throws {
+        let suiteName = "UpdaterViewModelTests.restart-clears-stale-prompt"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let candidate = StagedForkCandidate(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
+            bundleURL: URL(fileURLWithPath: "/tmp/VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_000)
+        )
+        let transaction = ForkUpdateTransactionStub(stagedCandidate: candidate)
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: ForkUpdaterAdapter(transaction: transaction)
+        )
+
+        updater.checkForUpdates()
+        try await waitUntil { updater.state.stagedUpdate == candidate }
+        updater.restartAndUpdate()
+        try await waitUntil { transaction.restartRequestCount == 1 && !updater.state.isPreparingUpdate }
+
+        #expect(updater.state.stagedUpdate == nil)
+        #expect(!updater.state.isPresentingStagedUpdate)
+    }
+
+    @Test
     func resumeCommandRevalidatesTheSavedAttemptBeforeStaging() async throws {
         let suiteName = "UpdaterViewModelTests.resume-recovery"
         let defaults = makeDefaults(suiteName: suiteName)

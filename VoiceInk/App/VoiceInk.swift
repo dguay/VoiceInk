@@ -435,26 +435,30 @@ struct VoiceInkApp: App {
             ) { _ in
                 licenseViewModel.refreshLicenseState()
             }
-            .alert(
-                "Update Ready",
-                isPresented: Binding(
-                    get: { updaterViewModel.state.isPresentingStagedUpdate },
-                    set: { isPresented in
-                        if !isPresented {
+            .background {
+                EmptyView()
+                    .alert(
+                        "Update Ready",
+                        isPresented: Binding(
+                            get: { updaterViewModel.state.isPresentingStagedUpdate },
+                            set: { isPresented in
+                                if !isPresented {
+                                    updaterViewModel.deferStagedUpdate()
+                                }
+                            }
+                        ),
+                        presenting: updaterViewModel.state.stagedUpdate
+                    ) { _ in
+                        Button("Restart and Update") {
+                            updaterViewModel.restartAndUpdate()
+                        }
+                        .keyboardShortcut(.defaultAction)
+                        Button("Later", role: .cancel) {
                             updaterViewModel.deferStagedUpdate()
                         }
+                    } message: { candidate in
+                        Text("VoiceInk prepared fork commit \(candidate.forkCommit.prefix(12)).")
                     }
-                ),
-                presenting: updaterViewModel.state.stagedUpdate
-            ) { _ in
-                Button("Restart and Update") {
-                    updaterViewModel.restartAndUpdate()
-                }
-                Button("Later", role: .cancel) {
-                    updaterViewModel.deferStagedUpdate()
-                }
-            } message: { candidate in
-                Text("VoiceInk prepared fork commit \(candidate.forkCommit.prefix(12)).")
             }
             .alert(
                 "Restore Previous Version?",

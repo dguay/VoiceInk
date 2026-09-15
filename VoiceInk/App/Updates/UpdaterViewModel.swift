@@ -266,6 +266,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
     func restartAndUpdate() {
         guard let candidate = state.stagedUpdate else { return }
         state.isPresentingStagedUpdate = false
+        state.stagedUpdate = nil
         adapter.requestRestart(for: candidate)
     }
 
@@ -331,6 +332,11 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.recoveryWarning = nil
             defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
         case .stagedCandidate(let candidate):
+            guard candidate.forkCommit != state.sourceProvenance?.forkCommit else {
+                state.stagedUpdate = nil
+                state.isPresentingStagedUpdate = false
+                return
+            }
             state.stagedUpdate = candidate
             state.isPresentingStagedUpdate = true
             state.preparationError = nil

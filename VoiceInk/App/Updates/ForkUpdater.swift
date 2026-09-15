@@ -1481,6 +1481,7 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
     private let now: () -> Date
     private let resumeRequestObserver: (any ForkUpdateResumeRequestObserving)?
     private var stagedCandidate: StagedForkCandidate?
+    private var pendingRestartCandidate: StagedForkCandidate?
     private var observesResumeRequests = false
 
     init(
@@ -1602,8 +1603,13 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
     }
 
     func requestRestart(for candidate: StagedForkCandidate) {
-        guard let transaction, candidate == stagedCandidate, !state.sessionInProgress else { return }
+        guard let transaction, candidate == stagedCandidate else { return }
+        if state.sessionInProgress {
+            pendingRestartCandidate = candidate
+            return
+        }
 
+        pendingRestartCandidate = nil
         state = UpdaterAdapterState(
             canCheckForUpdates: state.canCheckForUpdates,
             sessionInProgress: true,
@@ -1617,6 +1623,8 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
                 if let replacement = try await transaction.requestRestart(for: candidate) {
                     self?.stagedCandidate = replacement
                     self?.onEvent?(.stagedCandidate(replacement))
+                } else {
+                    self?.stagedCandidate = nil
                 }
             } catch {
                 let failure = (error as? ForkUpdateFailure)
@@ -1669,5 +1677,9 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
         )
         onEvent?(.stateChanged(state))
         onEvent?(.didFinishUpdateCycle)
+        if let pendingRestartCandidate {
+            self.pendingRestartCandidate = nil
+            requestRestart(for: pendingRestartCandidate)
+        }
     }
 }
