@@ -23,6 +23,7 @@ struct SettingsView: View {
     @AppStorage(AppLanguagePreference.userDefaultsKey) private var appLanguagePreference = AppLanguagePreference
         .systemValue
     @AppStorage(RecorderDisplaySettingsKeys.showLiveTranscript) private var showLiveTranscript = true
+    @AppStorage(FinishAndSendSettings.key) private var finishAndSendKey = FinishAndSendKey.none.rawValue
     @State private var showResetOnboardingAlert = false
     @State private var showLanguageRestartAlert = false
     @State private var cancelRecordingShortcutRecorderResetID = 0
@@ -72,6 +73,7 @@ struct SettingsView: View {
                         withAnimation { recordingShortcutManager.secondaryRecordingShortcut = .custom }
                     }
                 }
+
             } header: {
                 HStack(spacing: 4) {
                     Text("Shortcuts")
@@ -132,6 +134,17 @@ struct SettingsView: View {
             }
 
             Section("Pasting") {
+                Picker(selection: $finishAndSendKey) {
+                    ForEach(FinishAndSendKey.allCases, id: \.self) { key in
+                        Text(key.displayName).tag(key.rawValue)
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Auto Send")
+                        InfoTip("Press Return while recording to stop and deliver the result. VoiceInk will then paste the result and press the selected key to send it. Choose None to disable this feature.")
+                    }
+                }
+
                 ExpandableSettingsRow(
                     isExpanded: $isRestoreClipboardExpanded,
                     isEnabled: $restoreClipboardAfterPaste,
