@@ -33,6 +33,7 @@ class Recorder: NSObject, ObservableObject {
     enum RecorderError: Error {
         case couldNotStartRecording
         case noUsableMicrophone(internalMicrophoneBlockedByClosedLid: Bool)
+        case audioSystemNotRunning
     }
 
     override init() {
@@ -98,6 +99,9 @@ class Recorder: NSObject, ObservableObject {
                 "Failed to start recording deviceID=\(deviceID, privacy: .public) file=\(url.lastPathComponent, privacy: .public) error=\(error, privacy: .public)"
             )
             await stopRecording()
+            if (error as? CoreAudioRecorderError)?.status == kAudioHardwareNotRunningError {
+                throw RecorderError.audioSystemNotRunning
+            }
             throw RecorderError.couldNotStartRecording
         }
     }
@@ -165,9 +169,10 @@ class Recorder: NSObject, ObservableObject {
         coreAudioRecorder.onAudioChunk = onAudioChunk
         recorder = coreAudioRecorder
 
+        let selectedChannels = deviceManager.selectedInputChannels(for: deviceID)
         audioSetupQueue.async { [logger] in
             do {
-                try coreAudioRecorder.prepare(deviceID: deviceID)
+                try coreAudioRecorder.prepare(deviceID: deviceID, selectedInputChannels: selectedChannels)
             } catch {
                 logger.warning(
                     "Recorder prepare failed reason=\(reason, privacy: .public) deviceID=\(deviceID, privacy: .public) error=\(error, privacy: .public)"
