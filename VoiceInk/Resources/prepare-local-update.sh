@@ -452,6 +452,38 @@ mkdir -p "$candidate_stage"
 codesign --verify --deep --strict "$staged_bundle" \
     || fail "The staged candidate bundle failed signature validation."
 
+# Describe the candidate for the Update Ready UI: upstream commits the installed
+# app does not contain yet (or that the fork base lacks when the installed
+# revision is unknown), with a bounded list of their newest subjects. The
+# summary is informational, so a git failure omits it instead of failing.
+write_change_summary() {
+    local summary_manifest="$1"
+    local summary_base="$fork_base_commit"
+    local subject_limit="${VOICEINK_UPDATE_SUMMARY_SUBJECT_LIMIT:-20}"
+    local commit_count
+    local subject
+    local subject_index=0
+
+    [[ "$subject_limit" =~ ^[0-9]+$ ]] || subject_limit=20
+    if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" ]] \
+        && git -C "$repository_path" cat-file -e "$VOICEINK_INSTALLED_FORK_COMMIT^{commit}" 2>/dev/null
+    then
+        summary_base="$VOICEINK_INSTALLED_FORK_COMMIT"
+    fi
+    commit_count="$(git -C "$repository_path" rev-list --count "$summary_base..$upstream_commit" 2>/dev/null)" \
+        || return 0
+    /usr/bin/plutil -insert changeSummary -dictionary "$summary_manifest"
+    /usr/bin/plutil -insert changeSummary.upstreamCommitCount -integer "$commit_count" "$summary_manifest"
+    /usr/bin/plutil -insert changeSummary.upstreamCommitSubjects -array "$summary_manifest"
+    [[ "$subject_limit" -gt 0 ]] || return 0
+    while IFS= read -r subject; do
+        /usr/bin/plutil -insert "changeSummary.upstreamCommitSubjects.$subject_index" \
+            -string "$subject" "$summary_manifest"
+        subject_index=$((subject_index + 1))
+    done < <(git -C "$repository_path" log --format=%s \
+        --max-count="$subject_limit" "$summary_base..$upstream_commit" 2>/dev/null || true)
+}
+
 mkdir -p "$stage_root"
 previous_candidate_sha=""
 previous_candidate_ref=""
@@ -468,6 +500,7 @@ manifest_temporary="$manifest_path.tmp.$$"
 /usr/bin/plutil -insert upstreamCommit -string "$upstream_commit" "$manifest_temporary"
 /usr/bin/plutil -insert bundlePath -string "$staged_bundle" "$manifest_temporary"
 /usr/bin/plutil -insert preparedAt -date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$manifest_temporary"
+write_change_summary "$manifest_temporary"
 candidate_ref="refs/voiceink-updater/candidates/$fork_commit-$(date +%s)-$$"
 /usr/bin/plutil -insert candidateRef -string "$candidate_ref" "$manifest_temporary"
 git -C "$repository_path" update-ref "$candidate_ref" "$fork_commit"

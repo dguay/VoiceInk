@@ -619,6 +619,22 @@ struct DashboardContent: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
+            if updaterViewModel.state.needsAttention {
+                Button(action: updaterViewModel.showUpdateSettings) {
+                    footerActionLabel(
+                        icon: "exclamationmark.triangle.fill",
+                        title: "Update needs attention",
+                        color: AppTheme.Status.warningStrong
+                    )
+                }
+                .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: true)
+                .help(updaterViewModel.state.failure?.message ?? "")
+                .accessibilityLabel("Update needs attention")
+                .accessibilityHint("Opens update settings")
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+
             Button(action: copySystemInfo) {
                 footerActionLabel(
                     icon: isSystemInfoCopied ? "checkmark" : "doc.on.doc",
@@ -632,6 +648,7 @@ struct DashboardContent: View {
         }
         .animation(.easeOut(duration: 0.2), value: updaterViewModel.state.availableUpdate)
         .animation(.easeOut(duration: 0.2), value: updaterViewModel.state.stagedUpdate)
+        .animation(.easeOut(duration: 0.2), value: updaterViewModel.state.needsAttention)
     }
 
     @ViewBuilder

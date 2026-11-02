@@ -170,6 +170,12 @@ struct MenuBarView: View {
                 }
             }
 
+            if updaterViewModel.state.needsAttention {
+                Button("Update needs attention…") {
+                    updaterViewModel.showUpdateSettings()
+                }
+            }
+
             if updaterViewModel.state.canRestorePreviousVersion {
                 Button("Restore Previous Version…") {
                     showMainWindow()

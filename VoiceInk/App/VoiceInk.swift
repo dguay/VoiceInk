@@ -437,15 +437,16 @@ struct VoiceInkApp: App {
                         ),
                         presenting: updaterViewModel.state.stagedUpdate
                     ) { _ in
-                        Button("Restart and Update") {
-                            updaterViewModel.restartAndUpdate()
-                        }
-                        .keyboardShortcut(.defaultAction)
+                        // Return defers; restarting requires an explicit click.
                         Button("Later", role: .cancel) {
                             updaterViewModel.deferStagedUpdate()
                         }
+                        .keyboardShortcut(.defaultAction)
+                        Button("Restart and Update") {
+                            updaterViewModel.restartAndUpdate()
+                        }
                     } message: { candidate in
-                        Text("VoiceInk prepared fork commit \(candidate.forkCommit.prefix(12)).")
+                        Text(verbatim: StagedUpdatePresentation(candidate: candidate).message)
                     }
             }
             .alert(
