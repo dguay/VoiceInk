@@ -15,7 +15,7 @@ make bootstrap
 open ~/Downloads/VoiceInk.app
 ```
 
-`make bootstrap` discovers the clone from its own location, validates `dguay/VoiceInk` as `origin`, adds or validates `Beingpax/VoiceInk` as `upstream`, and records the clone path in global Git configuration as `voiceink.repositoryPath`. It also checks GitHub push access, Xcode and Command Line Tools, 15 GiB of free disk space, and permission to replace `/Applications/VoiceInk.app`. Override the last two checks with `VOICEINK_MIN_FREE_GIB` and `VOICEINK_INSTALLED_APP_PATH` when needed.
+`make bootstrap` discovers the clone from its own location, validates `dguay/VoiceInk` as `origin`, adds or validates `Beingpax/VoiceInk` as `upstream`, makes `origin` the GitHub CLI's default repository (as `gh repo set-default` does), and records the clone path in global Git configuration as `voiceink.repositoryPath`. It also checks GitHub push access, Xcode and Command Line Tools, 15 GiB of free disk space, and permission to replace `/Applications/VoiceInk.app`. Override the last two checks with `VOICEINK_MIN_FREE_GIB` and `VOICEINK_INSTALLED_APP_PATH` when needed.
 
 A missing or unauthenticated Codex CLI produces a warning but does not stop bootstrap. After preflight checks, bootstrap runs `make test-updater`; a failing suite stops bootstrap before it registers the clone or builds. It then prepares `whisper.xcframework` in `~/VoiceInk-Dependencies`, builds Release in `.local-build`, and copies `VoiceInk.app` to `~/Downloads`.
 
