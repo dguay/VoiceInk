@@ -526,8 +526,15 @@ marker_path="$3"
 mode="$4"
 trap 'printf "signal\n" >> "$marker_path"; exit 143' TERM
 for ((attempt = 0; attempt < 300; attempt++)); do
-    if [[ -f "$request_path" ]]; then
+    # "ignore" models an app that never handles the request, so it never claims it.
+    if [[ -f "$request_path" ]] \
+        && { [[ "$mode" == ignore ]] || mv "$request_path" "$request_path.claimed" 2>/dev/null; }; then
         printf 'requested\n' >> "$marker_path"
+        if [[ "$mode" == late-busy ]]; then
+            # Answer only after the installer's graceful timeout has elapsed.
+            sleep 2
+            mode=busy
+        fi
         if [[ "$mode" != ignore ]]; then
             printf '%s\n' "$mode" > "$response_path.tmp"
             mv "$response_path.tmp" "$response_path"
@@ -649,6 +656,41 @@ fi
 [[ ! -e "$quit_request_path" ]]
 grep -Fqx "$VOICEINK_UPDATE_CREDENTIAL_GENERATION" "$credential_delete_log"
 grep -Fq "Update cancelled" "$fixture_root/quit-busy-output.log"
+kill "$parent_pid" >/dev/null 2>&1 || true
+wait "$parent_pid" 2>/dev/null || true
+parent_pid=""
+
+# A "busy" answer that arrives after the graceful timeout still vetoes the quit:
+# the app claimed the request, so the installer waits for it instead of signalling.
+: > "$quit_marker"
+: > "$launch_log"
+: > "$credential_delete_log"
+/bin/rm -f "$quit_response_path"
+"$fake_bin/quit-aware-parent" "$quit_request_path" "$quit_response_path" "$quit_marker" late-busy &
+parent_pid=$!
+prepare_recovery_intent
+set +e
+run_quit_installation 1 "$fixture_root/quit-late-busy-output.log"
+quit_late_busy_status=$?
+set -e
+
+[[ "$quit_late_busy_status" -eq 76 ]]
+if ! kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: installer terminated a parent that answered busy late\n' >&2
+    exit 1
+fi
+if grep -Fqx "signal" "$quit_marker"; then
+    printf 'install-local-update-test: installer signalled a parent that answered busy late\n' >&2
+    exit 1
+fi
+if grep -Fq "SIGTERM" "$fixture_root/quit-late-busy-output.log"; then
+    printf 'install-local-update-test: installer fell back to SIGTERM despite a claimed request\n' >&2
+    exit 1
+fi
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+[[ ! -s "$launch_log" ]]
+[[ ! -e "$quit_request_path" && ! -e "$quit_request_path.claimed" ]]
+grep -Fq "Update cancelled" "$fixture_root/quit-late-busy-output.log"
 kill "$parent_pid" >/dev/null 2>&1 || true
 wait "$parent_pid" 2>/dev/null || true
 parent_pid=""

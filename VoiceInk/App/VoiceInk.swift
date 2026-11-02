@@ -204,7 +204,10 @@ struct VoiceInkApp: App {
         _transcriptionModelManager = StateObject(wrappedValue: transcriptionModelManager)
         _recorderUIManager = StateObject(wrappedValue: recorderUIManager)
         _engine = StateObject(wrappedValue: engine)
-        updaterViewModel.observeEngineActivity(engine.$recordingState.eraseToAnyPublisher())
+        updaterViewModel.observeEngineActivity(
+            engine.$recordingState.eraseToAnyPublisher(),
+            fileTranscriptionActivity: FileTranscriptionActivity.shared.$isActive.eraseToAnyPublisher()
+        )
 
         // 7. Create other services that depend on engine
         let recordingShortcutManager = RecordingShortcutManager(engine: engine, recorderUIManager: recorderUIManager)

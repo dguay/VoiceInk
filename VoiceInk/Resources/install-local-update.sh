@@ -449,11 +449,22 @@ move_recovery_directory() {
 }
 
 # Ask VoiceInk to quit through its normal termination path so its termination
-# hooks save state and close panels. VoiceInk answers "quit" when idle, or "busy"
-# while it records, transcribes, or enhances; a busy app is never terminated.
+# hooks save state and close panels. VoiceInk claims the request by renaming it
+# to "<request>.claimed", then answers "quit" when idle or "busy" while it
+# records, transcribes, or enhances. A busy app is never terminated: SIGTERM is
+# only allowed when the installer withdraws an unclaimed request at the timeout.
+quit_response_is_busy() {
+    [[ -f "$quit_response_path" ]] || return 1
+    [[ "$(/bin/cat "$quit_response_path" 2>/dev/null || true)" == busy ]]
+}
+
+cancel_busy_quit() {
+    /bin/rm -f "$quit_request_path" "$quit_request_path.claimed" "$quit_response_path"
+    cancelled "VoiceInk was recording, transcribing, or enhancing when installation was ready to quit it. The staged update is still available."
+}
+
 request_graceful_quit() {
-    local quit_response
-    /bin/rm -f "$quit_response_path"
+    /bin/rm -f "$quit_response_path" "$quit_request_path.claimed"
     mkdir -p "$(dirname "$quit_request_path")" \
         || fail "VoiceInk could not ask the running app to quit for installation."
     if ! printf '%s\n' "$approved_sha" > "$quit_request_path.tmp.$$" \
@@ -462,17 +473,32 @@ request_graceful_quit() {
         fail "VoiceInk could not ask the running app to quit for installation."
     fi
     for ((attempt = 0; attempt < graceful_quit_timeout * 10; attempt++)); do
+        quit_response_is_busy && cancel_busy_quit
         kill -0 "$parent_pid" 2>/dev/null || break
-        if [[ -f "$quit_response_path" ]]; then
-            quit_response="$(/bin/cat "$quit_response_path" 2>/dev/null || true)"
-            if [[ "$quit_response" == busy ]]; then
-                /bin/rm -f "$quit_request_path" "$quit_response_path"
-                cancelled "VoiceInk was recording, transcribing, or enhancing when installation was ready to quit it. The staged update is still available."
-            fi
-        fi
         sleep 0.1
     done
-    /bin/rm -f "$quit_request_path" "$quit_response_path"
+    quit_response_is_busy && cancel_busy_quit
+
+    # Withdraw the request. Removing it succeeds only while VoiceInk has not
+    # claimed it, so a later SIGTERM can never race a "busy" answer.
+    if /bin/rm "$quit_request_path" 2>/dev/null || ! kill -0 "$parent_pid" 2>/dev/null; then
+        /bin/rm -f "$quit_request_path.claimed" "$quit_response_path"
+        return
+    fi
+
+    # VoiceInk claimed the request and is still deciding: wait for its answer.
+    for ((attempt = 0; attempt < parent_exit_timeout * 10; attempt++)); do
+        quit_response_is_busy && cancel_busy_quit
+        [[ -f "$quit_response_path" ]] && break
+        kill -0 "$parent_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    quit_response_is_busy && cancel_busy_quit
+    if [[ ! -f "$quit_response_path" ]] && kill -0 "$parent_pid" 2>/dev/null; then
+        /bin/rm -f "$quit_request_path.claimed"
+        cancelled "VoiceInk did not answer the installation quit request, so it was left running. The staged update is still available."
+    fi
+    /bin/rm -f "$quit_request_path.claimed" "$quit_response_path"
 }
 
 stop_launched_candidate() {

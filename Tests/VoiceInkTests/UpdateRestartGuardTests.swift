@@ -68,6 +68,45 @@ struct UpdateRestartGuardTests {
     }
 
     @Test
+    func audioFileTranscriptionBlocksRestartAndTheInstallerQuit() {
+        let suiteName = "UpdateRestartGuardTests.file-transcription"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let adapter = RestartAdapterStub()
+        let gate = UpdateRestartGate()
+        let engineActivity = CurrentValueSubject<RecordingState, Never>(.idle)
+        let fileActivity = FileTranscriptionActivity()
+        let updater = makeUpdater(defaults: defaults, adapter: adapter, gate: gate)
+        updater.observeEngineActivity(
+            engineActivity.eraseToAnyPublisher(),
+            fileTranscriptionActivity: fileActivity.$isActive.eraseToAnyPublisher()
+        )
+        adapter.send(.stagedCandidate(candidate))
+
+        // Imported audio and a history retranscription overlap.
+        fileActivity.begin()
+        fileActivity.begin()
+        #expect(updater.state.restartBlockedReason == UpdateRestartGuard.fileTranscriptionReason)
+        #expect(gate.blockingReason == UpdateRestartGuard.fileTranscriptionReason)
+        updater.restartAndUpdate()
+        #expect(adapter.restartRequests.isEmpty)
+        #expect(updater.state.stagedUpdate == candidate)
+
+        fileActivity.end()
+        #expect(gate.blockingReason == UpdateRestartGuard.fileTranscriptionReason)
+
+        engineActivity.send(.recording)
+        fileActivity.end()
+        #expect(gate.blockingReason == UpdateRestartGuard.blockingReason(for: .recording))
+
+        engineActivity.send(.idle)
+        #expect(updater.state.restartBlockedReason == nil)
+        #expect(gate.blockingReason == nil)
+        updater.restartAndUpdate()
+        #expect(adapter.restartRequests == [candidate])
+    }
+
+    @Test
     func idleTransitionDoesNotPresentTheUpdateUnlessTheUserAskedToTryAgain() {
         let suiteName = "UpdateRestartGuardTests.idle-without-request"
         let defaults = makeDefaults(suiteName: suiteName)
@@ -220,6 +259,10 @@ struct UpdateRestartGuardTests {
             printf 'request\\n' > "$VOICEINK_UPDATE_QUIT_REQUEST_PATH"
             for ((attempt = 0; attempt < 100; attempt++)); do
                 if [[ -f "$VOICEINK_UPDATE_QUIT_RESPONSE_PATH" ]]; then
+                    # The app claims the request before answering, so the installer
+                    # can never withdraw it and signal a busy app.
+                    [[ ! -e "$VOICEINK_UPDATE_QUIT_REQUEST_PATH" \
+                        && -e "$VOICEINK_UPDATE_QUIT_REQUEST_PATH.claimed" ]] || exit 2
                     [[ "$(< "$VOICEINK_UPDATE_QUIT_RESPONSE_PATH")" == busy ]] && exit 76
                     exit 0
                 fi

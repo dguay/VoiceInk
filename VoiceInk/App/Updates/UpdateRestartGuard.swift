@@ -17,6 +17,34 @@ enum UpdateRestartGuard {
             return "VoiceInk is finishing a transcription. Restart and Update is available when it is idle."
         }
     }
+
+    static let fileTranscriptionReason =
+        "VoiceInk is transcribing an audio file. Restart and Update is available when it finishes."
+
+    /// Engine activity wins; imported-audio and history retranscription work also blocks.
+    static func blockingReason(for recordingState: RecordingState, fileTranscriptionActive: Bool) -> String? {
+        blockingReason(for: recordingState) ?? (fileTranscriptionActive ? fileTranscriptionReason : nil)
+    }
+}
+
+/// Counts audio-file transcriptions (imported audio queue and history retranscription)
+/// that run outside the engine, so installation never quits VoiceInk mid-transcription.
+@MainActor
+final class FileTranscriptionActivity: ObservableObject {
+    static let shared = FileTranscriptionActivity()
+
+    @Published private(set) var isActive = false
+    private var activeCount = 0
+
+    func begin() {
+        activeCount += 1
+        isActive = true
+    }
+
+    func end() {
+        activeCount = max(0, activeCount - 1)
+        isActive = activeCount > 0
+    }
 }
 
 /// App-wide record of the engine activity that blocks quitting for installation.

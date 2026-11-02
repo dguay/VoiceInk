@@ -330,18 +330,26 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
 
     /// Keeps "Restart and Update" unavailable while the engine records, transcribes,
     /// or enhances, and lets the installer's quit request see the same state.
-    func observeEngineActivity(_ activity: AnyPublisher<RecordingState, Never>) {
+    /// Audio-file transcriptions (imported audio, history retranscription) block it too.
+    func observeEngineActivity(
+        _ activity: AnyPublisher<RecordingState, Never>,
+        fileTranscriptionActivity: AnyPublisher<Bool, Never> = Just(false).eraseToAnyPublisher()
+    ) {
         engineActivityObservation = activity
-            .removeDuplicates()
-            .sink { [weak self] recordingState in
+            .combineLatest(fileTranscriptionActivity.prepend(false).removeDuplicates())
+            .removeDuplicates { $0 == $1 }
+            .sink { [weak self] recordingState, fileTranscriptionActive in
                 MainActor.assumeIsolated {
-                    self?.applyEngineActivity(recordingState)
+                    self?.applyEngineActivity(recordingState, fileTranscriptionActive: fileTranscriptionActive)
                 }
             }
     }
 
-    private func applyEngineActivity(_ recordingState: RecordingState) {
-        let reason = UpdateRestartGuard.blockingReason(for: recordingState)
+    private func applyEngineActivity(_ recordingState: RecordingState, fileTranscriptionActive: Bool) {
+        let reason = UpdateRestartGuard.blockingReason(
+            for: recordingState,
+            fileTranscriptionActive: fileTranscriptionActive
+        )
         restartGate.blockingReason = reason
         guard state.restartBlockedReason != reason else { return }
         state.restartBlockedReason = reason

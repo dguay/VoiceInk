@@ -820,7 +820,15 @@ struct ProcessForkUpdateInstallationRunner: ForkUpdateInstalling {
         // answers once, then quits normally when idle or reports that it is busy.
         var answeredQuitRequest = false
         while process.isRunning {
-            if !answeredQuitRequest, FileManager.default.fileExists(atPath: quitRequestURL.path) {
+            // Claim the request by renaming it before answering. Once claimed, the
+            // installer cannot withdraw it and must wait for this answer instead of
+            // signalling VoiceInk, so a "busy" answer can never lose a race.
+            if !answeredQuitRequest,
+               FileManager.default.fileExists(atPath: quitRequestURL.path),
+               (try? FileManager.default.moveItem(
+                   at: quitRequestURL,
+                   to: quitDirectory.appendingPathComponent("request.claimed")
+               )) != nil {
                 answeredQuitRequest = true
                 quitRequestHandler.handleQuitRequest { response in
                     try? Data("\(response.rawValue)\n".utf8).write(to: quitResponseURL, options: .atomic)
