@@ -17,7 +17,7 @@ open ~/Downloads/VoiceInk.app
 
 `make bootstrap` discovers the clone from its own location, validates `dguay/VoiceInk` as `origin`, adds or validates `Beingpax/VoiceInk` as `upstream`, and records the clone path in global Git configuration as `voiceink.repositoryPath`. It also checks GitHub push access, Xcode and Command Line Tools, 15 GiB of free disk space, and permission to replace `/Applications/VoiceInk.app`. Override the last two checks with `VOICEINK_MIN_FREE_GIB` and `VOICEINK_INSTALLED_APP_PATH` when needed.
 
-A missing or unauthenticated Codex CLI produces a warning but does not stop bootstrap. After preflight checks, bootstrap prepares `whisper.xcframework` in `~/VoiceInk-Dependencies`, builds Release in `.local-build`, and copies `VoiceInk.app` to `~/Downloads`.
+A missing or unauthenticated Codex CLI produces a warning but does not stop bootstrap. After preflight checks, bootstrap runs `make test-updater`; a failing suite stops bootstrap before it registers the clone or builds. It then prepares `whisper.xcframework` in `~/VoiceInk-Dependencies`, builds Release in `.local-build`, and copies `VoiceInk.app` to `~/Downloads`.
 
 It uses `LocalBuild.xcconfig`, `VoiceInk.local.entitlements`, and the `LOCAL_BUILD` Swift flag. Without an override, it uses the only available Apple Development identity or falls back to ad-hoc signing when none or multiple are found.
 
@@ -47,10 +47,29 @@ make local LOCAL_CODESIGN_IDENTITY=-
 
 Local builds do not include iCloud dictionary sync or automatic updates. They embed the exact fork commit and newest contained `upstream/main` commit, which appear in Settings under General. Ad-hoc builds may require macOS permissions again after rebuilding. Normal project Debug and Release settings are unchanged.
 
+## Updater Tests
+
+```bash
+make test-updater
+```
+
+`make test-updater` runs the updater shell test suites in `scripts/tests` and prints `PASS` or `FAIL` for each, followed by a summary. It runs every suite even after a failure and exits non-zero if any suite fails or is missing. The suites run against temporary fixtures with stubbed tools, so they need no network, signing identity, or Xcode build, and take under a minute.
+
+| Suite | Covers |
+|---|---|
+| `bootstrap-local-test.sh` | `scripts/bootstrap-local.sh` remote, push-access, install-path and disk checks, clone registration, and the build hand-off |
+| `prepare-local-update-test.sh` | `prepare-local-update.sh` candidate preparation and staging |
+| `install-local-update-test.sh` | `install-local-update.sh` approval, app replacement, relaunch and rollback |
+| `restore-local-update-test.sh` | `restore-local-update.sh` recovery of the preserved app and its state |
+| `test-updater-test.sh` | The runner's own pass, fail and missing-suite reporting |
+
+Run a single suite directly by path, for example `bash scripts/tests/install-local-update-test.sh`.
+
 ## Other Commands
 
 - `make check` — verify required tools
 - `make bootstrap` — register the clone, run local-update preflights, and build with source provenance
+- `make test-updater` — run the updater shell test suites
 - `make whisper` — prepare `whisper.xcframework`
 - `make build` — build the standard Debug configuration
 - `make dev` — build and launch `VoiceInk Dev.app`
