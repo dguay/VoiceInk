@@ -1,15 +1,6 @@
 {
-  "originHash" : "1f0d16c1da6e678998550f618e4a2833d85d20018ddcb85db35861149a59ccb9",
+  "originHash" : "163750358c88af348c911c09427e0c8ba41e8670801b0d8bbca13a3d95abcdbf",
   "pins" : [
-    {
-      "identity" : "axswift",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/tisfeng/AXSwift.git",
-      "state" : {
-        "revision" : "d737b605c99f6e0f6a21448d0836110bd15b7710",
-        "version" : "0.3.7"
-      }
-    },
     {
       "identity" : "eventsource",
       "kind" : "remoteSourceControl",
@@ -29,20 +20,11 @@
       }
     },
     {
-      "identity" : "keysender",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/jordanbaird/KeySender",
-      "state" : {
-        "revision" : "99584bf1a03ab600cc44be89a2dcd98b2dbeb9de",
-        "version" : "0.0.5"
-      }
-    },
-    {
       "identity" : "llmkit",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Beingpax/LLMkit.git",
       "state" : {
-        "revision" : "42c78bab5fcc4335c4ad144ca5823d0dd36cdffc"
+        "revision" : "1fb15b5771e6faff94f4dbe5c48cf74b7e91a74b"
       }
     },
     {
@@ -78,15 +60,6 @@
       "state" : {
         "revision" : "2849f5323265386e200484b0d0f896e73c3411b9",
         "version" : "6.0.1"
-      }
-    },
-    {
-      "identity" : "selectedtextkit",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Beingpax/SelectedTextKit.git",
-      "state" : {
-        "branch" : "performance/off-main-menu-action",
-        "revision" : "05a3e5177300d800c2785be83ba2ba7fa775e41a"
       }
     },
     {
