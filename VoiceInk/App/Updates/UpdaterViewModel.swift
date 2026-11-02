@@ -146,6 +146,8 @@ enum UpdaterAdapterEvent: Equatable {
     case rollbackReported(LocalUpdateRollbackNotice)
     case rollbackCompleted
     case restartCancelled(StagedForkCandidate, reason: String)
+    /// A cancelled retry left the persisted failure unresolved; show it again.
+    case persistedFailureRestored(ForkUpdateFailure)
 }
 
 @MainActor
@@ -514,6 +516,15 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.failure = failure
             state.recoveryWarning = nil
             notifyFailureIfNeeded(failure)
+        case .persistedFailureRestored(let failure):
+            // The failure was already announced; restore it without notifying again.
+            state.preparationError = failure.message
+            state.failure = failure
+            state.recoveryWarning = nil
+            defaults.set(
+                "\(failure.candidateIdentifier ?? "unknown"):\(failure.stage.rawValue)",
+                forKey: DefaultsKey.activeFailureNotification
+            )
         case .failedAttemptCleared:
             state.preparationError = nil
             state.failure = nil

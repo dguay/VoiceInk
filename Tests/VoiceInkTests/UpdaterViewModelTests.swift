@@ -194,6 +194,40 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func cancellingARetryKeepsTheUnresolvedFailureVisible() async throws {
+        let suiteName = "UpdaterViewModelTests.cancel-retry-keeps-failure"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let failure = ForkUpdateFailure.reported(
+            stage: .merge,
+            kind: .deterministic,
+            candidateIdentifier: "0123456789abcdef0123456789abcdef01234567",
+            message: "Upstream changes conflict with the fork."
+        )
+        let transaction = SuspendedForkUpdateTransactionStub(persistedFailure: failure)
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: ForkUpdaterAdapter(transaction: transaction, defaults: defaults),
+            sourceProvenance: nil
+        )
+        try await waitUntil { updater.state.failure == failure }
+        #expect(updater.state.needsAttention)
+
+        // Retry clears the failure while preparation runs; Cancel must restore it.
+        updater.checkForUpdates()
+        try await waitUntil { updater.state.isPreparingUpdate }
+        #expect(updater.state.failure == nil)
+        updater.cancelUpdateCheck()
+        try await waitUntil { !updater.state.isPreparingUpdate }
+
+        #expect(transaction.preparationWasCancelled)
+        #expect(transaction.persistFailureCount == 0)
+        #expect(updater.state.failure == failure)
+        #expect(updater.state.needsAttention)
+        #expect(updater.state.preparationError == failure.message)
+    }
+
+    @Test
     func sessionStatusShowsTheStageWithElapsedTimeAndLabelsInstallation() {
         let startedAt = Date(timeIntervalSince1970: 1_787_400_000)
         let building = UpdaterSessionActivity.preparing(stage: .build, startedAt: startedAt)
@@ -1611,18 +1645,24 @@ private struct ForkUpdatePowerStateStub: ForkUpdatePowerStateProviding {
 @MainActor
 private final class SuspendedForkUpdateTransactionStub: ForkUpdateTransacting {
     let stagedCandidate: StagedForkCandidate?
+    let persistedFailure: ForkUpdateFailure?
     private(set) var persistFailureCount = 0
     private(set) var preparationWasCancelled = false
     private(set) var isRestarting = false
     private var restartContinuation: CheckedContinuation<Void, Never>?
     var canRestorePreviousVersion: Bool { false }
 
-    init(stagedCandidate: StagedForkCandidate? = nil) {
+    init(stagedCandidate: StagedForkCandidate? = nil, persistedFailure: ForkUpdateFailure? = nil) {
         self.stagedCandidate = stagedCandidate
+        self.persistedFailure = persistedFailure
     }
 
     func loadStagedCandidate() throws -> StagedForkCandidate? {
         stagedCandidate
+    }
+
+    func loadPersistentFailure() throws -> ForkUpdateFailure? {
+        persistedFailure
     }
 
     func persistFailure(_ failure: ForkUpdateFailure) throws {

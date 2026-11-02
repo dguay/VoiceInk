@@ -2098,7 +2098,11 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
                     self?.onEvent?(.preparationFailed(failure))
                 }
             } catch is CancellationError {
-                // The user stopped this run; it is not a failure to report.
+                // The user stopped this run; it is not a failure to report. A failure
+                // persisted before the retry is still unresolved, so show it again.
+                if let failure = try? transaction.loadPersistentFailure() {
+                    self?.onEvent?(.persistedFailureRestored(failure))
+                }
             } catch {
                 let failure = (error as? ForkUpdateFailure)
                     ?? .classify(message: error.localizedDescription)
