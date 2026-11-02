@@ -173,6 +173,169 @@ struct ForkUpdateReliabilityTests {
     }
 
     @Test
+    func watchdogBoundsThePreparationAcrossRetriesAndRetryDelays() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
+        let script = """
+            #!/bin/bash
+            printf 'x' >> "$(dirname "$0")/attempts"
+            printf 'fatal: unable to access repository: Could not resolve host\\n' >&2
+            exit 1
+            """
+        try Data(script.utf8).write(to: scriptURL)
+        let delays = DelayRecorder()
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+
+        do {
+            _ = try await ProcessForkUpdateCommandRunner(
+                retryDelays: [0.6, 0.6, 0.6],
+                sleep: { delay in
+                    await delays.record(delay)
+                    try await Task.sleep(for: .seconds(delay))
+                },
+                logger: ForkUpdateLogRecorder(),
+                supervision: .init(watchdogTimeout: 1, terminationGracePeriod: 1, pollInterval: 0.05)
+            ).run(
+                scriptURL: scriptURL,
+                manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+                installedForkCommit: nil,
+                mode: .manual
+            )
+            Issue.record("Expected the transient failure to be reported")
+        } catch let failure as ForkUpdateFailure {
+            #expect(failure.kind == .transient)
+        }
+
+        // A second 0.6 s delay would end past the 1 s deadline, so the retry
+        // policy stops instead of running every attempt with a fresh budget.
+        #expect(await delays.values == [0.6])
+        #expect(try String(contentsOf: temporaryDirectory.appendingPathComponent("attempts"), encoding: .utf8) == "xx")
+        #expect(clock.now - startedAt < .seconds(1.5))
+    }
+
+    @Test
+    func retriedAttemptGetsOnlyTheRemainingWatchdogBudget() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
+        let script = """
+            #!/bin/bash
+            attempts_file="$(dirname "$0")/attempts"
+            printf 'x' >> "$attempts_file"
+            if [[ "$(< "$attempts_file")" == x ]]; then
+                printf 'fatal: unable to access repository: Could not resolve host\\n' >&2
+                exit 1
+            fi
+            printf 'fetch\\n' > "$VOICEINK_UPDATE_PROGRESS_PATH"
+            /bin/sleep 600
+            """
+        try Data(script.utf8).write(to: scriptURL)
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+
+        do {
+            _ = try await ProcessForkUpdateCommandRunner(
+                retryDelays: [0.8],
+                sleep: { delay in try await Task.sleep(for: .seconds(delay)) },
+                logger: ForkUpdateLogRecorder(),
+                supervision: .init(watchdogTimeout: 1.5, terminationGracePeriod: 1, pollInterval: 0.05)
+            ).run(
+                scriptURL: scriptURL,
+                manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+                installedForkCommit: nil,
+                mode: .manual
+            )
+            Issue.record("Expected the watchdog to stop the hung retry")
+        } catch let failure as ForkUpdateFailure {
+            #expect(failure.kind == .transient)
+            #expect(failure.stage == .merge)
+            #expect(failure.message.contains("limit"))
+        }
+
+        // The hung second attempt starts 0.8 s in and is stopped at the 1.5 s
+        // overall deadline, not 1.5 s after it started.
+        #expect(try String(contentsOf: temporaryDirectory.appendingPathComponent("attempts"), encoding: .utf8) == "xx")
+        #expect(clock.now - startedAt < .seconds(2.1))
+    }
+
+    @Test
+    func forcedTerminationRemovesTheWorktreeTheHelperLeftBehind() async throws {
+        for stopsByCancelling in [false, true] {
+            let temporaryDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+                .resolvingSymlinksInPath()
+            try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+            let repositoryURL = temporaryDirectory.appendingPathComponent("clone", isDirectory: true)
+            try runGit(["init", "--quiet", repositoryURL.path])
+            try runGit([
+                "-C", repositoryURL.path,
+                "-c", "user.name=VoiceInk Test", "-c", "user.email=test@example.com",
+                "-c", "commit.gpgsign=false",
+                "commit", "--quiet", "--allow-empty", "-m", "test: seed",
+            ])
+            let manifestURL = temporaryDirectory
+                .appendingPathComponent("Updater", isDirectory: true)
+                .appendingPathComponent("staged-candidate.plist")
+            let worktreeURL = manifestURL.deletingLastPathComponent()
+                .appendingPathComponent("BuildCache/Worktree", isDirectory: true)
+            let startedURL = temporaryDirectory.appendingPathComponent("started")
+            let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
+            // The helper ignores SIGTERM, so only the runner can clean up after
+            // the group is killed.
+            let script = """
+                #!/bin/bash
+                trap '' TERM
+                worktree="$(dirname "$VOICEINK_UPDATE_MANIFEST_PATH")/BuildCache/Worktree"
+                mkdir -p "$(dirname "$worktree")"
+                /usr/bin/git -C "\(repositoryURL.path)" worktree add --detach "$worktree" HEAD >/dev/null 2>&1 || exit 1
+                : > "\(startedURL.path)"
+                /bin/sleep 600
+                """
+            try Data(script.utf8).write(to: scriptURL)
+            let runner = ProcessForkUpdateCommandRunner(
+                retryDelays: [],
+                logger: ForkUpdateLogRecorder(),
+                supervision: .init(
+                    watchdogTimeout: stopsByCancelling ? 600 : 2,
+                    terminationGracePeriod: 0.5,
+                    pollInterval: 0.05
+                )
+            )
+            let preparation = Task {
+                try await runner.run(
+                    scriptURL: scriptURL,
+                    manifestURL: manifestURL,
+                    installedForkCommit: nil,
+                    mode: .manual
+                )
+            }
+            try await waitUntil { FileManager.default.fileExists(atPath: startedURL.path) }
+            #expect(FileManager.default.fileExists(atPath: worktreeURL.path))
+            if stopsByCancelling {
+                preparation.cancel()
+            }
+
+            do {
+                _ = try await preparation.value
+                Issue.record("Expected the helper to be stopped")
+            } catch {
+                #expect(stopsByCancelling ? error is CancellationError : error is ForkUpdateFailure)
+            }
+
+            #expect(!FileManager.default.fileExists(atPath: worktreeURL.path))
+            let worktrees = try runGit(["-C", repositoryURL.path, "worktree", "list", "--porcelain"])
+            #expect(worktrees.components(separatedBy: "\n").filter { $0.hasPrefix("worktree ") }.count == 1)
+        }
+    }
+
+    @Test
     func cancellingPreparationStopsTheHelperGroupWithinSeconds() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1278,6 +1441,23 @@ struct ForkUpdateReliabilityTests {
             }
             try await Task.sleep(for: .milliseconds(20))
         }
+    }
+
+    @discardableResult
+    private func runGit(_ arguments: [String]) throws -> String {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw ForkUpdateError(message: "git \(arguments.joined(separator: " ")) failed")
+        }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private func waitUntilProcessExits(_ processIdentifier: Int32) async throws {

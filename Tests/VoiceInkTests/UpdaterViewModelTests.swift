@@ -240,6 +240,53 @@ struct UpdaterViewModelTests {
     }
 
     @Test
+    func restartThatFindsTheCandidateStaleShowsAndCancelsTheRepreparation() async throws {
+        let suiteName = "UpdaterViewModelTests.stale-restart-repreparation"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let startedAt = Date(timeIntervalSince1970: 1_787_400_000)
+        let commandRunner = SuspendedForkUpdateCommandRunner()
+        // Origin advanced after staging: the installer discards the staged
+        // candidate and reports it stale, so the restart prepares it again.
+        let fixture = try makeRestartTransactionFixture(
+            at: temporaryDirectory,
+            credentialStore: ForkUpdateCredentialRestorerStub(),
+            installationRunner: StaleCandidateInstallationRunner(),
+            commandRunner: commandRunner
+        )
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: ForkUpdaterAdapter(
+                transaction: fixture.transaction,
+                defaults: defaults,
+                now: { startedAt },
+                resumeRequestObserver: ForkUpdateResumeRequestObserverStub()
+            ),
+            sourceProvenance: nil
+        )
+        #expect(updater.state.stagedUpdate == fixture.candidate)
+
+        updater.restartAndUpdate()
+        try await waitUntil {
+            updater.state.sessionActivity == .preparing(stage: .test, startedAt: startedAt)
+        }
+        #expect(commandRunner.modes == [.candidateRevalidation])
+
+        updater.cancelUpdateCheck()
+        try await waitUntil { !updater.state.isPreparingUpdate }
+
+        #expect(commandRunner.wasCancelled)
+        #expect(updater.state.canCheckForUpdates)
+        #expect(updater.state.sessionActivity == nil)
+        #expect(updater.state.failure == nil)
+        #expect(updater.state.preparationError == nil)
+    }
+
+    @Test
     func recentForkCheckRemainsFreshAfterRelaunch() async throws {
         let suiteName = "UpdaterViewModelTests.persisted-check-date"
         let defaults = makeDefaults(suiteName: suiteName)
@@ -1761,6 +1808,60 @@ private final class FailingForkUpdateCredentialStore:
     func restoreSnapshot(generationIdentifier: String) throws {}
 }
 
+/// Reports the approved candidate stale after discarding its manifest, as the
+/// installer does when origin moved after staging.
+private struct StaleCandidateInstallationRunner: ForkUpdateInstalling {
+    func install(_ request: ForkUpdateInstallationRequest) async throws -> ForkUpdateInstallationOutcome {
+        try FileManager.default.removeItem(at: request.manifestURL)
+        return .candidateStale
+    }
+}
+
+/// Reports helper stages, then holds the preparation open until it is
+/// cancelled.
+private final class SuspendedForkUpdateCommandRunner: ForkUpdateCommandRunning, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedModes: [ForkUpdatePreparationMode] = []
+    private var cancelled = false
+
+    var modes: [ForkUpdatePreparationMode] { lock.withLock { recordedModes } }
+    var wasCancelled: Bool { lock.withLock { cancelled } }
+
+    func run(
+        scriptURL: URL,
+        manifestURL: URL,
+        installedForkCommit: String?,
+        mode: ForkUpdatePreparationMode
+    ) async throws -> ForkUpdateCommandResult {
+        try await run(
+            scriptURL: scriptURL,
+            manifestURL: manifestURL,
+            installedForkCommit: installedForkCommit,
+            mode: mode,
+            progress: { _ in }
+        )
+    }
+
+    func run(
+        scriptURL: URL,
+        manifestURL: URL,
+        installedForkCommit: String?,
+        mode: ForkUpdatePreparationMode,
+        progress: @escaping @Sendable (ForkUpdateStage) -> Void
+    ) async throws -> ForkUpdateCommandResult {
+        lock.withLock { recordedModes.append(mode) }
+        progress(.merge)
+        progress(.test)
+        do {
+            try await Task.sleep(for: .seconds(60))
+        } catch {
+            lock.withLock { cancelled = true }
+            throw CancellationError()
+        }
+        return .candidatePrepared(candidateIdentifier: nil)
+    }
+}
+
 private struct PrecleaningFailureInstallationRunner: ForkUpdateInstalling {
     func install(_ request: ForkUpdateInstallationRequest) async throws -> ForkUpdateInstallationOutcome {
         let pendingRecovery = URL(
@@ -1787,7 +1888,8 @@ private final class ForkUpdatePromptCopierRecorder: ForkUpdatePromptCopying {
 private func makeRestartTransactionFixture(
     at temporaryDirectory: URL,
     credentialStore: any ForkUpdateCredentialSnapshotting,
-    installationRunner: any ForkUpdateInstalling
+    installationRunner: any ForkUpdateInstalling,
+    commandRunner: (any ForkUpdateCommandRunning)? = nil
 ) throws -> (
     transaction: ForkUpdateTransaction,
     candidate: StagedForkCandidate,
@@ -1817,6 +1919,7 @@ private func makeRestartTransactionFixture(
     let transaction = ForkUpdateTransaction(
         scriptURL: temporaryDirectory.appendingPathComponent("prepare-local-update.sh"),
         manifestURL: manifestURL,
+        commandRunner: commandRunner ?? ProcessForkUpdateCommandRunner(),
         installationScriptURL: temporaryDirectory.appendingPathComponent("install-local-update.sh"),
         targetBundleURL: installedBundle,
         backupBundleURL: backupBundle,

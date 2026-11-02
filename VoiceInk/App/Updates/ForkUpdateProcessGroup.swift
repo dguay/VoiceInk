@@ -91,14 +91,14 @@ final class ForkUpdateProcessGroup: @unchecked Sendable {
     }
 
     /// Waits for the helper to exit, calling `poll` on every interval. When the
-    /// watchdog expires or the calling task is cancelled, sends SIGTERM to the
+    /// deadline passes or the calling task is cancelled, sends SIGTERM to the
     /// group so the helper can clean up, then SIGKILL after the grace period.
     /// Any process the helper left in its group is killed once it exits.
     func supervise(
         _ supervision: ProcessForkUpdateCommandRunner.Supervision,
+        deadline: Date,
         poll: () -> Void
     ) async -> SupervisionResult {
-        let startedAt = Date()
         var stopReason: StopReason?
         var terminationRequestedAt: Date?
 
@@ -111,7 +111,7 @@ final class ForkUpdateProcessGroup: @unchecked Sendable {
             } else {
                 if Task.isCancelled {
                     stopReason = .cancelled
-                } else if Date().timeIntervalSince(startedAt) >= supervision.watchdogTimeout {
+                } else if Date() >= deadline {
                     stopReason = .timedOut
                 }
                 if stopReason != nil {
