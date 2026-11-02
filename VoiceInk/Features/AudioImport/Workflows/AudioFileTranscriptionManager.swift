@@ -11,7 +11,17 @@ class AudioTranscriptionManager: ObservableObject {
     // MARK: - Published State
 
     @Published var queue: [AudioFileQueueItem] = []
-    @Published var isProcessingQueue = false
+    @Published var isProcessingQueue = false {
+        didSet {
+            // Keeps "Restart and Update" and the installer's quit request blocked.
+            guard isProcessingQueue != oldValue else { return }
+            if isProcessingQueue {
+                FileTranscriptionActivity.shared.begin()
+            } else {
+                FileTranscriptionActivity.shared.end()
+            }
+        }
+    }
     @Published var lastCompletedItemId: UUID?
 
     // MARK: - Private

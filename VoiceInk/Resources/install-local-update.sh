@@ -17,6 +17,12 @@ stale() {
     exit 75
 }
 
+cancelled() {
+    failure_message="$*"
+    printf 'Update cancelled: %s\n' "$*" >&2
+    exit 76
+}
+
 [[ "$#" -eq 5 ]] \
     || fail "Usage: install-local-update.sh APPROVED_SHA MANIFEST TARGET_BUNDLE BACKUP_BUNDLE PARENT_PID"
 
@@ -359,6 +365,10 @@ recovery_mover="${VOICEINK_UPDATE_RECOVERY_MOVER:-}"
 health_timeout="${VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS:-30}"
 stability_seconds="${VOICEINK_UPDATE_STABILITY_SECONDS:-10}"
 parent_exit_timeout="${VOICEINK_UPDATE_PARENT_EXIT_TIMEOUT_SECONDS:-30}"
+graceful_quit_timeout="${VOICEINK_UPDATE_GRACEFUL_QUIT_TIMEOUT_SECONDS:-$parent_exit_timeout}"
+quit_request_path="${VOICEINK_UPDATE_QUIT_REQUEST_PATH:-$stage_root/quit-request}"
+quit_response_path="${VOICEINK_UPDATE_QUIT_RESPONSE_PATH:-$stage_root/quit-response}"
+[[ "$graceful_quit_timeout" =~ ^[0-9]+$ ]] || fail "The graceful quit timeout is invalid."
 parent_terminated=false
 launched_pid=""
 recovery_published=false
@@ -436,6 +446,59 @@ move_recovery_directory() {
     else
         mv "$1" "$2"
     fi
+}
+
+# Ask VoiceInk to quit through its normal termination path so its termination
+# hooks save state and close panels. VoiceInk claims the request by renaming it
+# to "<request>.claimed", then answers "quit" when idle or "busy" while it
+# records, transcribes, or enhances. A busy app is never terminated: SIGTERM is
+# only allowed when the installer withdraws an unclaimed request at the timeout.
+quit_response_is_busy() {
+    [[ -f "$quit_response_path" ]] || return 1
+    [[ "$(/bin/cat "$quit_response_path" 2>/dev/null || true)" == busy ]]
+}
+
+cancel_busy_quit() {
+    /bin/rm -f "$quit_request_path" "$quit_request_path.claimed" "$quit_response_path"
+    cancelled "VoiceInk was recording, transcribing, or enhancing when installation was ready to quit it. The staged update is still available."
+}
+
+request_graceful_quit() {
+    /bin/rm -f "$quit_response_path" "$quit_request_path.claimed"
+    mkdir -p "$(dirname "$quit_request_path")" \
+        || fail "VoiceInk could not ask the running app to quit for installation."
+    if ! printf '%s\n' "$approved_sha" > "$quit_request_path.tmp.$$" \
+        || ! mv "$quit_request_path.tmp.$$" "$quit_request_path"; then
+        /bin/rm -f "$quit_request_path.tmp.$$"
+        fail "VoiceInk could not ask the running app to quit for installation."
+    fi
+    for ((attempt = 0; attempt < graceful_quit_timeout * 10; attempt++)); do
+        quit_response_is_busy && cancel_busy_quit
+        kill -0 "$parent_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    quit_response_is_busy && cancel_busy_quit
+
+    # Withdraw the request. Removing it succeeds only while VoiceInk has not
+    # claimed it, so a later SIGTERM can never race a "busy" answer.
+    if /bin/rm "$quit_request_path" 2>/dev/null || ! kill -0 "$parent_pid" 2>/dev/null; then
+        /bin/rm -f "$quit_request_path.claimed" "$quit_response_path"
+        return
+    fi
+
+    # VoiceInk claimed the request and is still deciding: wait for its answer.
+    for ((attempt = 0; attempt < parent_exit_timeout * 10; attempt++)); do
+        quit_response_is_busy && cancel_busy_quit
+        [[ -f "$quit_response_path" ]] && break
+        kill -0 "$parent_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    quit_response_is_busy && cancel_busy_quit
+    if [[ ! -f "$quit_response_path" ]] && kill -0 "$parent_pid" 2>/dev/null; then
+        /bin/rm -f "$quit_request_path.claimed"
+        cancelled "VoiceInk did not answer the installation quit request, so it was left running. The staged update is still available."
+    fi
+    /bin/rm -f "$quit_request_path.claimed" "$quit_response_path"
 }
 
 stop_launched_candidate() {
@@ -652,7 +715,14 @@ chmod 700 "$recovery_temporary"
 # replacement candidate when the fork advances.
 revalidate_fork
 
-kill -TERM "$parent_pid" || fail "VoiceInk could not be terminated for installation."
+request_graceful_quit
+
+if kill -0 "$parent_pid" 2>/dev/null; then
+    printf 'Notice: VoiceInk did not quit after the update request; sending SIGTERM.\n'
+    if ! kill -TERM "$parent_pid" 2>/dev/null && kill -0 "$parent_pid" 2>/dev/null; then
+        fail "VoiceInk could not be terminated for installation."
+    fi
+fi
 for ((attempt = 0; attempt < parent_exit_timeout * 10; attempt++)); do
     if ! kill -0 "$parent_pid" 2>/dev/null; then
         break

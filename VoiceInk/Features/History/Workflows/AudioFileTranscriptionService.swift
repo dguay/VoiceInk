@@ -11,7 +11,17 @@ struct AudioRetranscriptionResult {
 
 @MainActor
 class AudioTranscriptionService: ObservableObject {
-    @Published var isTranscribing = false
+    @Published var isTranscribing = false {
+        didSet {
+            // Keeps "Restart and Update" and the installer's quit request blocked.
+            guard isTranscribing != oldValue else { return }
+            if isTranscribing {
+                FileTranscriptionActivity.shared.begin()
+            } else {
+                FileTranscriptionActivity.shared.end()
+            }
+        }
+    }
     @Published var currentError: TranscriptionError?
 
     private let modelContext: ModelContext

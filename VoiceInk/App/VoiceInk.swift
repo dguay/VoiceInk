@@ -204,6 +204,10 @@ struct VoiceInkApp: App {
         _transcriptionModelManager = StateObject(wrappedValue: transcriptionModelManager)
         _recorderUIManager = StateObject(wrappedValue: recorderUIManager)
         _engine = StateObject(wrappedValue: engine)
+        updaterViewModel.observeEngineActivity(
+            engine.$recordingState.eraseToAnyPublisher(),
+            fileTranscriptionActivity: FileTranscriptionActivity.shared.$isActive.eraseToAnyPublisher()
+        )
 
         // 7. Create other services that depend on engine
         let recordingShortcutManager = RecordingShortcutManager(engine: engine, recorderUIManager: recorderUIManager)
@@ -442,11 +446,48 @@ struct VoiceInkApp: App {
                             updaterViewModel.deferStagedUpdate()
                         }
                         .keyboardShortcut(.defaultAction)
-                        Button("Restart and Update") {
-                            updaterViewModel.restartAndUpdate()
+                        if updaterViewModel.state.restartBlockedReason == nil {
+                            Button("Restart and Update") {
+                                updaterViewModel.restartAndUpdate()
+                            }
+                        } else {
+                            Button("Try Again When Idle") {
+                                updaterViewModel.restartWhenIdle()
+                            }
                         }
                     } message: { candidate in
-                        Text(verbatim: StagedUpdatePresentation(candidate: candidate).message)
+                        Text(
+                            verbatim: [
+                                StagedUpdatePresentation(candidate: candidate).message,
+                                updaterViewModel.state.restartBlockedReason
+                                    ?? updaterViewModel.state.restartMessage,
+                            ]
+                            .compactMap { $0 }
+                            .joined(separator: "\n\n")
+                        )
+                    }
+            }
+            .background {
+                EmptyView()
+                    .alert(
+                        "Update Not Started",
+                        isPresented: Binding(
+                            get: { updaterViewModel.state.isPresentingRestartMessage },
+                            set: { isPresented in
+                                if !isPresented {
+                                    updaterViewModel.dismissRestartMessage()
+                                }
+                            }
+                        )
+                    ) {
+                        Button("OK", role: .cancel) {
+                            updaterViewModel.dismissRestartMessage()
+                        }
+                    } message: {
+                        Text(
+                            updaterViewModel.state.restartMessage
+                                ?? "VoiceInk could not start the update."
+                        )
                     }
             }
             .alert(

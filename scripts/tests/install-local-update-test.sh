@@ -397,6 +397,8 @@ export VOICEINK_UPDATE_CREDENTIAL_SNAPSHOT_CREATOR="$fake_bin/create-credentials
 export VOICEINK_UPDATE_CREDENTIAL_SNAPSHOT_DELETER="$fake_bin/delete-credentials"
 export VOICEINK_TEST_CREDENTIAL_CREATE_LOG="$credential_create_log"
 export VOICEINK_TEST_CREDENTIAL_DELETE_LOG="$credential_delete_log"
+# Cases that do not exercise the quit handshake use a parent that cannot answer it.
+export VOICEINK_UPDATE_GRACEFUL_QUIT_TIMEOUT_SECONDS=0
 
 intent_counter=0
 prepare_recovery_intent() {
@@ -513,6 +515,185 @@ if kill -0 "$parent_pid" >/dev/null 2>&1; then
 fi
 parent_pid=""
 grep -Fq "could not relaunch the previous version" "$fixture_root/relaunch-failure-output.log"
+
+# Graceful quit: the installer asks the app to quit through its normal
+# termination path and only signals it after the graceful request times out.
+cat > "$fake_bin/quit-aware-parent" <<'EOF'
+#!/usr/bin/env bash
+request_path="$1"
+response_path="$2"
+marker_path="$3"
+mode="$4"
+trap 'printf "signal\n" >> "$marker_path"; exit 143' TERM
+for ((attempt = 0; attempt < 300; attempt++)); do
+    # "ignore" models an app that never handles the request, so it never claims it.
+    if [[ -f "$request_path" ]] \
+        && { [[ "$mode" == ignore ]] || mv "$request_path" "$request_path.claimed" 2>/dev/null; }; then
+        printf 'requested\n' >> "$marker_path"
+        if [[ "$mode" == late-busy ]]; then
+            # Answer only after the installer's graceful timeout has elapsed.
+            sleep 2
+            mode=busy
+        fi
+        if [[ "$mode" != ignore ]]; then
+            printf '%s\n' "$mode" > "$response_path.tmp"
+            mv "$response_path.tmp" "$response_path"
+        fi
+        if [[ "$mode" == quit ]]; then
+            printf 'graceful\n' >> "$marker_path"
+            exit 0
+        fi
+        break
+    fi
+    sleep 0.1
+done
+for ((attempt = 0; attempt < 300; attempt++)); do
+    sleep 0.1
+done
+EOF
+chmod +x "$fake_bin/quit-aware-parent"
+
+quit_request_path="$fixture_root/quit/request"
+quit_response_path="$fixture_root/quit/response"
+quit_marker="$fixture_root/quit/marker"
+mkdir -p "$fixture_root/quit"
+
+run_quit_installation() {
+    local graceful_timeout="$1"
+    local output_path="$2"
+    PATH="$fake_bin:$PATH" \
+        VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+        VOICEINK_UPDATE_STATE_SNAPSHOTTER="$fake_bin/fail-snapshot" \
+        VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+        VOICEINK_UPDATE_GRACEFUL_QUIT_TIMEOUT_SECONDS="$graceful_timeout" \
+        VOICEINK_UPDATE_QUIT_REQUEST_PATH="$quit_request_path" \
+        VOICEINK_UPDATE_QUIT_RESPONSE_PATH="$quit_response_path" \
+        VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+        /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+        "$new_sha" \
+        "$manifest_path" \
+        "$installed_bundle" \
+        "$backup_bundle" \
+        "$parent_pid" \
+        > "$output_path" 2>&1
+}
+
+: > "$quit_marker"
+"$fake_bin/quit-aware-parent" "$quit_request_path" "$quit_response_path" "$quit_marker" quit &
+parent_pid=$!
+prepare_recovery_intent
+set +e
+run_quit_installation 10 "$fixture_root/graceful-quit-output.log"
+graceful_quit_status=$?
+set -e
+
+[[ "$graceful_quit_status" -ne 0 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: parent survived the graceful quit request\n' >&2
+    exit 1
+fi
+parent_pid=""
+grep -Fqx "requested" "$quit_marker"
+grep -Fqx "graceful" "$quit_marker"
+if grep -Fqx "signal" "$quit_marker"; then
+    printf 'install-local-update-test: installer signalled a parent that quit gracefully\n' >&2
+    exit 1
+fi
+if grep -Fq "SIGTERM" "$fixture_root/graceful-quit-output.log"; then
+    printf 'install-local-update-test: installer reported a SIGTERM fallback after a graceful quit\n' >&2
+    exit 1
+fi
+[[ ! -e "$quit_request_path" ]]
+grep -Fq "snapshot" "$fixture_root/graceful-quit-output.log"
+
+: > "$quit_marker"
+/bin/rm -f "$quit_response_path"
+"$fake_bin/quit-aware-parent" "$quit_request_path" "$quit_response_path" "$quit_marker" ignore &
+parent_pid=$!
+prepare_recovery_intent
+set +e
+run_quit_installation 1 "$fixture_root/quit-fallback-output.log"
+quit_fallback_status=$?
+set -e
+
+[[ "$quit_fallback_status" -ne 0 ]]
+if kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: parent survived the SIGTERM fallback\n' >&2
+    exit 1
+fi
+parent_pid=""
+grep -Fqx "requested" "$quit_marker"
+grep -Fqx "signal" "$quit_marker"
+grep -Fq "sending SIGTERM" "$fixture_root/quit-fallback-output.log"
+[[ ! -e "$quit_request_path" ]]
+
+: > "$quit_marker"
+: > "$launch_log"
+: > "$credential_delete_log"
+/bin/rm -f "$quit_response_path"
+"$fake_bin/quit-aware-parent" "$quit_request_path" "$quit_response_path" "$quit_marker" busy &
+parent_pid=$!
+prepare_recovery_intent
+set +e
+run_quit_installation 10 "$fixture_root/quit-busy-output.log"
+quit_busy_status=$?
+set -e
+
+[[ "$quit_busy_status" -eq 76 ]]
+if ! kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: installer terminated a busy parent\n' >&2
+    exit 1
+fi
+grep -Fqx "requested" "$quit_marker"
+if grep -Fqx "signal" "$quit_marker"; then
+    printf 'install-local-update-test: installer signalled a busy parent\n' >&2
+    exit 1
+fi
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+[[ ! -e "$recovery_root.pending" ]]
+[[ ! -e "$recovery_root" ]]
+[[ ! -s "$launch_log" ]]
+[[ ! -e "$quit_request_path" ]]
+grep -Fqx "$VOICEINK_UPDATE_CREDENTIAL_GENERATION" "$credential_delete_log"
+grep -Fq "Update cancelled" "$fixture_root/quit-busy-output.log"
+kill "$parent_pid" >/dev/null 2>&1 || true
+wait "$parent_pid" 2>/dev/null || true
+parent_pid=""
+
+# A "busy" answer that arrives after the graceful timeout still vetoes the quit:
+# the app claimed the request, so the installer waits for it instead of signalling.
+: > "$quit_marker"
+: > "$launch_log"
+: > "$credential_delete_log"
+/bin/rm -f "$quit_response_path"
+"$fake_bin/quit-aware-parent" "$quit_request_path" "$quit_response_path" "$quit_marker" late-busy &
+parent_pid=$!
+prepare_recovery_intent
+set +e
+run_quit_installation 1 "$fixture_root/quit-late-busy-output.log"
+quit_late_busy_status=$?
+set -e
+
+[[ "$quit_late_busy_status" -eq 76 ]]
+if ! kill -0 "$parent_pid" >/dev/null 2>&1; then
+    printf 'install-local-update-test: installer terminated a parent that answered busy late\n' >&2
+    exit 1
+fi
+if grep -Fqx "signal" "$quit_marker"; then
+    printf 'install-local-update-test: installer signalled a parent that answered busy late\n' >&2
+    exit 1
+fi
+if grep -Fq "SIGTERM" "$fixture_root/quit-late-busy-output.log"; then
+    printf 'install-local-update-test: installer fell back to SIGTERM despite a claimed request\n' >&2
+    exit 1
+fi
+[[ "$(< "$installed_bundle/Contents/version")" == "installed-before-update" ]]
+[[ ! -s "$launch_log" ]]
+[[ ! -e "$quit_request_path" && ! -e "$quit_request_path.claimed" ]]
+grep -Fq "Update cancelled" "$fixture_root/quit-late-busy-output.log"
+kill "$parent_pid" >/dev/null 2>&1 || true
+wait "$parent_pid" 2>/dev/null || true
+parent_pid=""
 
 sleep 30 &
 parent_pid=$!

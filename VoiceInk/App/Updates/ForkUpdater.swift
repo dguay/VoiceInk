@@ -139,6 +139,7 @@ enum ForkUpdateCommandResult: Equatable, Sendable {
 enum ForkUpdateInstallationOutcome: Equatable {
     case completed
     case candidateStale
+    case cancelledWhileBusy
 }
 
 struct ForkUpdateInstallationRequest: Equatable {
@@ -744,23 +745,29 @@ struct ProcessForkUpdateInstallationRunner: ForkUpdateInstalling {
     private let retryDelays: [TimeInterval]
     private let sleep: @Sendable (TimeInterval) async throws -> Void
     private let logger: any ForkUpdateLogging
+    private let quitRequestHandler: any ForkUpdateQuitRequestHandling
 
     init(
         retryDelays: [TimeInterval] = [1, 5],
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { delay in
             try await Task.sleep(for: .seconds(delay))
         },
-        logger: any ForkUpdateLogging = ForkUpdateLogStore.shared
+        logger: any ForkUpdateLogging = ForkUpdateLogStore.shared,
+        quitRequestHandler: any ForkUpdateQuitRequestHandling = ApplicationForkUpdateQuitRequestHandler()
     ) {
         self.retryDelays = retryDelays
         self.sleep = sleep
         self.logger = logger
+        self.quitRequestHandler = quitRequestHandler
     }
 
     func install(_ request: ForkUpdateInstallationRequest) async throws -> ForkUpdateInstallationOutcome {
+        let quitRequestHandler = quitRequestHandler
         for attempt in 0 ... retryDelays.count {
             do {
-                return try await Task.detached { try Self.runOnce(request) }.value
+                return try await Task.detached {
+                    try Self.runOnce(request, quitRequestHandler: quitRequestHandler)
+                }.value
             } catch let failure as ForkUpdateFailure {
                 guard
                     failure.kind == .transient,
@@ -789,16 +796,27 @@ struct ProcessForkUpdateInstallationRunner: ForkUpdateInstalling {
     }
 
     private static func runOnce(
-        _ request: ForkUpdateInstallationRequest
+        _ request: ForkUpdateInstallationRequest,
+        quitRequestHandler: any ForkUpdateQuitRequestHandling
     ) throws -> ForkUpdateInstallationOutcome {
         let process = Process()
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("voiceink-install-\(UUID().uuidString).log")
         _ = FileManager.default.createFile(atPath: outputURL.path, contents: nil)
         let output = try FileHandle(forWritingTo: outputURL)
+        let quitDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("voiceink-install-quit-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: quitDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let quitRequestURL = quitDirectory.appendingPathComponent("request")
+        let quitResponseURL = quitDirectory.appendingPathComponent("response")
         defer {
             try? output.close()
             try? FileManager.default.removeItem(at: outputURL)
+            try? FileManager.default.removeItem(at: quitDirectory)
         }
 
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -814,15 +832,39 @@ struct ProcessForkUpdateInstallationRunner: ForkUpdateInstalling {
         process.standardError = output
         var environment = ProcessInfo.processInfo.environment
         environment["VOICEINK_UPDATE_CREDENTIAL_GENERATION"] = request.credentialGeneration
+        environment["VOICEINK_UPDATE_QUIT_REQUEST_PATH"] = quitRequestURL.path
+        environment["VOICEINK_UPDATE_QUIT_RESPONSE_PATH"] = quitResponseURL.path
         process.environment = environment
 
         try process.run()
+        // The installer asks VoiceInk to quit by creating the request file; VoiceInk
+        // answers once, then quits normally when idle or reports that it is busy.
+        var answeredQuitRequest = false
+        while process.isRunning {
+            // Claim the request by renaming it before answering. Once claimed, the
+            // installer cannot withdraw it and must wait for this answer instead of
+            // signalling VoiceInk, so a "busy" answer can never lose a race.
+            if !answeredQuitRequest,
+               FileManager.default.fileExists(atPath: quitRequestURL.path),
+               (try? FileManager.default.moveItem(
+                   at: quitRequestURL,
+                   to: quitDirectory.appendingPathComponent("request.claimed")
+               )) != nil {
+                answeredQuitRequest = true
+                quitRequestHandler.handleQuitRequest { response in
+                    try? Data("\(response.rawValue)\n".utf8).write(to: quitResponseURL, options: .atomic)
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
         process.waitUntilExit()
         switch process.terminationStatus {
         case 0:
             return .completed
         case 75:
             return .candidateStale
+        case 76:
+            return .cancelledWhileBusy
         default:
             try output.synchronize()
             let message = try tailMessage(at: outputURL)
@@ -1322,6 +1364,25 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
             )
             try removeRecoveryIntentIfPresent(at: context.recoveryIntentURL)
             return try await loadOrRevalidateCandidate()
+        case .cancelledWhileBusy:
+            await logger.record(
+                ForkUpdateLogRecord(
+                    timestamp: Date(),
+                    attemptIdentifier: context.attemptIdentifier,
+                    stage: .installation,
+                    outcome: .failed,
+                    candidateIdentifier: candidate.forkCommit,
+                    forkCommit: candidate.forkCommit,
+                    upstreamCommit: candidate.upstreamCommit,
+                    retry: nil,
+                    message: "VoiceInk became busy before installation could quit it; the restart was cancelled."
+                )
+            )
+            try credentialSnapshotter.deleteSnapshot(
+                generationIdentifier: context.credentialGeneration
+            )
+            try removeRecoveryIntentIfPresent(at: context.recoveryIntentURL)
+            throw ForkUpdateRestartCancellation.busy
         }
     }
 
@@ -1623,8 +1684,15 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
         }
     }
 
-    func requestRestart(for candidate: StagedForkCandidate) {
-        guard let transaction, candidate == stagedCandidate else { return }
+    func requestRestart(for candidate: StagedForkCandidate) throws {
+        guard let transaction else {
+            throw ForkUpdateError(message: "VoiceInk's local updater is unavailable, so the update could not start.")
+        }
+        guard candidate == stagedCandidate else {
+            throw ForkUpdateError(
+                message: "The staged update changed before the restart started. Check for updates again."
+            )
+        }
         if state.sessionInProgress {
             pendingRestartCandidate = candidate
             return
@@ -1647,6 +1715,8 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
                 } else {
                     self?.stagedCandidate = nil
                 }
+            } catch let cancellation as ForkUpdateRestartCancellation {
+                self?.onEvent?(.restartCancelled(candidate, reason: cancellation.message))
             } catch {
                 let failure = (error as? ForkUpdateFailure)
                     ?? .classify(
@@ -1700,7 +1770,9 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
         onEvent?(.didFinishUpdateCycle)
         if let pendingRestartCandidate {
             self.pendingRestartCandidate = nil
-            requestRestart(for: pendingRestartCandidate)
+            // A queued restart is rejected only when the finished cycle replaced or
+            // cleared the candidate; that cycle already reported its own outcome.
+            try? requestRestart(for: pendingRestartCandidate)
         }
     }
 }

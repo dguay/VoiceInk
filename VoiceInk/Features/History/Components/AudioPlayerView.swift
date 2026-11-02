@@ -610,8 +610,11 @@ struct AudioPlayerView: View {
 
         isReEnhancing = true
         operationFeedback = nil
+        // Blocks "Restart and Update" until the result is saved.
+        FileTranscriptionActivity.shared.begin()
 
-        Task {
+        Task { @MainActor in
+            defer { FileTranscriptionActivity.shared.end() }
             do {
                 transcription.aiEnhancementModelName =
                     enhancementConfiguration.modelName ?? enhancementConfiguration.provider?.defaultModel
