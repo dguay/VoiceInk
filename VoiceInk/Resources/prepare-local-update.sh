@@ -488,11 +488,72 @@ describe_signing_identity() {
     fi
 }
 
+# Resolves the configured selector (a certificate SHA-1 or a name) to exactly
+# one valid signing certificate in the keychain, so preflight compares and
+# xcodebuild signs with the same certificate. A name can match a replacement
+# certificate that only shares it, so the comparison is always by fingerprint.
+signing_fingerprint=""
+signing_name=""
+resolve_signing_identity() {
+    local listing
+    local line
+    local hash
+    local name
+    local selector_hash=""
+    local matched_hashes=()
+    local matched_names=()
+    local descriptions=""
+    local index
+    local previous_stage="$current_stage"
+    local previous_kind="$failure_kind"
+
+    [[ "$signing_identity" != "-" ]] || return 0
+    if [[ "$signing_identity" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+        selector_hash="$(printf '%s' "$signing_identity" | tr '[:lower:]' '[:upper:]')"
+    fi
+    listing="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*[0-9]+\)[[:space:]]+([0-9A-Fa-f]{40})[[:space:]]+\"(.*)\"[[:space:]]*$ ]] \
+            || continue
+        hash="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
+        name="${BASH_REMATCH[2]}"
+        if [[ -n "$selector_hash" ]]; then
+            [[ "$hash" == "$selector_hash" ]] || continue
+        else
+            [[ "$name" == *"$signing_identity"* ]] || continue
+        fi
+        if (( ${#matched_hashes[@]} > 0 )); then
+            for index in "${!matched_hashes[@]}"; do
+                [[ "${matched_hashes[$index]}" != "$hash" ]] || continue 2
+            done
+        fi
+        matched_hashes+=("$hash")
+        matched_names+=("$name")
+    done < <(printf '%s\n' "$listing")
+
+    current_stage=preflight
+    failure_kind=deterministic
+    if (( ${#matched_hashes[@]} == 0 )); then
+        fail "No valid code signing identity matching $(describe_signing_identity "$signing_identity") is in the keychain, so the update stopped before building. Set the persisted identity to an available certificate's SHA-1 with: git config --global voiceink.localCodesignIdentity <SHA-1>"
+    fi
+    if (( ${#matched_hashes[@]} > 1 )); then
+        for index in "${!matched_hashes[@]}"; do
+            descriptions="$descriptions${descriptions:+, }'${matched_names[$index]}' (${matched_hashes[$index]})"
+        done
+        fail "The signing identity setting $(describe_signing_identity "$signing_identity") matches ${#matched_hashes[@]} certificates: $descriptions. The update stopped before building. Choose one by SHA-1 with: git config --global voiceink.localCodesignIdentity <SHA-1>"
+    fi
+    current_stage="$previous_stage"
+    failure_kind="$previous_kind"
+    signing_fingerprint="${matched_hashes[0]}"
+    signing_name="${matched_names[0]}"
+}
+
 # macOS ties VoiceInk's privacy access to its signing identity. A candidate
 # signed by another identity (for example ad-hoc because the persisted identity
-# setting is missing) would lose that access and be rolled back after install,
-# so stop before spending a build on it. An unreadable installed signature
-# leaves nothing to compare, and the post-install permission check still runs.
+# setting is missing, or a different certificate with the same name) would lose
+# that access and be rolled back after install, so stop before spending a build
+# on it. An unreadable installed signature leaves nothing to compare, and the
+# post-install permission check still runs.
 verify_signing_identity() {
     local installed_bundle="${VOICEINK_INSTALLED_BUNDLE_PATH:-}"
     local details
@@ -502,6 +563,7 @@ verify_signing_identity() {
     local certificate_prefix="$work_root/installed-certificate"
     local matches=false
     local installed_description
+    local candidate_description
     local suggested_identity
 
     [[ -n "$installed_bundle" && -d "$installed_bundle" ]] || return 0
@@ -528,13 +590,11 @@ verify_signing_identity() {
         if [[ "$installed_name" == "-" ]]; then
             matches=true
         fi
-    elif [[ "$signing_identity" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+    else
         [[ -n "$installed_hash" || "$installed_name" == "-" ]] || return 0
-        if [[ "$installed_hash" == "$(printf '%s' "$signing_identity" | tr '[:lower:]' '[:upper:]')" ]]; then
+        if [[ "$installed_hash" == "$signing_fingerprint" ]]; then
             matches=true
         fi
-    elif [[ "$installed_name" != "-" && "$installed_name" == *"$signing_identity"* ]]; then
-        matches=true
     fi
     [[ "$matches" == false ]] || return 0
 
@@ -542,15 +602,21 @@ verify_signing_identity() {
     if [[ -n "$installed_hash" ]]; then
         installed_description="$installed_description ($installed_hash)"
     fi
+    if [[ "$signing_identity" == "-" ]]; then
+        candidate_description="$(describe_signing_identity "-")"
+    else
+        candidate_description="$(describe_signing_identity "$signing_name") ($signing_fingerprint)"
+    fi
     suggested_identity="${installed_hash:-$installed_name}"
     if [[ "$suggested_identity" == *" "* ]]; then
         suggested_identity="\"$suggested_identity\""
     fi
     current_stage=preflight
     failure_kind=deterministic
-    fail "VoiceInk would sign this update with $(describe_signing_identity "$signing_identity"), but the installed VoiceInk is signed with $installed_description. macOS would treat the update as a different app and drop VoiceInk's privacy access, so the update stopped before building. Set the persisted identity with: git config --global voiceink.localCodesignIdentity $suggested_identity"
+    fail "VoiceInk would sign this update with $candidate_description, but the installed VoiceInk is signed with $installed_description. macOS would treat the update as a different app and drop VoiceInk's privacy access, so the update stopped before building. Set the persisted identity with: git config --global voiceink.localCodesignIdentity $suggested_identity"
 }
 
+resolve_signing_identity
 verify_signing_identity
 
 if [[ "$worktree_added" == false ]]; then
@@ -566,7 +632,7 @@ xcode_arguments=(
     -xcconfig LocalBuild.xcconfig
     -skipPackagePluginValidation
     -skipMacroValidation
-    "VOICEINK_LOCAL_CODESIGN_IDENTITY=$signing_identity"
+    "VOICEINK_LOCAL_CODESIGN_IDENTITY=${signing_fingerprint:-$signing_identity}"
     "CODE_SIGNING_REQUIRED=$signing_required"
     CODE_SIGNING_ALLOWED=YES
     DEVELOPMENT_TEAM=

@@ -5,6 +5,10 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-prepare-update-test.XXXXXX")"
 trap 'rm -rf "$fixture_root"' EXIT
+# Keep the suite independent of the developer's global Git settings, such as a
+# persisted signing identity. Scenarios that need one pass their own file.
+export GIT_CONFIG_GLOBAL="$fixture_root/empty-global.gitconfig"
+: > "$GIT_CONFIG_GLOBAL"
 
 fork_bare="$fixture_root/fork.git"
 upstream_bare="$fixture_root/upstream.git"
@@ -136,7 +140,22 @@ if [[ -n "${CAFFEINATE_LOG:-}" ]]; then
 fi
 EOF
 
-chmod +x "$fake_bin/xcodebuild" "$fake_bin/codesign" "$fake_bin/caffeinate"
+# Lists the valid signing identities given as "SHA-1|name" lines, the way
+# `security find-identity -v -p codesigning` prints them.
+cat > "$fake_bin/security" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "find-identity -v -p codesigning" ]] || exit 1
+count=0
+while IFS='|' read -r hash name; do
+    [[ -n "$hash" ]] || continue
+    count=$((count + 1))
+    printf '  %d) %s "%s"\n' "$count" "$hash" "$name"
+done < <(printf '%b\n' "${CODESIGNING_IDENTITIES:-}")
+printf '     %d valid identities found\n' "$count"
+EOF
+
+chmod +x "$fake_bin/xcodebuild" "$fake_bin/codesign" "$fake_bin/caffeinate" "$fake_bin/security"
 
 deferred_manifest="$fixture_root/deferred/staged-candidate.plist"
 deferred_result="$fixture_root/deferred/preparation-result.plist"
@@ -359,9 +378,11 @@ stable_signing_config="$fixture_root/stable-signing.gitconfig"
 stable_signing_manifest="$fixture_root/stable-signing/staged-candidate.plist"
 stable_signing_xcode_log="$fixture_root/stable-signing-xcodebuild.log"
 git config --file "$stable_signing_config" voiceink.localCodesignIdentity "VoiceInk Local Development"
+stable_signing_hash="1111111111111111111111111111111111111111"
 
 PATH="$fake_bin:$PATH" \
     GIT_CONFIG_GLOBAL="$stable_signing_config" \
+    CODESIGNING_IDENTITIES="$stable_signing_hash|VoiceInk Local Development" \
     CANONICAL_PATH="$canonical_clone" \
     XCODE_LOG="$stable_signing_xcode_log" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -369,7 +390,7 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
     /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
 
-grep -Fq -- 'VOICEINK_LOCAL_CODESIGN_IDENTITY=VoiceInk Local Development' "$stable_signing_xcode_log"
+grep -Fq -- "VOICEINK_LOCAL_CODESIGN_IDENTITY=$stable_signing_hash " "$stable_signing_xcode_log"
 grep -Fq -- 'CODE_SIGNING_REQUIRED=YES' "$stable_signing_xcode_log"
 
 # Consecutive preparations reuse persistent build caches under the updater's
@@ -514,6 +535,7 @@ git config --file "$hash_identity_config" voiceink.localCodesignIdentity "$insta
 hash_identity_manifest="$fixture_root/identity-hash/staged-candidate.plist"
 PATH="$fake_bin:$PATH" \
     GIT_CONFIG_GLOBAL="$hash_identity_config" \
+    CODESIGNING_IDENTITIES="$installed_leaf_hash|VoiceInk Local Development" \
     CANONICAL_PATH="$canonical_clone" \
     XCODE_LOG="$xcode_log" \
     INSTALLED_SIGNATURE_DETAILS='Authority=VoiceInk Local Development' \
@@ -525,18 +547,95 @@ PATH="$fake_bin:$PATH" \
     /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
 [[ -f "$hash_identity_manifest" ]]
 
+# A name selector resolves to the certificate it names in the keychain, and
+# that certificate's fingerprint is what is compared and handed to xcodebuild.
 name_identity_manifest="$fixture_root/identity-name/staged-candidate.plist"
+name_identity_xcode_log="$fixture_root/identity-name-xcodebuild.log"
 PATH="$fake_bin:$PATH" \
     GIT_CONFIG_GLOBAL="$stable_signing_config" \
+    CODESIGNING_IDENTITIES="0000000000000000000000000000000000000001|Apple Development: Someone Else\n$installed_leaf_hash|VoiceInk Local Development" \
     CANONICAL_PATH="$canonical_clone" \
-    XCODE_LOG="$xcode_log" \
+    XCODE_LOG="$name_identity_xcode_log" \
     INSTALLED_SIGNATURE_DETAILS='Authority=VoiceInk Local Development' \
+    INSTALLED_LEAF_CERTIFICATE="$installed_leaf" \
     VOICEINK_INSTALLED_BUNDLE_PATH="$installed_bundle" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
     VOICEINK_UPDATE_MANIFEST_PATH="$name_identity_manifest" \
     VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
     /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
 [[ -f "$name_identity_manifest" ]]
+grep -Fq -- "VOICEINK_LOCAL_CODESIGN_IDENTITY=$installed_leaf_hash " "$name_identity_xcode_log"
+
+# A replacement certificate that only shares the installed certificate's name
+# is a different identity to macOS, so it fails at preflight.
+replacement_hash="2222222222222222222222222222222222222222"
+replacement_manifest="$fixture_root/identity-replacement/staged-candidate.plist"
+replacement_result="$fixture_root/identity-replacement/preparation-result.plist"
+xcode_lines_before_replacement="$(wc -l < "$xcode_log")"
+if PATH="$fake_bin:$PATH" \
+    GIT_CONFIG_GLOBAL="$stable_signing_config" \
+    CODESIGNING_IDENTITIES="$replacement_hash|VoiceInk Local Development" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    INSTALLED_SIGNATURE_DETAILS='Authority=VoiceInk Local Development' \
+    INSTALLED_LEAF_CERTIFICATE="$installed_leaf" \
+    VOICEINK_INSTALLED_BUNDLE_PATH="$installed_bundle" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$replacement_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$replacement_result" \
+    VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/identity-replacement.log" 2>&1
+then
+    printf 'prepare-local-update-test: a same-name replacement certificate was accepted\n' >&2
+    exit 1
+fi
+replacement_message="$(/usr/bin/plutil -extract message raw "$replacement_result" 2>/dev/null || true)"
+if [[ "$(/usr/bin/plutil -extract stage raw "$replacement_result" 2>/dev/null || true)" != "preflight" \
+    || "$replacement_message" != *"$replacement_hash"* \
+    || "$replacement_message" != *"$installed_leaf_hash"* \
+    || "$(wc -l < "$xcode_log")" -ne "$xcode_lines_before_replacement" \
+    || -e "$replacement_manifest" ]]
+then
+    printf 'prepare-local-update-test: same-name replacement did not fail at preflight: %s\n' "$replacement_message" >&2
+    exit 1
+fi
+
+# A selector that matches several certificates cannot say which one signs the
+# candidate, so it fails at preflight and lists them.
+ambiguous_manifest="$fixture_root/identity-ambiguous/staged-candidate.plist"
+ambiguous_result="$fixture_root/identity-ambiguous/preparation-result.plist"
+if PATH="$fake_bin:$PATH" \
+    GIT_CONFIG_GLOBAL="$stable_signing_config" \
+    CODESIGNING_IDENTITIES="$installed_leaf_hash|VoiceInk Local Development\n$replacement_hash|VoiceInk Local Development (2)" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    INSTALLED_SIGNATURE_DETAILS='Authority=VoiceInk Local Development' \
+    INSTALLED_LEAF_CERTIFICATE="$installed_leaf" \
+    VOICEINK_INSTALLED_BUNDLE_PATH="$installed_bundle" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$ambiguous_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$ambiguous_result" \
+    VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/identity-ambiguous.log" 2>&1
+then
+    printf 'prepare-local-update-test: an ambiguous signing identity was accepted\n' >&2
+    exit 1
+fi
+ambiguous_message="$(/usr/bin/plutil -extract message raw "$ambiguous_result" 2>/dev/null || true)"
+if [[ "$(/usr/bin/plutil -extract stage raw "$ambiguous_result" 2>/dev/null || true)" != "preflight" \
+    || "$(/usr/bin/plutil -extract kind raw "$ambiguous_result" 2>/dev/null || true)" != "deterministic" \
+    || "$ambiguous_message" != *"matches 2 certificates"* \
+    || "$ambiguous_message" != *"$installed_leaf_hash"* \
+    || "$ambiguous_message" != *"$replacement_hash"* \
+    || "$(wc -l < "$xcode_log")" -ne "$xcode_lines_before_replacement" \
+    || -e "$ambiguous_manifest" ]]
+then
+    printf 'prepare-local-update-test: ambiguous identity did not fail at preflight: %s\n' "$ambiguous_message" >&2
+    exit 1
+fi
+[[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
 
 # Preparation prunes orphaned candidate references and stage directories that
 # are older than the retention window and not contained in the fork's main.
