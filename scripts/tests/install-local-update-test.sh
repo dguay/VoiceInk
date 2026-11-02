@@ -305,6 +305,19 @@ then
     exit 86
 fi
 
+if [[ " $* " == *" fetch origin main "* \
+    && -n "${VOICEINK_TEST_REQUIRED_HEALTH_PATH:-}" \
+    && -f "$VOICEINK_TEST_REQUIRED_HEALTH_PATH" ]]
+then
+    if [[ "${VOICEINK_TEST_FAIL_FETCH_AFTER_HEALTH:-0}" == 1 ]]; then
+        printf 'simulated post-health network failure\n' >&2
+        exit 86
+    fi
+    if [[ -n "${VOICEINK_TEST_DIRTY_AFTER_HEALTH_PATH:-}" ]]; then
+        printf 'edited during installation\n' > "$VOICEINK_TEST_DIRTY_AFTER_HEALTH_PATH"
+    fi
+fi
+
 if [[ " $* " == *" push origin "* && " $* " == *":refs/heads/main "* ]]; then
     [[ " $* " != *" --force"* ]]
     [[ -f "$VOICEINK_TEST_REQUIRED_HEALTH_PATH" ]]
@@ -664,6 +677,8 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_TEST_PEER_CLONE="$peer_clone" \
     VOICEINK_TEST_PEER_PUSHED_PATH="$peer_pushed_path" \
     VOICEINK_TEST_FETCH_LOG="$peer_fetch_log" \
+    VOICEINK_UPDATE_OUTCOME_RECORDER="$fake_bin/record-outcome" \
+    VOICEINK_TEST_OUTCOME_REPORT="$fixture_root/rejected-push-outcome.plist" \
     /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
     "$new_sha" \
     "$manifest_path" \
@@ -691,6 +706,13 @@ if git -C "$canonical_clone" rev-parse "$candidate_ref" >/dev/null 2>&1; then
 fi
 [[ "$(grep -c '^fetch$' "$peer_fetch_log")" -eq 4 ]]
 grep -Fq "another Mac changed the fork; prepare and approve a new candidate" "$fixture_root/rejected-push-output.log"
+# A discarded candidate is a rolled-back installation, not a pending publication.
+[[ "$(/usr/bin/plutil -extract failureStage raw "$fixture_root/rejected-push-outcome.plist")" == "installation" ]]
+[[ "$(/usr/bin/plutil -extract rollbackOutcome raw "$fixture_root/rejected-push-outcome.plist")" == "succeeded" ]]
+if grep -Fq "publication to the fork is pending" "$fixture_root/rejected-push-outcome.plist"; then
+    printf 'install-local-update-test: discarded candidate was reported as pending publication\n' >&2
+    exit 1
+fi
 
 git --git-dir="$fork_bare" update-ref refs/heads/main "$fork_base_sha" "$peer_sha"
 original_new_sha="$new_sha"
@@ -933,6 +955,185 @@ kill "$ambiguous_launched_pid"
 /bin/rm -rf "$installed_bundle"
 /usr/bin/ditto "$backup_bundle" "$installed_bundle"
 git --git-dir="$fork_bare" update-ref refs/heads/main "$fork_base_sha" "$new_sha"
+
+# Publication failures after the health window must keep the healthy app
+# running, retain the staged candidate, and let the next preparation run
+# publish the installed candidate without rebuilding it.
+upstream_bare="$fixture_root/upstream.git"
+git init --bare --initial-branch=main "$upstream_bare" >/dev/null
+git -C "$canonical_clone" push "$upstream_bare" "$new_sha:refs/heads/main" >/dev/null 2>&1
+git -C "$canonical_clone" remote add upstream "$upstream_bare"
+
+cat > "$fake_bin/xcodebuild" <<'EOF'
+#!/usr/bin/env bash
+printf 'install-local-update-test: preparation rebuilt the installed candidate\n' >&2
+exit 1
+EOF
+chmod +x "$fake_bin/xcodebuild"
+
+pending_original_staged_bundle="$staged_bundle"
+staged_bundle="$fixture_root/staging/candidates/$new_sha-1-1/VoiceInk.app"
+
+expect_pending_retry_failure() {
+    local retry_scenario="$1"
+    local retry_result="$fixture_root/$retry_scenario-preparation.plist"
+
+    if PATH="$fake_bin:$PATH" \
+        VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+        VOICEINK_UPDATE_MANIFEST_PATH="$manifest_path" \
+        VOICEINK_UPDATE_RESULT_PATH="$retry_result" \
+        VOICEINK_INSTALLED_FORK_COMMIT="$new_sha" \
+        /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+        > "$fixture_root/$retry_scenario-output.log" 2>&1
+    then
+        printf 'install-local-update-test: %s retry succeeded unexpectedly\n' "$retry_scenario" >&2
+        exit 1
+    fi
+    [[ "$(/usr/bin/plutil -extract outcome raw "$retry_result")" == "failure" ]]
+    [[ "$(/usr/bin/plutil -extract stage raw "$retry_result")" == "publication" ]]
+    [[ "$(/usr/bin/plutil -extract kind raw "$retry_result")" == "transient" ]]
+    grep -Fq "publication to the fork is pending" "$retry_result"
+    [[ "$(/usr/bin/plutil -extract forkCommit raw "$manifest_path")" == "$new_sha" ]]
+    [[ "$(git -C "$canonical_clone" rev-parse "$candidate_ref")" == "$new_sha" ]]
+    [[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$fork_base_sha" ]]
+}
+
+run_pending_publication() {
+    local scenario="$1"
+    shift
+    local output_log="$fixture_root/$scenario-output.log"
+    local pending_outcome="$fixture_root/$scenario-outcome.plist"
+    local preparation_result="$fixture_root/$scenario-preparation.plist"
+    local pending_status
+    local pending_launched_pid
+
+    stage_publishable_candidate newer-candidate
+    sleep 30 &
+    parent_pid=$!
+    : > "$launch_log"
+    : > "$publish_log"
+    /bin/rm -f "$health_path"
+    prepare_recovery_intent
+    set +e
+    env "$@" \
+        PATH="$fake_bin:$PATH" \
+        VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+        VOICEINK_UPDATE_GIT_COMMAND="$fake_bin/git-require-health-before-push" \
+        VOICEINK_UPDATE_APPLICATION_SUPPORT_PATH="$application_support" \
+        VOICEINK_UPDATE_PREFERENCES_PATH="$preferences" \
+        VOICEINK_UPDATE_LAUNCHER="$fake_bin/launch-voiceink" \
+        VOICEINK_UPDATE_ATOMIC_REPLACER="$fake_bin/replace-bundle" \
+        VOICEINK_UPDATE_RELAUNCHER="$fake_bin/relaunch-voiceink" \
+        VOICEINK_UPDATE_OUTCOME_RECORDER="$fake_bin/record-outcome" \
+        VOICEINK_UPDATE_HEALTH_PATH="$health_path" \
+        VOICEINK_UPDATE_HEALTH_TIMEOUT_SECONDS=2 \
+        VOICEINK_UPDATE_STABILITY_SECONDS=1 \
+        VOICEINK_TEST_LAUNCH_LOG="$launch_log" \
+        VOICEINK_TEST_REQUIRED_HEALTH_PATH="$health_path" \
+        VOICEINK_TEST_REQUIRED_PUBLISH_SHA="$new_sha" \
+        VOICEINK_TEST_PUBLISH_LOG="$publish_log" \
+        VOICEINK_TEST_OUTCOME_REPORT="$pending_outcome" \
+        /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
+        "$new_sha" \
+        "$manifest_path" \
+        "$installed_bundle" \
+        "$backup_bundle" \
+        "$parent_pid" \
+        > "$output_log" 2>&1
+    pending_status=$?
+    set -e
+
+    if [[ "$pending_status" -eq 0 ]]; then
+        printf 'install-local-update-test: %s publication failure reported success\n' "$scenario" >&2
+        exit 1
+    fi
+    if kill -0 "$parent_pid" >/dev/null 2>&1; then
+        printf 'install-local-update-test: approved parent survived %s installation\n' "$scenario" >&2
+        exit 1
+    fi
+    parent_pid=""
+    pending_launched_pid="$(/usr/bin/plutil -extract processIdentifier raw "$health_path")"
+    if ! kill -0 "$pending_launched_pid" >/dev/null 2>&1; then
+        printf 'install-local-update-test: %s publication failure stopped the healthy app\n' "$scenario" >&2
+        exit 1
+    fi
+    if grep -Fq "rollback:" "$launch_log"; then
+        printf 'install-local-update-test: %s publication failure rolled back the healthy app\n' "$scenario" >&2
+        exit 1
+    fi
+    [[ "$(< "$installed_bundle/Contents/version")" == "newer-candidate" ]]
+    [[ "$(/usr/bin/plutil -extract installInProgress raw "$recovery_root/recovery.plist")" == "false" ]]
+    if /usr/bin/plutil -extract suppressedForkCommit raw "$recovery_root/recovery.plist" >/dev/null 2>&1; then
+        printf 'install-local-update-test: %s publication failure suppressed the candidate\n' "$scenario" >&2
+        exit 1
+    fi
+    [[ ! -s "$publish_log" ]]
+    [[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$fork_base_sha" ]]
+    [[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$old_sha" ]]
+    [[ "$(/usr/bin/plutil -extract forkCommit raw "$manifest_path")" == "$new_sha" ]]
+    [[ "$(/usr/bin/plutil -extract candidateRef raw "$manifest_path")" == "$candidate_ref" ]]
+    [[ -d "$staged_bundle" ]]
+    [[ "$(git -C "$canonical_clone" rev-parse "$candidate_ref")" == "$new_sha" ]]
+    [[ "$(/usr/bin/plutil -extract outcome raw "$pending_outcome")" == "failed" ]]
+    [[ "$(/usr/bin/plutil -extract failureStage raw "$pending_outcome")" == "publication" ]]
+    grep -Fq "publication to the fork is pending" "$pending_outcome"
+    if /usr/bin/plutil -extract rollbackOutcome raw "$pending_outcome" >/dev/null 2>&1; then
+        printf 'install-local-update-test: %s publication failure recorded a rollback\n' "$scenario" >&2
+        exit 1
+    fi
+    grep -Fq "publication is pending" "$output_log"
+
+    # A retry that still cannot publish keeps reporting the pending publication.
+    if [[ -n "${pending_cleanup_path:-}" ]]; then
+        expect_pending_retry_failure "$scenario-still-dirty"
+        /bin/rm -f "$pending_cleanup_path"
+    else
+        git -C "$canonical_clone" remote set-url origin "$fixture_root/unreachable.git"
+        expect_pending_retry_failure "$scenario-still-offline"
+        git -C "$canonical_clone" remote set-url origin "$fork_bare"
+    fi
+    PATH="$fake_bin:$PATH" \
+        VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+        VOICEINK_UPDATE_MANIFEST_PATH="$manifest_path" \
+        VOICEINK_UPDATE_RESULT_PATH="$preparation_result" \
+        VOICEINK_INSTALLED_FORK_COMMIT="$new_sha" \
+        /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+        > "$fixture_root/$scenario-prepare-output.log" 2>&1 \
+        || { cat "$fixture_root/$scenario-prepare-output.log" >&2; exit 1; }
+
+    [[ "$(/usr/bin/plutil -extract outcome raw "$preparation_result")" == "upToDate" ]]
+    [[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$new_sha" ]]
+    [[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$new_sha" ]]
+    [[ ! -e "$manifest_path" ]]
+    [[ ! -e "$staged_bundle" ]]
+    if git -C "$canonical_clone" rev-parse --verify --quiet "$candidate_ref" >/dev/null; then
+        printf 'install-local-update-test: %s retry left the candidate reference\n' "$scenario" >&2
+        exit 1
+    fi
+    kill -0 "$pending_launched_pid"
+
+    kill "$pending_launched_pid"
+    /bin/rm -rf "$installed_bundle"
+    /usr/bin/ditto "$backup_bundle" "$installed_bundle"
+    git --git-dir="$fork_bare" update-ref refs/heads/main "$fork_base_sha" "$new_sha"
+    git -C "$canonical_clone" switch --detach "$old_sha" >/dev/null 2>&1
+    git -C "$canonical_clone" branch -f main "$old_sha"
+    git -C "$canonical_clone" switch main >/dev/null 2>&1
+    git -C "$canonical_clone" fetch origin main >/dev/null 2>&1
+}
+
+run_pending_publication fetch-failure VOICEINK_TEST_FAIL_FETCH_AFTER_HEALTH=1
+
+pending_cleanup_path="$canonical_clone/edited-during-installation"
+run_pending_publication clone-changed \
+    VOICEINK_TEST_DIRTY_AFTER_HEALTH_PATH="$pending_cleanup_path"
+grep -Fq "changed during preparation" "$fixture_root/clone-changed-output.log"
+pending_cleanup_path=""
+
+git -C "$canonical_clone" remote remove upstream
+/bin/rm -f "$fake_bin/xcodebuild"
+staged_bundle="$pending_original_staged_bundle"
+stage_publishable_candidate newer-candidate
 
 sleep 30 &
 parent_pid=$!

@@ -414,21 +414,85 @@ fast_forward_candidate_stage="$(dirname "$fast_forward_staged_bundle")"
 [[ "$(git -C "$canonical_clone" status --porcelain)" == "" ]]
 [[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
 
-publication_retry_result="$fixture_root/fast-forward/preparation-result.plist"
+# A healthy installed candidate whose publication did not finish is retained.
+# The next preparation run publishes it without rebuilding. Use a copy of the
+# staged candidate so the shared fixture state stays intact for later cases.
+retry_root="$fixture_root/publication-retry"
+retry_manifest="$retry_root/staged-candidate.plist"
+retry_result="$retry_root/preparation-result.plist"
+retry_stage="$retry_root/candidates/$upstream_fast_forward_sha-1-1"
+retry_ref="refs/voiceink-updater/candidates/$upstream_fast_forward_sha-1-1"
+mkdir -p "$retry_stage"
+/usr/bin/ditto "$fast_forward_staged_bundle" "$retry_stage/VoiceInk.app"
+cp "$fast_forward_manifest" "$retry_manifest"
+/usr/bin/plutil -replace bundlePath -string "$retry_stage/VoiceInk.app" "$retry_manifest"
+/usr/bin/plutil -replace candidateRef -string "$retry_ref" "$retry_manifest"
+git -C "$canonical_clone" update-ref "$retry_ref" "$upstream_fast_forward_sha"
 xcode_lines_before_retry="$(wc -l < "$xcode_log")"
-PATH="$fake_bin:$PATH" \
-    CANONICAL_PATH="$canonical_clone" \
-    XCODE_LOG="$xcode_log" \
-    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
-    VOICEINK_UPDATE_MANIFEST_PATH="$fast_forward_manifest" \
-    VOICEINK_UPDATE_RESULT_PATH="$publication_retry_result" \
-    VOICEINK_INSTALLED_FORK_COMMIT="$upstream_fast_forward_sha" \
-    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
-[[ "$(/usr/bin/plutil -extract outcome raw "$publication_retry_result")" == "candidatePrepared" ]]
-[[ "$(/usr/bin/plutil -extract candidateRef raw "$fast_forward_manifest")" == "$fast_forward_candidate_ref" ]]
-[[ -d "$fast_forward_staged_bundle" ]]
-[[ "$(git -C "$canonical_clone" rev-parse "$fast_forward_candidate_ref")" == "$upstream_fast_forward_sha" ]]
+
+run_publication_retry() {
+    PATH="$fake_bin:$PATH" \
+        CANONICAL_PATH="$canonical_clone" \
+        XCODE_LOG="$xcode_log" \
+        VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+        VOICEINK_UPDATE_MANIFEST_PATH="$retry_manifest" \
+        VOICEINK_UPDATE_RESULT_PATH="$retry_result" \
+        VOICEINK_INSTALLED_FORK_COMMIT="$upstream_fast_forward_sha" \
+        /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+}
+
+# Local main that cannot fast-forward keeps the candidate pending.
+git -C "$canonical_clone" switch --detach "$before_head" >/dev/null 2>&1
+diverged_local_sha="$(git -C "$canonical_clone" commit-tree -p "$before_head" -m "test: diverge local main" "$before_head^{tree}")"
+git -C "$canonical_clone" update-ref refs/heads/main "$diverged_local_sha" "$before_head"
+if run_publication_retry > "$retry_root/diverged-output.log" 2>&1; then
+    printf 'prepare-local-update-test: diverged local main published the retained candidate\n' >&2
+    exit 1
+fi
+[[ "$(/usr/bin/plutil -extract outcome raw "$retry_result")" == "failure" ]]
+[[ "$(/usr/bin/plutil -extract stage raw "$retry_result")" == "publication" ]]
+[[ "$(/usr/bin/plutil -extract kind raw "$retry_result")" == "transient" ]]
+grep -Fq "Local main cannot fast-forward to the installed update" "$retry_root/diverged-output.log"
+[[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$candidate_sha" ]]
+[[ -f "$retry_manifest" && -d "$retry_stage/VoiceInk.app" ]]
+[[ "$(git -C "$canonical_clone" rev-parse "$retry_ref")" == "$upstream_fast_forward_sha" ]]
+git -C "$canonical_clone" update-ref refs/heads/main "$before_head" "$diverged_local_sha"
+git -C "$canonical_clone" switch main >/dev/null 2>&1
+
+run_publication_retry
+[[ "$(/usr/bin/plutil -extract outcome raw "$retry_result")" == "upToDate" ]]
+[[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$upstream_fast_forward_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$upstream_fast_forward_sha" ]]
+[[ "$(git -C "$canonical_clone" status --porcelain)" == "" ]]
+[[ ! -e "$retry_manifest" && ! -e "$retry_stage" ]]
+if git -C "$canonical_clone" rev-parse --verify --quiet "$retry_ref" >/dev/null; then
+    printf 'prepare-local-update-test: published candidate reference was not cleaned up\n' >&2
+    exit 1
+fi
 [[ "$(wc -l < "$xcode_log")" -eq "$xcode_lines_before_retry" ]]
+[[ "$(git -C "$canonical_clone" rev-parse "$fast_forward_candidate_ref")" == "$upstream_fast_forward_sha" ]]
+
+# Origin already has the installed candidate but local main did not converge.
+# The retry must still advance local main before it drops the retained state.
+git -C "$canonical_clone" reset --hard --quiet "$before_head"
+mkdir -p "$retry_stage"
+/usr/bin/ditto "$fast_forward_staged_bundle" "$retry_stage/VoiceInk.app"
+cp "$fast_forward_manifest" "$retry_manifest"
+/usr/bin/plutil -replace bundlePath -string "$retry_stage/VoiceInk.app" "$retry_manifest"
+/usr/bin/plutil -replace candidateRef -string "$retry_ref" "$retry_manifest"
+git -C "$canonical_clone" update-ref "$retry_ref" "$upstream_fast_forward_sha"
+run_publication_retry
+[[ "$(/usr/bin/plutil -extract outcome raw "$retry_result")" == "upToDate" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$upstream_fast_forward_sha" ]]
+[[ ! -e "$retry_manifest" && ! -e "$retry_stage" ]]
+if git -C "$canonical_clone" rev-parse --verify --quiet "$retry_ref" >/dev/null; then
+    printf 'prepare-local-update-test: converged candidate reference was not cleaned up\n' >&2
+    exit 1
+fi
+
+git --git-dir="$fork_bare" update-ref refs/heads/main "$candidate_sha" "$upstream_fast_forward_sha"
+git -C "$canonical_clone" reset --hard --quiet "$before_head"
+git -C "$canonical_clone" fetch --quiet origin main
 
 second_fast_forward_manifest="$fixture_root/fast-forward-second/staged-candidate.plist"
 PATH="$fake_bin:$PATH" \
@@ -492,6 +556,29 @@ merge_candidate_ref="$(/usr/bin/plutil -extract candidateRef raw "$merge_manifes
 [[ "$(git -C "$canonical_clone" rev-parse HEAD)" == "$before_head" ]]
 [[ "$(git -C "$canonical_clone" status --porcelain)" == "" ]]
 [[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+
+# A retained merge candidate is identified from its manifest, because a
+# recomputed merge commit gets a different SHA one second later.
+sleep 1
+merge_retry_result="$fixture_root/merge/publication-retry-result.plist"
+xcode_lines_before_merge_retry="$(wc -l < "$xcode_log")"
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$merge_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$merge_retry_result" \
+    VOICEINK_INSTALLED_FORK_COMMIT="$merge_candidate_sha" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+[[ "$(/usr/bin/plutil -extract outcome raw "$merge_retry_result")" == "upToDate" ]]
+[[ "$(/usr/bin/plutil -extract forkCommit raw "$merge_retry_result")" == "$merge_candidate_sha" ]]
+[[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$merge_candidate_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$merge_candidate_sha" ]]
+[[ ! -e "$merge_manifest" ]]
+[[ "$(wc -l < "$xcode_log")" -eq "$xcode_lines_before_merge_retry" ]]
+git --git-dir="$fork_bare" update-ref refs/heads/main "$diverged_fork_sha" "$merge_candidate_sha"
+git -C "$canonical_clone" reset --hard --quiet "$before_head"
+git -C "$canonical_clone" fetch --quiet origin main
 
 printf 'fork-conflict\n' > "$fork_writer/README.md"
 git -C "$fork_writer" add README.md

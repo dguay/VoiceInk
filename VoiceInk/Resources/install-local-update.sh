@@ -12,6 +12,7 @@ fail() {
 }
 
 stale() {
+    failure_message="$*"
     printf 'Update stale: %s\n' "$*" >&2
     exit 75
 }
@@ -119,6 +120,10 @@ discard_staged_candidate() {
     local discard_bundle
     local discard_stage
 
+    # A discarded candidate can no longer be published, so its failure is not a
+    # pending publication and keeps the ordinary rollback path and stage.
+    publication_pending=false
+    [[ "$failure_stage" != "publication" ]] || failure_stage="installation"
     discard_bundle="$(/usr/bin/plutil -extract bundlePath raw "$manifest_path" 2>/dev/null || true)"
     discard_stage="$(dirname "$discard_bundle")"
     if [[ "$(dirname "$discard_stage")" == "$stage_root/candidates" \
@@ -239,7 +244,13 @@ recompute_after_peer_push() {
 }
 
 publish_verified_candidate() {
-    refresh_fork_head
+    # The candidate is installed, healthy and committed. From here a failure
+    # leaves it running and retains the staged candidate for the next
+    # preparation run to publish, unless the candidate itself is discarded.
+    failure_stage="publication"
+    publication_pending=true
+    refresh_fork_head \
+        || fail "VoiceInk could not fetch origin to publish the installed update."
     preflight_local_publication
     publication_head_sha="$approved_sha"
 
@@ -354,6 +365,7 @@ recovery_published=false
 credential_snapshot_created=true
 publication_succeeded=false
 publication_outcome_uncertain=false
+publication_pending=false
 rollback_attempted=false
 rollback_succeeded=false
 needs_relaunch=false
@@ -510,8 +522,18 @@ cleanup_installation_artifacts() {
 
 persist_installation_outcome() {
     local outcome="succeeded"
+    local failure_kind=deterministic
+    local message="${failure_message:-VoiceInk could not install the local update.}"
     local temporary="$install_result_path.tmp.$$"
     [[ "$result" -eq 0 ]] || outcome="failed"
+    if [[ "$failure_stage" == "publication" ]]; then
+        failure_kind=transient
+        if [[ "$publication_succeeded" == true ]]; then
+            message="VoiceInk installed and published the update, but local main did not converge: ${failure_message:-the local clone could not be updated.}"
+        else
+            message="VoiceInk installed the update; publication to the fork is pending: ${failure_message:-publication did not finish.}"
+        fi
+    fi
     mkdir -p "$(dirname "$install_result_path")"
     /usr/bin/plutil -create xml1 "$temporary"
     /usr/bin/plutil -insert attemptIdentifier -string "installation-$approved_sha" "$temporary"
@@ -521,9 +543,8 @@ persist_installation_outcome() {
     /usr/bin/plutil -insert outcome -string "$outcome" "$temporary"
     if [[ "$outcome" == "failed" ]]; then
         /usr/bin/plutil -insert failureStage -string "$failure_stage" "$temporary"
-        /usr/bin/plutil -insert failureKind -string deterministic "$temporary"
-        /usr/bin/plutil -insert message -string \
-            "${failure_message:-VoiceInk could not install the local update.}" "$temporary"
+        /usr/bin/plutil -insert failureKind -string "$failure_kind" "$temporary"
+        /usr/bin/plutil -insert message -string "$message" "$temporary"
     fi
     if [[ "$rollback_attempted" == true ]]; then
         rollback_outcome="failed"
@@ -554,6 +575,8 @@ finish_transaction() {
         printf 'Error: Publication is uncertain; the healthy candidate and retry state were preserved.\n' >&2
     elif [[ "$result" -ne 0 && "$publication_succeeded" == true ]]; then
         printf 'Error: The verified candidate was published, but local repository convergence did not finish.\n' >&2
+    elif [[ "$result" -ne 0 && "$publication_pending" == true ]]; then
+        printf 'Error: The healthy candidate stays installed; publication is pending and the staged candidate was retained for the next update check.\n' >&2
     elif [[ "$result" -ne 0 && "$installed_after_failure" == "$approved_sha" ]]; then
         stop_launched_candidate
         run_automatic_rollback
