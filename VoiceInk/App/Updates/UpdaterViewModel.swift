@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 
@@ -46,6 +47,12 @@ struct UpdaterState: Equatable {
     var preparationError: String?
     var failure: ForkUpdateFailure?
     var recoveryWarning: String?
+    /// Why "Restart and Update" is unavailable right now; nil while the engine is idle.
+    var restartBlockedReason: String?
+    /// Why the last restart request did not start the update.
+    var restartMessage: String?
+    /// Presents `restartMessage` right after the user's restart request was rejected.
+    var isPresentingRestartMessage = false
 }
 
 @MainActor
@@ -58,6 +65,8 @@ protocol UpdaterModule: AnyObject {
     func showStagedUpdate()
     func deferStagedUpdate()
     func restartAndUpdate()
+    func restartWhenIdle()
+    func dismissRestartMessage()
     func showRestorePreviousVersion()
     func cancelRestorePreviousVersion()
     func restorePreviousVersion()
@@ -90,6 +99,7 @@ enum UpdaterAdapterEvent: Equatable {
     case failedAttemptCleared
     case rollbackReported(LocalUpdateRollbackNotice)
     case rollbackCompleted
+    case restartCancelled(StagedForkCandidate, reason: String)
 }
 
 @MainActor
@@ -101,13 +111,14 @@ protocol UpdaterAdapter: AnyObject {
     func start()
     func checkForUpdateInformation()
     func checkForUpdates()
-    func requestRestart(for candidate: StagedForkCandidate)
+    /// Throws when the adapter rejects the request; the staged update stays available.
+    func requestRestart(for candidate: StagedForkCandidate) throws
     func restorePreviousVersion()
 }
 
 extension UpdaterAdapter {
     var canRestorePreviousVersion: Bool { false }
-    func requestRestart(for candidate: StagedForkCandidate) {}
+    func requestRestart(for candidate: StagedForkCandidate) throws {}
     func restorePreviousVersion() {}
 }
 
@@ -145,7 +156,10 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
     private let contextStore: ForkUpdateAttemptContextStore
     private let promptCopier: any ForkUpdatePromptCopying
     private let applicationExecutableURL: URL?
+    private let restartGate: UpdateRestartGate
     private var isUserInitiatedUpdateCheck = false
+    private var presentsStagedUpdateWhenIdle = false
+    private var engineActivityObservation: AnyCancellable?
 
     @Published private(set) var state: UpdaterState
 
@@ -170,7 +184,8 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         logOpener: any ForkUpdateLogOpening = WorkspaceForkUpdateLogOpener(),
         contextStore: ForkUpdateAttemptContextStore = ForkUpdateAttemptContextStore(),
         promptCopier: (any ForkUpdatePromptCopying)? = nil,
-        applicationExecutableURL: URL? = Bundle.main.executableURL
+        applicationExecutableURL: URL? = Bundle.main.executableURL,
+        restartGate: UpdateRestartGate? = nil
     ) {
         self.defaults = defaults
         self.adapter = adapter
@@ -180,6 +195,8 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         self.contextStore = contextStore
         self.promptCopier = promptCopier ?? PasteboardForkUpdatePromptCopier()
         self.applicationExecutableURL = applicationExecutableURL
+        let restartGate = restartGate ?? .shared
+        self.restartGate = restartGate
         state = UpdaterState(
             canCheckForUpdates: adapter.state.canCheckForUpdates,
             checksForUpdatesWhenDashboardAppears: Self.initialAutomaticCheckPreference(in: defaults),
@@ -192,7 +209,9 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             isPresentingStagedUpdate: false,
             preparationError: nil,
             failure: nil,
-            recoveryWarning: nil
+            recoveryWarning: nil,
+            restartBlockedReason: restartGate.blockingReason,
+            restartMessage: nil
         )
 
         adapter.onEvent = { [weak self] event in
@@ -266,8 +285,71 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
     func restartAndUpdate() {
         guard let candidate = state.stagedUpdate else { return }
         state.isPresentingStagedUpdate = false
+        // Never interrupt a recording, transcription, or enhancement; the visible
+        // busy reason explains why, and the update is offered again once idle.
+        guard state.restartBlockedReason == nil else {
+            presentsStagedUpdateWhenIdle = true
+            return
+        }
+        do {
+            try adapter.requestRestart(for: candidate)
+        } catch {
+            // Keep the staged update so the user can retry once the cause is resolved.
+            state.restartMessage = error.localizedDescription
+            state.isPresentingRestartMessage = true
+            presentsStagedUpdateWhenIdle = false
+            return
+        }
+        // Clear the staged update only after the adapter accepted the request.
+        state.restartMessage = nil
+        state.isPresentingRestartMessage = false
+        presentsStagedUpdateWhenIdle = false
         state.stagedUpdate = nil
-        adapter.requestRestart(for: candidate)
+    }
+
+    /// Dismisses the Update Ready alert while VoiceInk is busy and presents it again
+    /// as soon as the engine becomes idle.
+    func restartWhenIdle() {
+        state.isPresentingStagedUpdate = false
+        guard state.stagedUpdate != nil else { return }
+        if state.restartBlockedReason == nil {
+            // The engine became idle while the alert was open; offer it again after
+            // the current alert finishes dismissing.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.state.stagedUpdate != nil else { return }
+                self.state.isPresentingStagedUpdate = true
+            }
+        } else {
+            presentsStagedUpdateWhenIdle = true
+        }
+    }
+
+    func dismissRestartMessage() {
+        state.isPresentingRestartMessage = false
+    }
+
+    /// Keeps "Restart and Update" unavailable while the engine records, transcribes,
+    /// or enhances, and lets the installer's quit request see the same state.
+    func observeEngineActivity(_ activity: AnyPublisher<RecordingState, Never>) {
+        engineActivityObservation = activity
+            .removeDuplicates()
+            .sink { [weak self] recordingState in
+                MainActor.assumeIsolated {
+                    self?.applyEngineActivity(recordingState)
+                }
+            }
+    }
+
+    private func applyEngineActivity(_ recordingState: RecordingState) {
+        let reason = UpdateRestartGuard.blockingReason(for: recordingState)
+        restartGate.blockingReason = reason
+        guard state.restartBlockedReason != reason else { return }
+        state.restartBlockedReason = reason
+        guard reason == nil, presentsStagedUpdateWhenIdle else { return }
+        // The user asked to try again once idle; offer the update again.
+        presentsStagedUpdateWhenIdle = false
+        guard state.stagedUpdate != nil else { return }
+        state.isPresentingStagedUpdate = true
     }
 
     func restorePreviousVersion() {
@@ -330,6 +412,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.preparationError = nil
             state.failure = nil
             state.recoveryWarning = nil
+            state.restartMessage = nil
             defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
         case .stagedCandidate(let candidate):
             guard candidate.forkCommit != state.sourceProvenance?.forkCommit else {
@@ -342,6 +425,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.preparationError = nil
             state.failure = nil
             state.recoveryWarning = nil
+            state.restartMessage = nil
             defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
             notifyCandidateIfNeeded(candidate)
         case .preparationFailed(let failure):
@@ -382,6 +466,17 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
                 ),
                 action: { [weak self] in self?.openUpdateLogs() }
             )
+        case .restartCancelled(let candidate, let reason):
+            // The installer stopped before quitting because VoiceInk became busy.
+            // Nothing was installed, so keep offering the same update once idle.
+            state.stagedUpdate = candidate
+            state.isPresentingStagedUpdate = false
+            state.restartMessage = reason
+            if state.restartBlockedReason == nil {
+                state.isPresentingStagedUpdate = true
+            } else {
+                presentsStagedUpdateWhenIdle = true
+            }
         case .rollbackCompleted:
             state.failure = nil
             state.preparationError = nil

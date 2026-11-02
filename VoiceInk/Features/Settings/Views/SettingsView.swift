@@ -306,7 +306,18 @@ struct SettingsView: View {
                         Button("Update Ready") {
                             updaterViewModel.showStagedUpdate()
                         }
-                        .help("Staged fork commit \(stagedUpdate.forkCommit.prefix(12))")
+                        .disabled(updaterViewModel.state.restartBlockedReason != nil)
+                        .help(
+                            updaterViewModel.state.restartBlockedReason
+                                ?? "Staged fork commit \(stagedUpdate.forkCommit.prefix(12))"
+                        )
+                    }
+                    if let reason = updaterViewModel.state.restartBlockedReason
+                        ?? updaterViewModel.state.restartMessage {
+                        Text(reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
                     }
                 } else if let failure = updaterViewModel.state.failure {
                     VStack(alignment: .leading, spacing: 6) {
