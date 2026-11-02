@@ -94,6 +94,10 @@ if ! git -C "$repository_root" remote get-url upstream >/dev/null 2>&1; then
 fi
 validate_remote upstream "$expected_upstream"
 
+# A fork clone has an upstream remote, which bare gh commands otherwise prefer.
+# This is the setting `gh repo set-default` writes, so gh is not required here.
+git -C "$repository_root" config remote.origin.gh-resolved base
+
 [[ -z "$(git -C "$repository_root" status --porcelain)" ]] \
     || fail "The VoiceInk clone has uncommitted changes. Commit or stash them before bootstrap."
 

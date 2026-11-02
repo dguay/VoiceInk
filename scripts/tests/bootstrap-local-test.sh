@@ -100,6 +100,7 @@ expected_make_log="-C $clone_path test-updater
 -C $clone_path local VOICEINK_FORK_COMMIT=$fixture_sha VOICEINK_UPSTREAM_COMMIT=$fixture_sha"
 [[ "$(cat "$make_log")" == "$expected_make_log" ]]
 grep -Fq 'Running updater test suites...' <<< "$output"
+[[ "$("$real_git" -C "$clone_path" config --get remote.origin.gh-resolved)" == "base" ]]
 grep -Fq 'Warning: Codex is not installed or authenticated; continuing.' <<< "$output"
 grep -Fq "Registered clone: $clone_path" <<< "$output"
 grep -Fq 'push --dry-run --porcelain origin HEAD:refs/heads/voiceink-bootstrap-access-check-' "$git_log"
