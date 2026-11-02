@@ -69,7 +69,10 @@ EOF
 
 cat > "$fake_bin/make" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$@" > "$BOOTSTRAP_TEST_MAKE_LOG"
+printf '%s\n' "$*" >> "$BOOTSTRAP_TEST_MAKE_LOG"
+if [[ "${!#}" == "test-updater" && -n "${BOOTSTRAP_TEST_FAIL_UPDATER_TESTS:-}" ]]; then
+    exit 1
+fi
 EOF
 
 chmod +x "$fake_bin"/* "$clone_path/scripts/bootstrap-local.sh"
@@ -92,11 +95,11 @@ output="$(run_bootstrap 2>&1)"
 
 registered_path="$(GIT_CONFIG_GLOBAL="$global_git_config" "$real_git" config --global --get voiceink.repositoryPath)"
 [[ "$registered_path" == "$clone_path" ]]
-grep -Fqx -- '-C' "$make_log"
-grep -Fqx -- "$clone_path" "$make_log"
-grep -Fqx -- 'local' "$make_log"
-grep -Fqx -- "VOICEINK_FORK_COMMIT=$fixture_sha" "$make_log"
-grep -Fqx -- "VOICEINK_UPSTREAM_COMMIT=$fixture_sha" "$make_log"
+# The updater suites run before the build, each as its own make invocation.
+expected_make_log="-C $clone_path test-updater
+-C $clone_path local VOICEINK_FORK_COMMIT=$fixture_sha VOICEINK_UPSTREAM_COMMIT=$fixture_sha"
+[[ "$(cat "$make_log")" == "$expected_make_log" ]]
+grep -Fq 'Running updater test suites...' <<< "$output"
 grep -Fq 'Warning: Codex is not installed or authenticated; continuing.' <<< "$output"
 grep -Fq "Registered clone: $clone_path" <<< "$output"
 grep -Fq 'push --dry-run --porcelain origin HEAD:refs/heads/voiceink-bootstrap-access-check-' "$git_log"
@@ -107,6 +110,21 @@ make -n -C "$project_root" local \
     VOICEINK_UPSTREAM_COMMIT=fedcba9876543210 > "$fixture_root/make-dry-run.log"
 grep -Fq 'VOICEINK_FORK_COMMIT="0123456789abcdef"' "$fixture_root/make-dry-run.log"
 grep -Fq 'VOICEINK_UPSTREAM_COMMIT="fedcba9876543210"' "$fixture_root/make-dry-run.log"
+
+# A failing updater suite stops bootstrap before registration and the build.
+GIT_CONFIG_GLOBAL="$global_git_config" "$real_git" config --global --unset voiceink.repositoryPath
+rm -f "$make_log"
+set +e
+failed_suites_output="$(BOOTSTRAP_TEST_FAIL_UPDATER_TESTS=1 run_bootstrap 2>&1)"
+failed_suites_status=$?
+set -e
+[[ "$failed_suites_status" -ne 0 ]]
+[[ "$(cat "$make_log")" == "-C $clone_path test-updater" ]]
+grep -Fq 'Error: Updater test suites failed; the clone was not registered or built.' <<< "$failed_suites_output"
+if GIT_CONFIG_GLOBAL="$global_git_config" "$real_git" config --global --get voiceink.repositoryPath >/dev/null; then
+    printf 'bootstrap registered the clone after updater suites failed\n' >&2
+    exit 1
+fi
 
 "$real_git" -C "$clone_path" config remote.origin.pushurl git@github.com:someone-else/VoiceInk.git
 rm -f "$make_log"

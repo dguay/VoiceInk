@@ -130,6 +130,10 @@ fork_commit="$(git -C "$repository_root" rev-parse HEAD)"
 upstream_commit="$(git -C "$repository_root" merge-base HEAD refs/remotes/upstream/main)" \
     || fail "The fork does not share history with upstream/main."
 
+printf 'Running updater test suites...\n'
+make -C "$repository_root" test-updater \
+    || fail "Updater test suites failed; the clone was not registered or built. Rerun 'make test-updater' for details."
+
 git config --global voiceink.repositoryPath "$repository_root"
 printf 'Registered clone: %s\n' "$repository_root"
 printf 'Fork commit: %s\n' "$fork_commit"

@@ -8,7 +8,7 @@ VOICEINK_FORK_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
 VOICEINK_UPSTREAM_COMMIT ?= $(shell git merge-base HEAD refs/remotes/upstream/main 2>/dev/null)
 RUN_APP_NAME ?= VoiceInk
 
-.PHONY: all bootstrap clean whisper setup build local check healthcheck help dev run release release-setup
+.PHONY: all bootstrap clean whisper setup build local check healthcheck help dev run release release-setup test-updater
 
 # Default target
 all: check build
@@ -26,6 +26,10 @@ check:
 	@echo "Prerequisites OK"
 
 healthcheck: check
+
+# Run every updater shell test suite; fails if any suite fails.
+test-updater:
+	@./scripts/test-updater.sh
 
 # Register this clone, validate local-update prerequisites, and build it with source provenance.
 bootstrap:
@@ -154,6 +158,7 @@ help:
 	@echo "Available targets:"
 	@echo "  bootstrap          Register this clone, run preflights, and build with source provenance"
 	@echo "  check/healthcheck  Check if required CLI tools are installed"
+	@echo "  test-updater       Run the updater shell test suites (bootstrap also runs them)"
 	@echo "  whisper            Clone and build whisper.cpp XCFramework"
 	@echo "  setup              Copy whisper XCFramework to VoiceInk project"
 	@echo "  build              Build the VoiceInk Xcode project"
