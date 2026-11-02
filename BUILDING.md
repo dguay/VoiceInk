@@ -21,7 +21,9 @@ A missing or unauthenticated Codex CLI produces a warning but does not stop boot
 
 It uses `LocalBuild.xcconfig`, `VoiceInk.local.entitlements`, and the `LOCAL_BUILD` Swift flag. Without an override, it uses the only available Apple Development identity or falls back to ad-hoc signing when none or multiple are found.
 
-After bootstrap, a local build's update controls prepare `origin/main` in a temporary worktree. VoiceInk runs the updater tests and non-UI unit tests, builds the candidate, validates its signature and source metadata, and stages it under Application Support. The registered clone must be clean. Preparation never resets or cleans it, and VoiceInk keeps running while the update waits for an explicit restart.
+After bootstrap, a local build's update controls prepare `origin/main` in a temporary worktree. VoiceInk runs the non-UI unit tests (which include the updater tests) once, builds the candidate, validates its signature and source metadata, and stages it under Application Support. The registered clone must be clean. Preparation never resets or cleans it, and VoiceInk keeps running while the update waits for an explicit restart.
+
+Preparation is bounded and unattended. Git never prompts for credentials or SSH passphrases, the Mac does not idle-sleep during a run, and a run that exceeds 45 minutes is stopped and reported as a temporary failure. Settings shows the current stage and elapsed time, and Settings or the menu bar can cancel a run. Derived data and Swift packages persist in `~/Library/Application Support/com.prakashjoshipax.VoiceInk/Updater/BuildCache`, so later preparations are incremental; delete that folder to force a clean build. Automatic checks fetch but skip the build in Low Power Mode, on battery power, or under serious thermal pressure; manual checks always build. Before building, preparation stops if the candidate would be signed with a different identity than the installed app, and names both identities. Candidate references and staged bundles that nothing uses, that are older than 14 days, and that the fork's `main` does not contain are pruned.
 
 `Restart and Update` approves only the staged candidate SHA. The on-demand installer fetches `origin/main` again before quitting VoiceInk, preserves the current app, replaces it from a same-volume copy, and waits for the new app's provenance handshake and stability window. A stale candidate returns to preparation without quitting VoiceInk. A launch or health failure restores and relaunches the preserved app.
 
@@ -58,7 +60,7 @@ make test-updater
 | Suite | Covers |
 |---|---|
 | `bootstrap-local-test.sh` | `scripts/bootstrap-local.sh` remote, push-access, install-path and disk checks, clone registration, and the build hand-off |
-| `prepare-local-update-test.sh` | `prepare-local-update.sh` candidate preparation, staging, and publication of a retained installed candidate |
+| `prepare-local-update-test.sh` | `prepare-local-update.sh` candidate preparation, build caches, signing-identity preflight, pruning, cleanup after termination, staging, and publication of a retained installed candidate |
 | `install-local-update-test.sh` | `install-local-update.sh` approval, app replacement, relaunch, rollback, and post-health publication failures |
 | `restore-local-update-test.sh` | `restore-local-update.sh` recovery of the preserved app and its state |
 | `test-updater-test.sh` | The runner's own pass, fail and missing-suite reporting |

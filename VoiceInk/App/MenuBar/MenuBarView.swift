@@ -163,6 +163,12 @@ struct MenuBarView: View {
                     || updaterViewModel.state.isPreparingUpdate
             )
 
+            if updaterViewModel.state.sessionActivity?.isPreparing == true {
+                Button("Cancel Update Check") {
+                    updaterViewModel.cancelUpdateCheck()
+                }
+            }
+
             if updaterViewModel.state.stagedUpdate != nil {
                 Button("Update Ready…") {
                     showMainWindow()

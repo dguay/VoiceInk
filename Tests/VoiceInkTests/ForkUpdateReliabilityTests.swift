@@ -98,7 +98,7 @@ struct ForkUpdateReliabilityTests {
             scriptURL: scriptURL,
             manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
             installedForkCommit: nil,
-            mode: .automatic(deferBuild: false)
+            mode: .automatic(deferral: nil)
         )
 
         #expect(
@@ -111,6 +111,242 @@ struct ForkUpdateReliabilityTests {
         let records = await logger.records
         #expect(records.contains { $0.stage == .fetch && $0.outcome == .succeeded })
         #expect(records.contains { $0.stage == .merge && $0.outcome == .succeeded })
+    }
+
+    @Test
+    func watchdogStopsAHungHelperGroupAndRecordsATransientFailure() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
+        let script = """
+            #!/bin/bash
+            directory="$(dirname "$0")"
+            printf 'x' >> "$directory/attempts"
+            helper_temporary="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-update.XXXXXX")"
+            printf '%s' "$helper_temporary" > "$directory/helper-temporary"
+            printf 'fetch\\nmerge\\n' > "$VOICEINK_UPDATE_PROGRESS_PATH"
+            /bin/sleep 600 &
+            printf '%s' "$!" > "$directory/child"
+            /bin/sleep 600
+            """
+        try Data(script.utf8).write(to: scriptURL)
+        let logger = ForkUpdateLogRecorder()
+        let runner = ProcessForkUpdateCommandRunner(
+            retryDelays: [0, 0],
+            sleep: { _ in },
+            logger: logger,
+            supervision: .init(watchdogTimeout: 1, terminationGracePeriod: 2, pollInterval: 0.05)
+        )
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+
+        do {
+            _ = try await runner.run(
+                scriptURL: scriptURL,
+                manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+                installedForkCommit: nil,
+                mode: .manual
+            )
+            Issue.record("Expected the watchdog to stop the hung helper")
+        } catch let failure as ForkUpdateFailure {
+            #expect(failure.kind == .transient)
+            #expect(failure.stage == .test)
+            #expect(failure.message.contains("1-minute limit"))
+        }
+
+        #expect(clock.now - startedAt < .seconds(10))
+        #expect(try String(contentsOf: temporaryDirectory.appendingPathComponent("attempts"), encoding: .utf8) == "x")
+        let child = try #require(Int32(
+            String(contentsOf: temporaryDirectory.appendingPathComponent("child"), encoding: .utf8)
+        ))
+        try await waitUntilProcessExits(child)
+        let helperTemporary = try String(
+            contentsOf: temporaryDirectory.appendingPathComponent("helper-temporary"),
+            encoding: .utf8
+        )
+        #expect(!FileManager.default.fileExists(atPath: helperTemporary))
+        let records = await logger.records
+        #expect(records.last?.outcome == .failed)
+        #expect(records.last?.stage == .test)
+    }
+
+    @Test
+    func cancellingPreparationStopsTheHelperGroupWithinSeconds() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
+        let startedURL = temporaryDirectory.appendingPathComponent("started")
+        let cleanedURL = temporaryDirectory.appendingPathComponent("cleaned")
+        let script = """
+            #!/bin/bash
+            directory="$(dirname "$0")"
+            trap 'printf done > "$directory/cleaned"' EXIT
+            trap 'exit 143' TERM
+            /bin/sleep 600 &
+            printf '%s' "$!" > "$directory/child"
+            : > "$directory/started"
+            /bin/sleep 600
+            """
+        try Data(script.utf8).write(to: scriptURL)
+        let runner = ProcessForkUpdateCommandRunner(
+            retryDelays: [],
+            logger: ForkUpdateLogRecorder(),
+            supervision: .init(watchdogTimeout: 600, terminationGracePeriod: 5, pollInterval: 0.05)
+        )
+        let preparation = Task {
+            try await runner.run(
+                scriptURL: scriptURL,
+                manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+                installedForkCommit: nil,
+                mode: .manual
+            )
+        }
+        try await waitUntil { FileManager.default.fileExists(atPath: startedURL.path) }
+        let clock = ContinuousClock()
+        let cancelledAt = clock.now
+
+        preparation.cancel()
+        do {
+            _ = try await preparation.value
+            Issue.record("Expected the cancelled preparation to stop")
+        } catch {
+            #expect(error is CancellationError)
+        }
+
+        #expect(clock.now - cancelledAt < .seconds(5))
+        #expect(FileManager.default.fileExists(atPath: cleanedURL.path))
+        let child = try #require(Int32(
+            String(contentsOf: temporaryDirectory.appendingPathComponent("child"), encoding: .utf8)
+        ))
+        try await waitUntilProcessExits(child)
+    }
+
+    @Test
+    func preparationReportsTheStageInProgressFromHelperProgress() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
+        let forkCommit = "0123456789abcdef0123456789abcdef01234567"
+        let upstreamCommit = "fedcba9876543210fedcba9876543210fedcba98"
+        let script = """
+            #!/bin/bash
+            /bin/sleep 0.3
+            printf 'fetch\\n' >> "$VOICEINK_UPDATE_PROGRESS_PATH"
+            /bin/sleep 0.3
+            printf 'merge\\n' >> "$VOICEINK_UPDATE_PROGRESS_PATH"
+            /bin/sleep 0.3
+            /usr/bin/plutil -create xml1 "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert outcome -string upToDate "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert forkCommit -string \(forkCommit) "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert upstreamCommit -string \(upstreamCommit) "$VOICEINK_UPDATE_RESULT_PATH"
+            """
+        try Data(script.utf8).write(to: scriptURL)
+        let stages = StageRecorder()
+
+        _ = try await ProcessForkUpdateCommandRunner(
+            retryDelays: [],
+            logger: ForkUpdateLogRecorder(),
+            supervision: .init(watchdogTimeout: 60, terminationGracePeriod: 1, pollInterval: 0.05)
+        ).run(
+            scriptURL: scriptURL,
+            manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+            installedForkCommit: nil,
+            mode: .manual,
+            progress: { stage in stages.record(stage) }
+        )
+
+        #expect(stages.values == [.fetch, .merge, .test])
+    }
+
+    @Test
+    func preparationHelperRunsUnattendedAgainstTheInstalledBundle() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
+        let installedBundleURL = temporaryDirectory.appendingPathComponent("VoiceInk.app", isDirectory: true)
+        let forkCommit = "0123456789abcdef0123456789abcdef01234567"
+        let upstreamCommit = "fedcba9876543210fedcba9876543210fedcba98"
+        let script = """
+            #!/bin/bash
+            set -euo pipefail
+            [[ "$VOICEINK_INSTALLED_BUNDLE_PATH" == "\(installedBundleURL.path)" ]]
+            [[ "$(/bin/cat)" == "" ]]
+            /usr/bin/plutil -create xml1 "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert outcome -string upToDate "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert forkCommit -string \(forkCommit) "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert upstreamCommit -string \(upstreamCommit) "$VOICEINK_UPDATE_RESULT_PATH"
+            """
+        try Data(script.utf8).write(to: scriptURL)
+
+        let result = try await ProcessForkUpdateCommandRunner(
+            retryDelays: [],
+            logger: ForkUpdateLogRecorder(),
+            supervision: .init(watchdogTimeout: 10, terminationGracePeriod: 1, pollInterval: 0.05),
+            installedBundleURL: installedBundleURL
+        ).run(
+            scriptURL: scriptURL,
+            manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+            installedForkCommit: nil,
+            mode: .manual
+        )
+
+        #expect(result == .upToDate(SourceProvenance(forkCommit: forkCommit, upstreamCommit: upstreamCommit)))
+    }
+
+    @Test
+    func deferredAutomaticBuildLogsWhyItWasDeferred() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let scriptURL = temporaryDirectory.appendingPathComponent("prepare-local-update.sh")
+        let script = """
+            #!/bin/bash
+            set -euo pipefail
+            [[ "$VOICEINK_UPDATE_DEFER_BUILD" == 1 ]]
+            /usr/bin/plutil -create xml1 "$VOICEINK_UPDATE_RESULT_PATH"
+            /usr/bin/plutil -insert outcome -string buildDeferred "$VOICEINK_UPDATE_RESULT_PATH"
+            """
+        try Data(script.utf8).write(to: scriptURL)
+
+        for deferral in [ForkUpdateBuildDeferral.batteryPower, .thermalPressure] {
+            let logger = ForkUpdateLogRecorder()
+            let result = try await ProcessForkUpdateCommandRunner(
+                retryDelays: [],
+                logger: logger
+            ).run(
+                scriptURL: scriptURL,
+                manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
+                installedForkCommit: nil,
+                mode: .automatic(deferral: deferral)
+            )
+
+            #expect(result == .buildDeferred(candidateIdentifier: nil))
+            #expect(await logger.records.last?.message == deferral.logMessage)
+        }
+    }
+
+    @Test
+    func automaticBuildDeferralCoversBatteryAndThermalPressure() {
+        let cases: [(ForkUpdatePowerStateFixture, ForkUpdateBuildDeferral?)] = [
+            (.init(), nil),
+            (.init(isLowPowerModeEnabled: true, isOnBatteryPower: true), .lowPowerMode),
+            (.init(isOnBatteryPower: true), .batteryPower),
+            (.init(thermalState: .serious), .thermalPressure),
+            (.init(thermalState: .critical), .thermalPressure),
+            (.init(thermalState: .fair), nil),
+        ]
+        for (powerState, expectedDeferral) in cases {
+            #expect(powerState.automaticBuildDeferral == expectedDeferral)
+        }
     }
 
     @Test
@@ -152,7 +388,7 @@ struct ForkUpdateReliabilityTests {
                 scriptURL: scriptURL,
                 manifestURL: temporaryDirectory.appendingPathComponent("staged-candidate.plist"),
                 installedForkCommit: nil,
-                mode: .automatic(deferBuild: false)
+                mode: .automatic(deferral: nil)
             )
             Issue.record("Expected a deterministic fetch failure")
         } catch let failure as ForkUpdateFailure {
@@ -1028,6 +1264,46 @@ struct ForkUpdateReliabilityTests {
         #expect(notifications.notifications.last?.title == "VoiceInk restored the previous version.")
         #expect(updater.state.failure == nil)
     }
+
+    private func waitUntil(
+        timeout: Duration = .seconds(10),
+        condition: @escaping () -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while !condition() {
+            guard clock.now < deadline else {
+                Issue.record("Timed out waiting for the update helper")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    private func waitUntilProcessExits(_ processIdentifier: Int32) async throws {
+        try await waitUntil(timeout: .seconds(5)) {
+            kill(processIdentifier, 0) != 0
+        }
+    }
+}
+
+private final class StageRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stages: [ForkUpdateStage] = []
+
+    var values: [ForkUpdateStage] {
+        lock.withLock { stages }
+    }
+
+    func record(_ stage: ForkUpdateStage) {
+        lock.withLock { stages.append(stage) }
+    }
+}
+
+private struct ForkUpdatePowerStateFixture: ForkUpdatePowerStateProviding {
+    var isLowPowerModeEnabled = false
+    var isOnBatteryPower = false
+    var thermalState: ProcessInfo.ThermalState = .nominal
 }
 
 private actor DelayRecorder {

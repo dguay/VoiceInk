@@ -298,8 +298,10 @@ struct SettingsView: View {
 
                 if updaterViewModel.state.isPreparingUpdate {
                     LabeledContent("Local Update") {
-                        ProgressView("Preparing…")
-                            .controlSize(.small)
+                        UpdateSessionProgressView(
+                            activity: updaterViewModel.state.sessionActivity,
+                            cancel: updaterViewModel.cancelUpdateCheck
+                        )
                     }
                 } else if let stagedUpdate = updaterViewModel.state.stagedUpdate {
                     LabeledContent("Local Update") {

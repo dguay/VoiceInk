@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import IOKit.ps
 
 struct StagedForkCandidate: Codable, Equatable {
     let forkCommit: String
@@ -47,8 +48,26 @@ enum ForkUpdatePreparationResult: Equatable {
     case failureSuppressed(ForkUpdateFailure)
 }
 
+/// Why an automatic check fetched and merged but did not build.
+enum ForkUpdateBuildDeferral: String, Equatable, Sendable {
+    case lowPowerMode
+    case batteryPower
+    case thermalPressure
+
+    var logMessage: String {
+        switch self {
+        case .lowPowerMode:
+            "Build deferred during Low Power Mode."
+        case .batteryPower:
+            "Build deferred while running on battery power."
+        case .thermalPressure:
+            "Build deferred under serious thermal pressure."
+        }
+    }
+}
+
 enum ForkUpdatePreparationMode: Equatable, Sendable {
-    case automatic(deferBuild: Bool)
+    case automatic(deferral: ForkUpdateBuildDeferral?)
     case candidateRevalidation
     case manual
 
@@ -57,9 +76,13 @@ enum ForkUpdatePreparationMode: Equatable, Sendable {
         return false
     }
 
+    var buildDeferral: ForkUpdateBuildDeferral? {
+        if case .automatic(let deferral) = self { return deferral }
+        return nil
+    }
+
     var defersBuild: Bool {
-        if case .automatic(deferBuild: true) = self { return true }
-        return false
+        buildDeferral != nil
     }
 
     var retriesSuppressedCandidate: Bool {
@@ -69,11 +92,40 @@ enum ForkUpdatePreparationMode: Equatable, Sendable {
 
 protocol ForkUpdatePowerStateProviding {
     var isLowPowerModeEnabled: Bool { get }
+    var isOnBatteryPower: Bool { get }
+    var thermalState: ProcessInfo.ThermalState { get }
+}
+
+extension ForkUpdatePowerStateProviding {
+    var isOnBatteryPower: Bool { false }
+    var thermalState: ProcessInfo.ThermalState { .nominal }
+
+    /// Automatic builds wait for a plugged-in, cool, full-power Mac. Manual
+    /// checks never consult this.
+    var automaticBuildDeferral: ForkUpdateBuildDeferral? {
+        if isLowPowerModeEnabled { return .lowPowerMode }
+        if isOnBatteryPower { return .batteryPower }
+        if thermalState == .serious || thermalState == .critical { return .thermalPressure }
+        return nil
+    }
 }
 
 struct SystemForkUpdatePowerState: ForkUpdatePowerStateProviding {
     var isLowPowerModeEnabled: Bool {
         ProcessInfo.processInfo.isLowPowerModeEnabled
+    }
+
+    var isOnBatteryPower: Bool {
+        guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let source = IOPSGetProvidingPowerSourceType(snapshot)?.takeUnretainedValue()
+        else {
+            return false
+        }
+        return (source as String) == kIOPMBatteryPowerKey
+    }
+
+    var thermalState: ProcessInfo.ThermalState {
+        ProcessInfo.processInfo.thermalState
     }
 }
 
@@ -87,11 +139,24 @@ protocol ForkUpdateTransacting: AnyObject {
     func clearPersistentFailure() throws
     func clearPersistentRollbackNotice() throws
     func prepare(mode: ForkUpdatePreparationMode) async throws -> ForkUpdatePreparationResult
+    /// Reports the stage the helper is working on while it prepares. Cancelling
+    /// the calling task stops the helper and throws `CancellationError`.
+    func prepare(
+        mode: ForkUpdatePreparationMode,
+        progress: @escaping @Sendable (ForkUpdateStage) -> Void
+    ) async throws -> ForkUpdatePreparationResult
     func requestRestart(for candidate: StagedForkCandidate) async throws -> StagedForkCandidate?
     func restorePreviousVersion() async throws
 }
 
 extension ForkUpdateTransacting {
+    func prepare(
+        mode: ForkUpdatePreparationMode,
+        progress: @escaping @Sendable (ForkUpdateStage) -> Void
+    ) async throws -> ForkUpdatePreparationResult {
+        try await prepare(mode: mode)
+    }
+
     func loadPersistentFailure() throws -> ForkUpdateFailure? { nil }
     func loadPersistentRollbackNotice() throws -> LocalUpdateRollbackNotice? { nil }
     func persistFailure(_ failure: ForkUpdateFailure) throws {}
@@ -106,6 +171,40 @@ protocol ForkUpdateCommandRunning {
         installedForkCommit: String?,
         mode: ForkUpdatePreparationMode
     ) async throws -> ForkUpdateCommandResult
+    func run(
+        scriptURL: URL,
+        manifestURL: URL,
+        installedForkCommit: String?,
+        mode: ForkUpdatePreparationMode,
+        progress: @escaping @Sendable (ForkUpdateStage) -> Void
+    ) async throws -> ForkUpdateCommandResult
+}
+
+extension ForkUpdateCommandRunning {
+    func run(
+        scriptURL: URL,
+        manifestURL: URL,
+        installedForkCommit: String?,
+        mode: ForkUpdatePreparationMode,
+        progress: @escaping @Sendable (ForkUpdateStage) -> Void
+    ) async throws -> ForkUpdateCommandResult {
+        try await run(
+            scriptURL: scriptURL,
+            manifestURL: manifestURL,
+            installedForkCommit: installedForkCommit,
+            mode: mode
+        )
+    }
+}
+
+extension ForkUpdateStage {
+    static let preparationSequence: [ForkUpdateStage] = [.fetch, .merge, .test, .build, .staging]
+
+    /// The stage a preparation is working on, derived from the stages the
+    /// helper has recorded as completed.
+    static func currentPreparationStage(after completed: [ForkUpdateStage]) -> ForkUpdateStage {
+        preparationSequence.first { !completed.contains($0) } ?? .staging
+    }
 }
 
 enum ForkUpdateCommandResult: Equatable, Sendable {
@@ -192,18 +291,36 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         let completedStages: [ForkUpdateStage]
         let forkCommit: String?
         let upstreamCommit: String?
+        let retryable: Bool
 
         init(
             failure: ForkUpdateFailure,
             completedStages: [ForkUpdateStage],
             forkCommit: String? = nil,
-            upstreamCommit: String? = nil
+            upstreamCommit: String? = nil,
+            retryable: Bool = true
         ) {
             self.failure = failure
             self.completedStages = completedStages
             self.forkCommit = forkCommit
             self.upstreamCommit = upstreamCommit
+            self.retryable = retryable
         }
+    }
+
+    /// Limits for one helper run. The watchdog bounds the whole run; after it
+    /// (or Cancel) sends SIGTERM to the helper's process group, the helper gets
+    /// the grace period to remove its worktree before the group is killed.
+    struct Supervision: Sendable {
+        static let standard = Supervision(
+            watchdogTimeout: 45 * 60,
+            terminationGracePeriod: 15,
+            pollInterval: 0.25
+        )
+
+        let watchdogTimeout: TimeInterval
+        let terminationGracePeriod: TimeInterval
+        let pollInterval: TimeInterval
     }
 
     private struct Report: Decodable {
@@ -224,17 +341,23 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
     private let retryDelays: [TimeInterval]
     private let sleep: @Sendable (TimeInterval) async throws -> Void
     private let logger: any ForkUpdateLogging
+    private let supervision: Supervision
+    private let installedBundleURL: URL?
 
     init(
         retryDelays: [TimeInterval] = [1, 5],
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { delay in
             try await Task.sleep(for: .seconds(delay))
         },
-        logger: any ForkUpdateLogging = ForkUpdateLogStore.shared
+        logger: any ForkUpdateLogging = ForkUpdateLogStore.shared,
+        supervision: Supervision = .standard,
+        installedBundleURL: URL? = Bundle.main.bundleURL
     ) {
         self.retryDelays = retryDelays
         self.sleep = sleep
         self.logger = logger
+        self.supervision = supervision
+        self.installedBundleURL = installedBundleURL
     }
 
     func run(
@@ -243,7 +366,25 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         installedForkCommit: String?,
         mode: ForkUpdatePreparationMode
     ) async throws -> ForkUpdateCommandResult {
+        try await run(
+            scriptURL: scriptURL,
+            manifestURL: manifestURL,
+            installedForkCommit: installedForkCommit,
+            mode: mode,
+            progress: { _ in }
+        )
+    }
+
+    func run(
+        scriptURL: URL,
+        manifestURL: URL,
+        installedForkCommit: String?,
+        mode: ForkUpdatePreparationMode,
+        progress: @escaping @Sendable (ForkUpdateStage) -> Void
+    ) async throws -> ForkUpdateCommandResult {
         let priority: TaskPriority = mode.isAutomatic ? .utility : .userInitiated
+        let supervision = supervision
+        let installedBundleURL = installedBundleURL
         let attemptIdentifier = UUID().uuidString.lowercased()
         await logger.record(
             ForkUpdateLogRecord(
@@ -258,15 +399,18 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                 message: nil
             )
         )
-        return try await Task.detached(priority: priority) {
+        let preparation = Task.detached(priority: priority) {
             for attempt in 0 ... retryDelays.count {
                 do {
-                    let execution = try Self.runOnce(
+                    let execution = try await Self.runOnce(
                         scriptURL: scriptURL,
                         manifestURL: manifestURL,
                         installedForkCommit: installedForkCommit,
+                        installedBundleURL: installedBundleURL,
                         mode: mode,
-                        attemptIdentifier: attemptIdentifier
+                        attemptIdentifier: attemptIdentifier,
+                        supervision: supervision,
+                        progress: progress
                     )
                     await Self.recordCompletedStages(
                         execution.completedStages,
@@ -278,7 +422,8 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                     )
                     await logger.record(Self.logRecord(
                         for: execution.result,
-                        attemptIdentifier: attemptIdentifier
+                        attemptIdentifier: attemptIdentifier,
+                        buildDeferral: mode.buildDeferral
                     ))
                     return execution.result
                 } catch let executionFailure as ExecutionFailure {
@@ -294,7 +439,11 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                         retry: attempt,
                         logger: logger
                     )
-                    guard attempt < retryDelays.count, failure.kind == .transient else {
+                    guard
+                        attempt < retryDelays.count,
+                        failure.kind == .transient,
+                        executionFailure.retryable
+                    else {
                         await logger.record(
                             Self.logRecord(
                                 for: failure,
@@ -328,49 +477,109 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
             }
 
             throw ForkUpdateError(message: "VoiceInk exhausted its update retry policy.")
-        }.value
+        }
+        // A detached task does not inherit cancellation; forward it so Cancel
+        // reaches the helper's process group.
+        do {
+            return try await withTaskCancellationHandler {
+                try await preparation.value
+            } onCancel: {
+                preparation.cancel()
+            }
+        } catch is CancellationError {
+            await logger.record(
+                ForkUpdateLogRecord(
+                    timestamp: Date(),
+                    attemptIdentifier: attemptIdentifier,
+                    stage: .preflight,
+                    outcome: .failed,
+                    candidateIdentifier: nil,
+                    forkCommit: installedForkCommit,
+                    upstreamCommit: nil,
+                    retry: nil,
+                    message: "Update preparation was cancelled."
+                )
+            )
+            throw CancellationError()
+        }
     }
 
     private static func runOnce(
         scriptURL: URL,
         manifestURL: URL,
         installedForkCommit: String?,
+        installedBundleURL: URL?,
         mode: ForkUpdatePreparationMode,
-        attemptIdentifier: String
-    ) throws -> Execution {
-        let process = Process()
-        process.qualityOfService = mode.isAutomatic ? .utility : .userInitiated
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("voiceink-update-\(UUID().uuidString).log")
-        let resultURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("voiceink-update-\(UUID().uuidString).plist")
-        let progressURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("voiceink-update-\(UUID().uuidString).stages")
-        _ = FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-        let output = try FileHandle(forWritingTo: outputURL)
-        defer {
-            try? output.close()
-            try? FileManager.default.removeItem(at: outputURL)
-            try? FileManager.default.removeItem(at: resultURL)
-            try? FileManager.default.removeItem(at: progressURL)
-        }
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [scriptURL.path]
-        process.standardOutput = output
-        process.standardError = output
-        process.environment = environment(
+        attemptIdentifier: String,
+        supervision: Supervision,
+        progress: @escaping @Sendable (ForkUpdateStage) -> Void
+    ) async throws -> Execution {
+        try Task.checkCancellation()
+        // Everything this run writes, including the helper's TMPDIR, lives in
+        // one directory that is removed even when the helper had to be killed.
+        let workURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("voiceink-update-\(UUID().uuidString)", isDirectory: true)
+        let helperTemporaryURL = workURL.appendingPathComponent("tmp", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: helperTemporaryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: workURL) }
+        let outputURL = workURL.appendingPathComponent("output.log")
+        let resultURL = workURL.appendingPathComponent("result.plist")
+        let progressURL = workURL.appendingPathComponent("progress.stages")
+        var environment = environment(
             manifestURL: manifestURL,
             resultURL: resultURL,
             progressURL: progressURL,
             installedForkCommit: installedForkCommit,
             mode: mode
         )
+        environment["TMPDIR"] = helperTemporaryURL.path + "/"
+        environment["VOICEINK_INSTALLED_BUNDLE_PATH"] = installedBundleURL?.path
 
-        try process.run()
-        process.waitUntilExit()
+        let processGroup = try ForkUpdateProcessGroup.launch(
+            executablePath: "/bin/bash",
+            arguments: [scriptURL.path],
+            environment: environment,
+            outputPath: outputURL.path,
+            qualityOfService: mode.isAutomatic ? QOS_CLASS_UTILITY : QOS_CLASS_USER_INITIATED
+        )
+        var reportedStage: ForkUpdateStage?
+        let supervisionResult = await processGroup.supervise(supervision) {
+            let stage = ForkUpdateStage.currentPreparationStage(
+                after: completedStages(at: progressURL)
+            )
+            if stage != reportedStage {
+                reportedStage = stage
+                progress(stage)
+            }
+        }
 
-        guard process.terminationStatus == 0 else {
-            try output.synchronize()
+        switch supervisionResult.stopReason {
+        case .cancelled:
+            throw CancellationError()
+        case .timedOut:
+            let stages = completedStages(at: progressURL)
+            let stage = ForkUpdateStage.currentPreparationStage(after: stages)
+            let minutes = Int((supervision.watchdogTimeout / 60).rounded(.up))
+            throw ExecutionFailure(
+                failure: .reported(
+                    stage: stage,
+                    kind: .transient,
+                    candidateIdentifier: nil,
+                    message: "VoiceInk stopped preparing the update because the \(stage.rawValue) stage was still running after the \(minutes)-minute limit.",
+                    recoverySuggestion: "VoiceInk stopped the helper and cleaned up. Check the network and Xcode, then retry the update."
+                ),
+                completedStages: stages,
+                retryable: false
+            )
+        case nil:
+            break
+        }
+
+        guard supervisionResult.exitStatus == 0 else {
             throw try executionFailure(
                 outputURL: outputURL,
                 resultURL: resultURL,
@@ -648,7 +857,8 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
 
     private static func logRecord(
         for result: ForkUpdateCommandResult,
-        attemptIdentifier: String
+        attemptIdentifier: String,
+        buildDeferral: ForkUpdateBuildDeferral?
     ) -> ForkUpdateLogRecord {
         switch result {
         case .upToDate(let provenance):
@@ -673,7 +883,7 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
                 forkCommit: nil,
                 upstreamCommit: nil,
                 retry: nil,
-                message: "Build deferred during Low Power Mode."
+                message: buildDeferral?.logMessage ?? "Build deferred."
             )
         case .candidatePrepared(let candidateIdentifier):
             return ForkUpdateLogRecord(
@@ -1051,11 +1261,19 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
     }
 
     func prepare(mode: ForkUpdatePreparationMode) async throws -> ForkUpdatePreparationResult {
+        try await prepare(mode: mode, progress: { _ in })
+    }
+
+    func prepare(
+        mode: ForkUpdatePreparationMode,
+        progress: @escaping @Sendable (ForkUpdateStage) -> Void
+    ) async throws -> ForkUpdatePreparationResult {
         let commandResult = try await commandRunner.run(
             scriptURL: scriptURL,
             manifestURL: manifestURL,
             installedForkCommit: targetBundleURL.flatMap { try? installedForkCommit(at: $0) },
-            mode: mode
+            mode: mode,
+            progress: progress
         )
         switch commandResult {
         case .upToDate(let provenance):
@@ -1483,6 +1701,7 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
     private var stagedCandidate: StagedForkCandidate?
     private var pendingRestartCandidate: StagedForkCandidate?
     private var observesResumeRequests = false
+    private var preparationTask: Task<Void, Never>?
 
     init(
         powerState: any ForkUpdatePowerStateProviding = SystemForkUpdatePowerState(),
@@ -1543,11 +1762,16 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
     }
 
     func checkForUpdateInformation() {
-        startPreparation(mode: .automatic(deferBuild: powerState.isLowPowerModeEnabled))
+        startPreparation(mode: .automatic(deferral: powerState.automaticBuildDeferral))
     }
 
     func checkForUpdates() {
         startPreparation(mode: .manual)
+    }
+
+    func cancelUpdateCheck() {
+        guard state.activity?.isPreparing == true else { return }
+        preparationTask?.cancel()
     }
 
     private func resumeFailedAttempt(identifier: String) {
@@ -1560,20 +1784,48 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
         startPreparation(mode: .manual)
     }
 
-    private func startPreparation(mode: ForkUpdatePreparationMode) {
-        guard let transaction, !state.sessionInProgress else { return }
-
+    private func beginSession(_ activity: UpdaterSessionActivity) {
         state = UpdaterAdapterState(
             canCheckForUpdates: state.canCheckForUpdates,
             sessionInProgress: true,
             lastUpdateCheckDate: state.lastUpdateCheckDate,
-            updateCheckInterval: state.updateCheckInterval
+            updateCheckInterval: state.updateCheckInterval,
+            activity: activity
         )
         onEvent?(.stateChanged(state))
+    }
 
-        Task { [weak self] in
+    private func updatePreparationStage(_ stage: ForkUpdateStage, startedAt: Date) {
+        guard
+            state.sessionInProgress,
+            case .preparing(let currentStage, let currentStart) = state.activity,
+            currentStart == startedAt,
+            currentStage != stage
+        else {
+            return
+        }
+        beginSession(.preparing(stage: stage, startedAt: startedAt))
+    }
+
+    private func startPreparation(mode: ForkUpdatePreparationMode) {
+        guard let transaction, !state.sessionInProgress else { return }
+
+        let startedAt = now()
+        beginSession(.preparing(stage: .fetch, startedAt: startedAt))
+        // The main queue is serial, so stage updates arrive in the order the
+        // helper reported them.
+        let progress: @Sendable (ForkUpdateStage) -> Void = { [weak self] stage in
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.updatePreparationStage(stage, startedAt: startedAt)
+                }
+            }
+        }
+
+        preparationTask = Task { [weak self] in
             do {
-                switch try await transaction.prepare(mode: mode) {
+                let result = try await transaction.prepare(mode: mode, progress: progress)
+                switch result {
                 case .upToDate(let provenance):
                     try? transaction.clearPersistentFailure()
                     self?.stagedCandidate = nil
@@ -1592,12 +1844,15 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
                     try? transaction.persistFailure(failure)
                     self?.onEvent?(.preparationFailed(failure))
                 }
+            } catch is CancellationError {
+                // The user stopped this run; it is not a failure to report.
             } catch {
                 let failure = (error as? ForkUpdateFailure)
                     ?? .classify(message: error.localizedDescription)
                 try? transaction.persistFailure(failure)
                 self?.onEvent?(.preparationFailed(failure))
             }
+            self?.preparationTask = nil
             self?.finishUpdateCycle()
         }
     }
@@ -1610,13 +1865,7 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
         }
 
         pendingRestartCandidate = nil
-        state = UpdaterAdapterState(
-            canCheckForUpdates: state.canCheckForUpdates,
-            sessionInProgress: true,
-            lastUpdateCheckDate: state.lastUpdateCheckDate,
-            updateCheckInterval: state.updateCheckInterval
-        )
-        onEvent?(.stateChanged(state))
+        beginSession(.installing)
 
         Task { [weak self] in
             do {
@@ -1643,13 +1892,7 @@ final class ForkUpdaterAdapter: UpdaterAdapter {
     func restorePreviousVersion() {
         guard let transaction, transaction.canRestorePreviousVersion, !state.sessionInProgress else { return }
 
-        state = UpdaterAdapterState(
-            canCheckForUpdates: state.canCheckForUpdates,
-            sessionInProgress: true,
-            lastUpdateCheckDate: state.lastUpdateCheckDate,
-            updateCheckInterval: state.updateCheckInterval
-        )
-        onEvent?(.stateChanged(state))
+        beginSession(.restoring)
 
         Task { [weak self] in
             do {

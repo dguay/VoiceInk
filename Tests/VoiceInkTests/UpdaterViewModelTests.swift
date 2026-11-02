@@ -129,12 +129,114 @@ struct UpdaterViewModelTests {
 
         adapter.checkForUpdateInformation()
         try await waitUntil { transaction.preparationModes.count == 1 }
-        #expect(transaction.preparationModes == [.automatic(deferBuild: true)])
+        #expect(transaction.preparationModes == [.automatic(deferral: .lowPowerMode)])
 
         try await waitUntil { !adapter.state.sessionInProgress }
         adapter.checkForUpdates()
         try await waitUntil { transaction.preparationModes.count == 2 }
-        #expect(transaction.preparationModes == [.automatic(deferBuild: true), .manual])
+        #expect(transaction.preparationModes == [.automatic(deferral: .lowPowerMode), .manual])
+    }
+
+    @Test
+    func batteryAndThermalPressureDeferAutomaticBuildsButNotManualPreparation() async throws {
+        let provenance = SourceProvenance(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98"
+        )
+        for (powerState, deferral) in [
+            (ForkUpdatePowerStateStub(isLowPowerModeEnabled: false, isOnBatteryPower: true), ForkUpdateBuildDeferral.batteryPower),
+            (ForkUpdatePowerStateStub(isLowPowerModeEnabled: false, thermalState: .serious), .thermalPressure),
+        ] {
+            let transaction = ForkUpdateTransactionStub(preparationResult: .upToDate(provenance))
+            let adapter = ForkUpdaterAdapter(transaction: transaction, powerState: powerState)
+
+            adapter.checkForUpdateInformation()
+            try await waitUntil { !adapter.state.sessionInProgress && transaction.preparationModes.count == 1 }
+            adapter.checkForUpdates()
+            try await waitUntil { transaction.preparationModes.count == 2 }
+
+            #expect(transaction.preparationModes == [.automatic(deferral: deferral), .manual])
+        }
+    }
+
+    @Test
+    func preparationShowsItsLiveStageAndCanBeCancelled() async throws {
+        let suiteName = "UpdaterViewModelTests.cancel-preparation"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let startedAt = Date(timeIntervalSince1970: 1_787_400_000)
+        let transaction = SuspendedForkUpdateTransactionStub()
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: ForkUpdaterAdapter(
+                transaction: transaction,
+                defaults: defaults,
+                now: { startedAt }
+            ),
+            sourceProvenance: nil
+        )
+
+        updater.checkForUpdates()
+        try await waitUntil {
+            updater.state.sessionActivity == .preparing(stage: .test, startedAt: startedAt)
+        }
+        #expect(updater.state.isPreparingUpdate)
+
+        updater.cancelUpdateCheck()
+        try await waitUntil { !updater.state.isPreparingUpdate }
+
+        #expect(transaction.preparationWasCancelled)
+        #expect(transaction.persistFailureCount == 0)
+        #expect(updater.state.canCheckForUpdates)
+        #expect(updater.state.sessionActivity == nil)
+        #expect(updater.state.failure == nil)
+        #expect(updater.state.preparationError == nil)
+    }
+
+    @Test
+    func sessionStatusShowsTheStageWithElapsedTimeAndLabelsInstallation() {
+        let startedAt = Date(timeIntervalSince1970: 1_787_400_000)
+        let building = UpdaterSessionActivity.preparing(stage: .build, startedAt: startedAt)
+
+        #expect(building.statusText(at: startedAt.addingTimeInterval(125)) == "Building… 2:05")
+        #expect(
+            UpdaterSessionActivity.preparing(stage: .fetch, startedAt: startedAt)
+                .statusText(at: startedAt) == "Fetching… 0:00"
+        )
+        #expect(UpdaterSessionActivity.installing.statusText(at: startedAt) == "Installing…")
+        #expect(building.isPreparing)
+        #expect(!UpdaterSessionActivity.installing.isPreparing)
+    }
+
+    @Test
+    func installationIsLabelledInstallingAndIsNotCancellable() async throws {
+        let suiteName = "UpdaterViewModelTests.installing"
+        let defaults = makeDefaults(suiteName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let candidate = StagedForkCandidate(
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
+            bundleURL: URL(fileURLWithPath: "/tmp/VoiceInk.app"),
+            preparedAt: Date(timeIntervalSince1970: 1_787_400_000)
+        )
+        let transaction = SuspendedForkUpdateTransactionStub(stagedCandidate: candidate)
+        let updater: any UpdaterModule = UpdaterViewModel(
+            defaults: defaults,
+            adapter: ForkUpdaterAdapter(transaction: transaction, defaults: defaults),
+            sourceProvenance: nil
+        )
+        #expect(updater.state.stagedUpdate == candidate)
+
+        updater.restartAndUpdate()
+        try await waitUntil { transaction.isRestarting }
+        #expect(updater.state.sessionActivity == .installing)
+
+        updater.cancelUpdateCheck()
+        #expect(updater.state.isPreparingUpdate)
+
+        transaction.finishRestart()
+        try await waitUntil { !updater.state.isPreparingUpdate }
+        #expect(updater.state.sessionActivity == nil)
     }
 
     @Test
@@ -368,7 +470,7 @@ struct UpdaterViewModelTests {
         adapter.checkForUpdateInformation()
         try await waitUntil { !updater.state.isPreparingUpdate }
 
-        #expect(transaction.preparationModes == [.automatic(deferBuild: true)])
+        #expect(transaction.preparationModes == [.automatic(deferral: .lowPowerMode)])
         #expect(transaction.clearPersistentFailureCount == 1)
         #expect(updater.state.failure == nil)
     }
@@ -1453,6 +1555,65 @@ private final class ForkUpdateTransactionStub: ForkUpdateTransacting {
 
 private struct ForkUpdatePowerStateStub: ForkUpdatePowerStateProviding {
     let isLowPowerModeEnabled: Bool
+    var isOnBatteryPower = false
+    var thermalState: ProcessInfo.ThermalState = .nominal
+}
+
+/// Holds preparation and installation open until the test cancels or
+/// finishes them.
+@MainActor
+private final class SuspendedForkUpdateTransactionStub: ForkUpdateTransacting {
+    let stagedCandidate: StagedForkCandidate?
+    private(set) var persistFailureCount = 0
+    private(set) var preparationWasCancelled = false
+    private(set) var isRestarting = false
+    private var restartContinuation: CheckedContinuation<Void, Never>?
+    var canRestorePreviousVersion: Bool { false }
+
+    init(stagedCandidate: StagedForkCandidate? = nil) {
+        self.stagedCandidate = stagedCandidate
+    }
+
+    func loadStagedCandidate() throws -> StagedForkCandidate? {
+        stagedCandidate
+    }
+
+    func persistFailure(_ failure: ForkUpdateFailure) throws {
+        persistFailureCount += 1
+    }
+
+    func prepare(mode: ForkUpdatePreparationMode) async throws -> ForkUpdatePreparationResult {
+        try await prepare(mode: mode, progress: { _ in })
+    }
+
+    func prepare(
+        mode: ForkUpdatePreparationMode,
+        progress: @escaping @Sendable (ForkUpdateStage) -> Void
+    ) async throws -> ForkUpdatePreparationResult {
+        progress(.merge)
+        progress(.test)
+        do {
+            try await Task.sleep(for: .seconds(60))
+        } catch {
+            preparationWasCancelled = true
+            throw error
+        }
+        return .buildDeferred(candidateIdentifier: nil)
+    }
+
+    func requestRestart(for candidate: StagedForkCandidate) async throws -> StagedForkCandidate? {
+        isRestarting = true
+        await withCheckedContinuation { restartContinuation = $0 }
+        isRestarting = false
+        return nil
+    }
+
+    func finishRestart() {
+        restartContinuation?.resume()
+        restartContinuation = nil
+    }
+
+    func restorePreviousVersion() async throws {}
 }
 
 @MainActor
