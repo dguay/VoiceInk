@@ -450,6 +450,15 @@ run_cached_preparation
 [[ ! -e "$cache_root/BuildCache/Worktree" ]]
 [[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
 
+# A checkout killed mid-initialization leaves a locked registration whose
+# directory is gone; the next preparation must still be able to add the worktree.
+git -C "$canonical_clone" worktree add --detach "$cache_root/BuildCache/Worktree" HEAD >/dev/null 2>&1
+git -C "$canonical_clone" worktree lock --reason initializing "$cache_root/BuildCache/Worktree"
+rm -rf "$cache_root/BuildCache/Worktree"
+run_cached_preparation
+[[ ! -e "$cache_root/BuildCache/Worktree" ]]
+[[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+
 # Git never waits for a terminal, askpass dialog, or SSH passphrase prompt.
 ssh_bin="$fixture_root/ssh-bin"
 ssh_log="$fixture_root/ssh.log"

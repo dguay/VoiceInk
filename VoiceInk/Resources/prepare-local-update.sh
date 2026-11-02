@@ -241,7 +241,15 @@ cleanup_candidate_artifacts() {
     fi
 }
 
+# A checkout interrupted by a kill keeps Git's "initializing" lock, which makes
+# prune keep the registration and blocks the next worktree add; this stable
+# path is owned by the updater, so release that lock before removing it.
+unlock_candidate_worktree() {
+    git -C "$repository_path" worktree unlock "$candidate_worktree" >/dev/null 2>&1 || true
+}
+
 remove_candidate_worktree() {
+    unlock_candidate_worktree
     git -C "$repository_path" worktree remove --force "$candidate_worktree" >/dev/null 2>&1 \
         || rm -rf "$candidate_worktree"
     git -C "$repository_path" worktree prune >/dev/null 2>&1 || true
@@ -253,6 +261,7 @@ add_candidate_worktree() {
     if [[ -e "$candidate_worktree" ]]; then
         remove_candidate_worktree
     fi
+    unlock_candidate_worktree
     git -C "$repository_path" worktree prune >/dev/null 2>&1 || true
     mkdir -p "$cache_root"
     git -C "$repository_path" worktree add --detach "$candidate_worktree" "$1"

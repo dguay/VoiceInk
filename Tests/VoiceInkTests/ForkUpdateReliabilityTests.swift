@@ -266,7 +266,7 @@ struct ForkUpdateReliabilityTests {
 
     @Test
     func forcedTerminationRemovesTheWorktreeTheHelperLeftBehind() async throws {
-        for stopsByCancelling in [false, true] {
+        for (stopsByCancelling, interruptsInitialization) in [(false, false), (true, false), (false, true)] {
             let temporaryDirectory = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString, isDirectory: true)
                 .resolvingSymlinksInPath()
@@ -295,6 +295,9 @@ struct ForkUpdateReliabilityTests {
                 worktree="$(dirname "$VOICEINK_UPDATE_MANIFEST_PATH")/BuildCache/Worktree"
                 mkdir -p "$(dirname "$worktree")"
                 /usr/bin/git -C "\(repositoryURL.path)" worktree add --detach "$worktree" HEAD >/dev/null 2>&1 || exit 1
+                \(interruptsInitialization
+                    ? "/usr/bin/git -C \"\(repositoryURL.path)\" worktree lock --reason initializing \"$worktree\" || exit 1"
+                    : ":")
                 : > "\(startedURL.path)"
                 /bin/sleep 600
                 """

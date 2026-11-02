@@ -663,16 +663,23 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
         await Task.detached {
             let fileManager = FileManager.default
             guard fileManager.fileExists(atPath: worktreeURL.path) else { return }
+            let administrativeDirectory = gitAdministrativeDirectory(ofWorktreeAt: worktreeURL)
             let commonDirectory = gitCommonDirectory(ofWorktreeAt: worktreeURL)
             try? fileManager.removeItem(at: worktreeURL)
+            // A checkout killed mid-initialization keeps Git's "initializing" lock,
+            // and prune never removes a locked registration. This registration
+            // belongs to the updater's own worktree, so drop its lock first.
+            if let administrativeDirectory {
+                try? fileManager.removeItem(at: administrativeDirectory.appendingPathComponent("locked"))
+            }
             guard let commonDirectory else { return }
             await runBoundedGit(["--git-dir", commonDirectory.path, "worktree", "prune"])
         }.value
     }
 
-    /// The clone's Git directory, read from the worktree's `.git` file
+    /// The worktree's registration in the clone, read from its `.git` file
     /// (`gitdir: <clone>/.git/worktrees/<name>`).
-    private static func gitCommonDirectory(ofWorktreeAt worktreeURL: URL) -> URL? {
+    private static func gitAdministrativeDirectory(ofWorktreeAt worktreeURL: URL) -> URL? {
         guard
             let contents = try? String(
                 contentsOf: worktreeURL.appendingPathComponent(".git"),
@@ -684,9 +691,16 @@ struct ProcessForkUpdateCommandRunner: ForkUpdateCommandRunning {
             return nil
         }
         let path = String(line.dropFirst("gitdir: ".count))
-        let administrativeDirectory = path.hasPrefix("/")
+        return path.hasPrefix("/")
             ? URL(fileURLWithPath: path, isDirectory: true)
             : URL(fileURLWithPath: path, isDirectory: true, relativeTo: worktreeURL).standardizedFileURL
+    }
+
+    /// The clone's Git directory, derived from the worktree's registration.
+    private static func gitCommonDirectory(ofWorktreeAt worktreeURL: URL) -> URL? {
+        guard let administrativeDirectory = gitAdministrativeDirectory(ofWorktreeAt: worktreeURL) else {
+            return nil
+        }
         if let relativeCommon = try? String(
             contentsOf: administrativeDirectory.appendingPathComponent("commondir"),
             encoding: .utf8
