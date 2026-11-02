@@ -359,6 +359,50 @@ struct ForkUpdateReliabilityTests {
     }
 
     @Test
+    func publicationPendingOutcomeIsImportedAsInstalledWithPendingPublication() async throws {
+        let updaterDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let logDirectory = updaterDirectory.appendingPathComponent("Logs", isDirectory: true)
+        try FileManager.default.createDirectory(at: updaterDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: updaterDirectory) }
+        let reportURL = updaterDirectory.appendingPathComponent("install-result.plist")
+        let report = LocalUpdateInstallationOutcomeReport(
+            attemptIdentifier: "installation-candidate",
+            candidateIdentifier: "candidate",
+            forkCommit: "0123456789abcdef0123456789abcdef01234567",
+            upstreamCommit: "fedcba9876543210fedcba9876543210fedcba98",
+            outcome: .failed,
+            failureStage: .publication,
+            failureKind: .transient,
+            message: "VoiceInk installed the update; publication to the fork is pending: VoiceInk could not fetch origin to publish the installed update.",
+            rollbackOutcome: nil
+        )
+        try PropertyListEncoder().encode(report).write(to: reportURL)
+
+        try LocalUpdateInstallationOutcomeRecorder(
+            updaterDirectoryURL: updaterDirectory,
+            logDirectoryURL: logDirectory
+        ).consume(reportAt: reportURL)
+
+        let failure = try PropertyListDecoder().decode(
+            ForkUpdateFailure.self,
+            from: Data(contentsOf: updaterDirectory.appendingPathComponent("failure-state.plist"))
+        )
+        let records = await ForkUpdateLogStore(directoryURL: logDirectory).loadRecords()
+
+        #expect(failure.stage == .publication)
+        #expect(failure.message.contains("installed the update; publication to the fork is pending"))
+        #expect(failure.recoverySuggestion.contains("installed and running"))
+        #expect(records.contains { $0.stage == .installation && $0.outcome == .succeeded })
+        #expect(records.contains { $0.stage == .publication && $0.outcome == .failed })
+        #expect(!records.contains { $0.stage == .installation && $0.outcome == .failed })
+        #expect(!records.contains { $0.stage == .rollback })
+        #expect(!FileManager.default.fileExists(
+            atPath: updaterDirectory.appendingPathComponent("rollback-state.plist").path
+        ))
+    }
+
+    @Test
     func corruptPendingOutcomeIsQuarantinedWithoutBlockingLaunch() throws {
         let updaterDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

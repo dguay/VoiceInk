@@ -209,6 +209,39 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The installed app already is this verified candidate, but an earlier
+# post-health publication did not finish. Publish it without rebuilding.
+publish_retained_candidate() {
+    local retained_ref
+    local retained_bundle
+    local local_main_sha
+
+    begin_stage publication transient
+    retained_ref="$(/usr/bin/plutil -extract candidateRef raw "$manifest_path" 2>/dev/null || true)"
+    retained_bundle="$(/usr/bin/plutil -extract bundlePath raw "$manifest_path" 2>/dev/null || true)"
+    [[ -n "$retained_ref" \
+        && "$(git -C "$repository_path" rev-parse --verify --quiet "$retained_ref" 2>/dev/null || true)" == "$fork_commit" ]] \
+        || fail "The installed update's preparation reference is missing, so VoiceInk cannot publish it."
+    local_main_sha="$(git -C "$repository_path" rev-parse --verify --quiet refs/heads/main)" \
+        || fail "The VoiceInk clone does not have a local main branch."
+    git -C "$repository_path" merge-base --is-ancestor "$local_main_sha" "$fork_commit" \
+        || fail "Local main cannot fast-forward to the installed update. Reconcile local main, then check for updates again."
+    git -C "$repository_path" push origin "$fork_commit:refs/heads/main" \
+        || fail "VoiceInk could not publish the installed update to origin. It will retry on the next update check."
+    if [[ "$local_main_sha" != "$fork_commit" ]]; then
+        if [[ "$(git -C "$repository_path" symbolic-ref --quiet --short HEAD || true)" == "main" ]]; then
+            git -C "$repository_path" merge --ff-only "$fork_commit" >/dev/null \
+                || fail "VoiceInk published the installed update, but could not fast-forward local main."
+        else
+            git -C "$repository_path" update-ref refs/heads/main "$fork_commit" "$local_main_sha" \
+                || fail "VoiceInk published the installed update, but could not fast-forward local main."
+        fi
+    fi
+    cleanup_candidate_artifacts "$fork_commit" "$retained_ref" "$retained_bundle"
+    rm -f "$manifest_path"
+    record_stage_success publication
+}
+
 begin_stage fetch
 git -C "$repository_path" fetch origin main \
     || fail "VoiceInk could not fetch origin/main."
@@ -266,8 +299,9 @@ if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" \
 then
     staged_manifest_sha="$(/usr/bin/plutil -extract forkCommit raw "$manifest_path" 2>/dev/null || true)"
     if [[ "$fork_base_commit" != "$fork_commit" && "$staged_manifest_sha" == "$fork_commit" ]]; then
-        write_preparation_result candidatePrepared
-        printf 'Retained verified VoiceInk candidate %s for publication retry.\n' "$fork_commit"
+        publish_retained_candidate
+        write_preparation_result upToDate
+        printf 'Published retained VoiceInk candidate %s.\n' "$fork_commit"
         exit 0
     fi
     if [[ -f "$manifest_path" ]]; then

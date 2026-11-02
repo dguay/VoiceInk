@@ -58,8 +58,8 @@ make test-updater
 | Suite | Covers |
 |---|---|
 | `bootstrap-local-test.sh` | `scripts/bootstrap-local.sh` remote, push-access, install-path and disk checks, clone registration, and the build hand-off |
-| `prepare-local-update-test.sh` | `prepare-local-update.sh` candidate preparation and staging |
-| `install-local-update-test.sh` | `install-local-update.sh` approval, app replacement, relaunch and rollback |
+| `prepare-local-update-test.sh` | `prepare-local-update.sh` candidate preparation, staging, and publication of a retained installed candidate |
+| `install-local-update-test.sh` | `install-local-update.sh` approval, app replacement, relaunch, rollback, and post-health publication failures |
 | `restore-local-update-test.sh` | `restore-local-update.sh` recovery of the preserved app and its state |
 | `test-updater-test.sh` | The runner's own pass, fail and missing-suite reporting |
 

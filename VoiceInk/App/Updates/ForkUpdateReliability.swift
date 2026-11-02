@@ -10,6 +10,7 @@ enum ForkUpdateStage: String, Codable, CaseIterable, Sendable {
     case installation
     case health
     case permission
+    case publication
     case rollback
     case toolchain
 }
@@ -107,6 +108,8 @@ struct ForkUpdateFailure: Codable, Equatable, LocalizedError, Sendable {
             suggestion = "Open the update logs before retrying the rollback."
         case .health, .installation:
             suggestion = "Restore the previous version or inspect the update logs before retrying."
+        case .publication:
+            suggestion = "The update is installed and running. VoiceInk publishes it to the fork on the next update check."
         default:
             suggestion = kind == .transient
                 ? "VoiceInk retried this temporary failure. Check the network, then retry the update."
@@ -581,9 +584,14 @@ struct LocalUpdateInstallationOutcomeRecorder {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try archive.record(logRecord(stage: .installation, outcome: report.outcome, report: report))
+        let stage = report.failureStage ?? .installation
+        // A publication failure happens after the candidate was installed and
+        // proved healthy, so the installation itself succeeded.
+        let installationOutcome: ForkUpdateLogOutcome = report.outcome == .failed && stage == .publication
+            ? .succeeded
+            : report.outcome
+        try archive.record(logRecord(stage: .installation, outcome: installationOutcome, report: report))
         if report.outcome == .failed {
-            let stage = report.failureStage ?? .installation
             let failure = ForkUpdateFailure.reported(
                 stage: stage,
                 kind: report.failureKind ?? .deterministic,
