@@ -1,24 +1,40 @@
 import Darwin
 import Foundation
 
+/// What a staged candidate brings in, written by the preparation helper.
+/// Candidates staged before the summary existed decode without one.
+struct StagedForkChangeSummary: Codable, Equatable {
+    let upstreamCommitCount: Int
+    let upstreamCommitSubjects: [String]
+}
+
 struct StagedForkCandidate: Codable, Equatable {
     let forkCommit: String
     let upstreamCommit: String
     let bundleURL: URL
     let preparedAt: Date
+    let changeSummary: StagedForkChangeSummary?
 
     private enum CodingKeys: String, CodingKey {
         case forkCommit
         case upstreamCommit
         case bundlePath
         case preparedAt
+        case changeSummary
     }
 
-    init(forkCommit: String, upstreamCommit: String, bundleURL: URL, preparedAt: Date) {
+    init(
+        forkCommit: String,
+        upstreamCommit: String,
+        bundleURL: URL,
+        preparedAt: Date,
+        changeSummary: StagedForkChangeSummary? = nil
+    ) {
         self.forkCommit = forkCommit
         self.upstreamCommit = upstreamCommit
         self.bundleURL = bundleURL
         self.preparedAt = preparedAt
+        self.changeSummary = changeSummary
     }
 
     init(from decoder: any Decoder) throws {
@@ -29,6 +45,10 @@ struct StagedForkCandidate: Codable, Equatable {
             fileURLWithPath: try container.decode(String.self, forKey: .bundlePath)
         )
         preparedAt = try container.decode(Date.self, forKey: .preparedAt)
+        changeSummary = try container.decodeIfPresent(
+            StagedForkChangeSummary.self,
+            forKey: .changeSummary
+        )
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -37,6 +57,7 @@ struct StagedForkCandidate: Codable, Equatable {
         try container.encode(upstreamCommit, forKey: .upstreamCommit)
         try container.encode(bundleURL.path, forKey: .bundlePath)
         try container.encode(preparedAt, forKey: .preparedAt)
+        try container.encodeIfPresent(changeSummary, forKey: .changeSummary)
     }
 }
 

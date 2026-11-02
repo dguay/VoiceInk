@@ -46,6 +46,11 @@ struct UpdaterState: Equatable {
     var preparationError: String?
     var failure: ForkUpdateFailure?
     var recoveryWarning: String?
+    var lastUpdateCheckDate: Date? = nil
+    var nextAutomaticUpdateCheckDate: Date? = nil
+
+    /// A deterministic failure will not fix itself on the next automatic check.
+    var needsAttention: Bool { failure?.kind == .deterministic }
 }
 
 @MainActor
@@ -145,6 +150,8 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
     private let contextStore: ForkUpdateAttemptContextStore
     private let promptCopier: any ForkUpdatePromptCopying
     private let applicationExecutableURL: URL?
+    private let windowPresenter: any UpdaterWindowPresenting
+    private let repositoryOpener: any ForkUpdateRepositoryOpening
     private var isUserInitiatedUpdateCheck = false
 
     @Published private(set) var state: UpdaterState
@@ -170,7 +177,9 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         logOpener: any ForkUpdateLogOpening = WorkspaceForkUpdateLogOpener(),
         contextStore: ForkUpdateAttemptContextStore = ForkUpdateAttemptContextStore(),
         promptCopier: (any ForkUpdatePromptCopying)? = nil,
-        applicationExecutableURL: URL? = Bundle.main.executableURL
+        applicationExecutableURL: URL? = Bundle.main.executableURL,
+        windowPresenter: any UpdaterWindowPresenting = AppUpdaterWindowPresenter(),
+        repositoryOpener: any ForkUpdateRepositoryOpening = WorkspaceForkUpdateRepositoryOpener()
     ) {
         self.defaults = defaults
         self.adapter = adapter
@@ -180,6 +189,8 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         self.contextStore = contextStore
         self.promptCopier = promptCopier ?? PasteboardForkUpdatePromptCopier()
         self.applicationExecutableURL = applicationExecutableURL
+        self.windowPresenter = windowPresenter
+        self.repositoryOpener = repositoryOpener
         state = UpdaterState(
             canCheckForUpdates: adapter.state.canCheckForUpdates,
             checksForUpdatesWhenDashboardAppears: Self.initialAutomaticCheckPreference(in: defaults),
@@ -216,6 +227,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         } else {
             state.availableUpdate = nil
         }
+        apply(adapter.state)
     }
 
     func checkForUpdatesIfDue() {
@@ -287,6 +299,15 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
 
     func openUpdateLogs() {
         logOpener.openLogs()
+    }
+
+    func showUpdateSettings() {
+        windowPresenter.showUpdateSettings()
+    }
+
+    func openUpdateRepository() {
+        guard let repositoryURL = state.failure?.repositoryURL else { return }
+        repositoryOpener.openRepository(at: repositoryURL)
     }
 
     func copyFixUpdatePrompt() {
@@ -380,7 +401,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
                     title: title,
                     actionLabel: "Open Logs"
                 ),
-                action: { [weak self] in self?.openUpdateLogs() }
+                action: { [weak self] in self?.openUpdateLogsFromNotification() }
             )
         case .rollbackCompleted:
             state.failure = nil
@@ -394,7 +415,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
                     title: "VoiceInk restored the previous version.",
                     actionLabel: "Open Logs"
                 ),
-                action: { [weak self] in self?.openUpdateLogs() }
+                action: { [weak self] in self?.openUpdateLogsFromNotification() }
             )
         }
     }
@@ -411,8 +432,16 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
                 title: "A verified VoiceInk update is ready.",
                 actionLabel: "View"
             ),
-            action: { [weak self] in self?.showStagedUpdate() }
+            action: { [weak self] in
+                self?.showStagedUpdate()
+                self?.windowPresenter.showMainWindow()
+            }
         )
+    }
+
+    private func openUpdateLogsFromNotification() {
+        openUpdateLogs()
+        windowPresenter.showUpdateSettings()
     }
 
     private func notifyFailureIfNeeded(_ failure: ForkUpdateFailure) {
@@ -443,6 +472,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
                 } else {
                     self?.copyFixUpdatePrompt()
                 }
+                self?.windowPresenter.showUpdateSettings()
             }
         )
     }
@@ -450,6 +480,11 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
     private func apply(_ adapterState: UpdaterAdapterState) {
         state.canCheckForUpdates = adapterState.canCheckForUpdates
         state.isPreparingUpdate = adapterState.sessionInProgress
+        state.lastUpdateCheckDate = adapterState.lastUpdateCheckDate
+        state.nextAutomaticUpdateCheckDate = state.checksForUpdatesWhenDashboardAppears
+            && adapterState.updateCheckInterval > 0
+            ? adapterState.lastUpdateCheckDate?.addingTimeInterval(adapterState.updateCheckInterval)
+            : nil
     }
 
     private func handleFoundUpdate(versionIdentifier: String, displayVersion: String) {
