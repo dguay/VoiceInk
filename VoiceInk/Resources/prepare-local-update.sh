@@ -18,6 +18,28 @@ stage_root="$(dirname "$manifest_path")"
 failure_state_path="${VOICEINK_UPDATE_FAILURE_STATE_PATH:-$stage_root/failure-state.plist}"
 failure_written=false
 publication_pending_retry=false
+# Persistent build state lives with the updater so consecutive preparations
+# reuse resolved packages and compiled dependencies. The worktree path is stable
+# so the derived data stays valid, but the worktree itself never outlives a run.
+cache_root="$stage_root/BuildCache"
+candidate_worktree="$cache_root/Worktree"
+derived_data_root="$cache_root/DerivedData"
+candidate_retention_seconds="${VOICEINK_UPDATE_CANDIDATE_RETENTION_SECONDS:-1209600}"
+
+# Preparation runs unattended. Git must fail instead of waiting for a terminal,
+# askpass dialog, or SSH passphrase prompt that nobody will answer.
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/usr/bin/false
+export SSH_ASKPASS=/usr/bin/false
+export SSH_ASKPASS_REQUIRE=never
+export GCM_INTERACTIVE=never
+exec < /dev/null
+
+# The app's watchdog and Cancel terminate the whole process group. Exit through
+# the EXIT trap so the worktree and temporary files are still removed.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fail() {
     local message="$*"
@@ -171,6 +193,9 @@ origin_repository="$(git -C "$repository_path" remote get-url origin 2>/dev/null
     || fail "The registered VoiceInk clone does not have an origin remote."
 upstream_repository="$(git -C "$repository_path" remote get-url upstream 2>/dev/null)" \
     || fail "The registered VoiceInk clone does not have an upstream remote."
+# Keep any SSH command the clone or user configured, but never let it prompt.
+ssh_command="${GIT_SSH_COMMAND:-$(git -C "$repository_path" config --get core.sshCommand 2>/dev/null || true)}"
+export GIT_SSH_COMMAND="${ssh_command:-ssh} -o BatchMode=yes"
 fork_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main 2>/dev/null || true)"
 upstream_commit="$(git -C "$repository_path" rev-parse refs/remotes/upstream/main 2>/dev/null || true)"
 
@@ -178,12 +203,18 @@ upstream_commit="$(git -C "$repository_path" rev-parse refs/remotes/upstream/mai
     || fail "The VoiceInk clone has uncommitted changes. Commit or stash them before preparing an update."
 
 work_root="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-update.XXXXXX")"
-candidate_worktree="$work_root/candidate"
-derived_data="$work_root/DerivedData"
 worktree_added=false
 candidate_ref=""
 candidate_stage=""
 candidate_staged=false
+caffeinate_pid=""
+
+# Keep the Mac from idle-sleeping in the middle of a long build. The assertion
+# ends with this helper even when it is killed.
+if command -v caffeinate >/dev/null 2>&1; then
+    caffeinate -i -w "$$" >/dev/null 2>&1 &
+    caffeinate_pid=$!
+fi
 
 cleanup_candidate_artifacts() {
     local cleanup_sha="$1"
@@ -210,9 +241,85 @@ cleanup_candidate_artifacts() {
     fi
 }
 
+# A checkout interrupted by a kill keeps Git's "initializing" lock, which makes
+# prune keep the registration and blocks the next worktree add; this stable
+# path is owned by the updater, so release that lock before removing it.
+unlock_candidate_worktree() {
+    git -C "$repository_path" worktree unlock "$candidate_worktree" >/dev/null 2>&1 || true
+}
+
+remove_candidate_worktree() {
+    unlock_candidate_worktree
+    git -C "$repository_path" worktree remove --force "$candidate_worktree" >/dev/null 2>&1 \
+        || rm -rf "$candidate_worktree"
+    git -C "$repository_path" worktree prune >/dev/null 2>&1 || true
+}
+
+# A preparation that was killed outright can leave the stable worktree behind.
+# Replace it rather than build from whatever state it was left in.
+add_candidate_worktree() {
+    if [[ -e "$candidate_worktree" ]]; then
+        remove_candidate_worktree
+    fi
+    unlock_candidate_worktree
+    git -C "$repository_path" worktree prune >/dev/null 2>&1 || true
+    mkdir -p "$cache_root"
+    git -C "$repository_path" worktree add --detach "$candidate_worktree" "$1"
+    worktree_added=true
+}
+
+# Removes candidate references and stage directories that the manifest does not
+# name, that are older than the retention window, and that the fork's main does
+# not contain. The manifest names the staged candidate and a candidate retained
+# for publication, so neither is ever pruned.
+candidate_is_expired_orphan() {
+    local name="$1"
+    local cutoff="$2"
+    [[ "$name" =~ ^([0-9a-f]{40})-([0-9]+)-[0-9]+$ ]] || return 1
+    local sha="${BASH_REMATCH[1]}"
+    local created_at="${BASH_REMATCH[2]}"
+    (( created_at < cutoff )) || return 1
+    if git -C "$repository_path" merge-base --is-ancestor "$sha" "$fork_base_commit" >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+prune_orphaned_candidates() {
+    local protected_ref=""
+    local protected_stage=""
+    local protected_bundle=""
+    local cutoff
+    local reference
+    local stage
+    if [[ -f "$manifest_path" ]]; then
+        protected_ref="$(/usr/bin/plutil -extract candidateRef raw "$manifest_path" 2>/dev/null || true)"
+        protected_bundle="$(/usr/bin/plutil -extract bundlePath raw "$manifest_path" 2>/dev/null || true)"
+        [[ -z "$protected_bundle" ]] || protected_stage="$(dirname "$protected_bundle")"
+    fi
+    cutoff=$(( $(date +%s) - candidate_retention_seconds ))
+
+    while IFS= read -r reference; do
+        [[ -n "$reference" && "$reference" != "$protected_ref" ]] || continue
+        if candidate_is_expired_orphan "${reference#refs/voiceink-updater/candidates/}" "$cutoff"; then
+            git -C "$repository_path" update-ref -d "$reference" >/dev/null 2>&1 || true
+        fi
+    done < <(git -C "$repository_path" for-each-ref --format='%(refname)' refs/voiceink-updater/candidates/)
+
+    for stage in "$stage_root/candidates"/*; do
+        [[ -d "$stage" && "$stage" != "$protected_stage" ]] || continue
+        if candidate_is_expired_orphan "$(basename "$stage")" "$cutoff"; then
+            rm -rf "$stage"
+        fi
+    done
+}
+
 cleanup() {
     if [[ "$worktree_added" == true ]]; then
-        git -C "$repository_path" worktree remove --force "$candidate_worktree" >/dev/null 2>&1 || true
+        remove_candidate_worktree
+    fi
+    if [[ -n "$caffeinate_pid" ]]; then
+        kill "$caffeinate_pid" >/dev/null 2>&1 || true
     fi
     if [[ -n "$candidate_ref" && "$candidate_staged" == false ]]; then
         git -C "$repository_path" update-ref -d "$candidate_ref" >/dev/null 2>&1 || true
@@ -278,6 +385,7 @@ if [[ -f "$failure_state_path" ]]; then
         rm -f "$failure_state_path"
     fi
 fi
+prune_orphaned_candidates || true
 
 # Identify a retained installed candidate before recomputing the merge: a
 # recomputed merge commit has a new SHA, so only the retained manifest names
@@ -307,8 +415,7 @@ publication_pending_retry=false
 fork_commit="$fork_base_commit"
 begin_stage merge
 if ! git -C "$repository_path" merge-base --is-ancestor "$upstream_commit" "$fork_base_commit"; then
-    git -C "$repository_path" worktree add --detach "$candidate_worktree" "$fork_base_commit"
-    worktree_added=true
+    add_candidate_worktree "$fork_base_commit"
     if git -C "$repository_path" merge-base --is-ancestor "$fork_base_commit" "$upstream_commit"; then
         git -C "$candidate_worktree" merge --ff-only "$upstream_commit"
     else
@@ -371,11 +478,6 @@ if [[ "${VOICEINK_UPDATE_DEFER_BUILD:-0}" == 1 ]]; then
     exit 0
 fi
 
-if [[ "$worktree_added" == false ]]; then
-    git -C "$repository_path" worktree add --detach "$candidate_worktree" "$fork_commit"
-    worktree_added=true
-fi
-
 signing_identity="${LOCAL_CODESIGN_IDENTITY:-}"
 if [[ -z "$signing_identity" ]]; then
     signing_identity="$(git config --global --get voiceink.localCodesignIdentity 2>/dev/null || true)"
@@ -387,15 +489,159 @@ else
     signing_required=YES
 fi
 
+describe_signing_identity() {
+    if [[ "$1" == "-" ]]; then
+        printf 'an ad-hoc signature (-)'
+    else
+        printf "'%s'" "$1"
+    fi
+}
+
+# Resolves the configured selector (a certificate SHA-1 or a name) to exactly
+# one valid signing certificate in the keychain, so preflight compares and
+# xcodebuild signs with the same certificate. A name can match a replacement
+# certificate that only shares it, so the comparison is always by fingerprint.
+signing_fingerprint=""
+signing_name=""
+resolve_signing_identity() {
+    local listing
+    local line
+    local hash
+    local name
+    local selector_hash=""
+    local matched_hashes=()
+    local matched_names=()
+    local descriptions=""
+    local index
+    local previous_stage="$current_stage"
+    local previous_kind="$failure_kind"
+
+    [[ "$signing_identity" != "-" ]] || return 0
+    if [[ "$signing_identity" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+        selector_hash="$(printf '%s' "$signing_identity" | tr '[:lower:]' '[:upper:]')"
+    fi
+    listing="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*[0-9]+\)[[:space:]]+([0-9A-Fa-f]{40})[[:space:]]+\"(.*)\"[[:space:]]*$ ]] \
+            || continue
+        hash="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
+        name="${BASH_REMATCH[2]}"
+        if [[ -n "$selector_hash" ]]; then
+            [[ "$hash" == "$selector_hash" ]] || continue
+        else
+            [[ "$name" == *"$signing_identity"* ]] || continue
+        fi
+        if (( ${#matched_hashes[@]} > 0 )); then
+            for index in "${!matched_hashes[@]}"; do
+                [[ "${matched_hashes[$index]}" != "$hash" ]] || continue 2
+            done
+        fi
+        matched_hashes+=("$hash")
+        matched_names+=("$name")
+    done < <(printf '%s\n' "$listing")
+
+    current_stage=preflight
+    failure_kind=deterministic
+    if (( ${#matched_hashes[@]} == 0 )); then
+        fail "No valid code signing identity matching $(describe_signing_identity "$signing_identity") is in the keychain, so the update stopped before building. Set the persisted identity to an available certificate's SHA-1 with: git config --global voiceink.localCodesignIdentity <SHA-1>"
+    fi
+    if (( ${#matched_hashes[@]} > 1 )); then
+        for index in "${!matched_hashes[@]}"; do
+            descriptions="$descriptions${descriptions:+, }'${matched_names[$index]}' (${matched_hashes[$index]})"
+        done
+        fail "The signing identity setting $(describe_signing_identity "$signing_identity") matches ${#matched_hashes[@]} certificates: $descriptions. The update stopped before building. Choose one by SHA-1 with: git config --global voiceink.localCodesignIdentity <SHA-1>"
+    fi
+    current_stage="$previous_stage"
+    failure_kind="$previous_kind"
+    signing_fingerprint="${matched_hashes[0]}"
+    signing_name="${matched_names[0]}"
+}
+
+# macOS ties VoiceInk's privacy access to its signing identity. A candidate
+# signed by another identity (for example ad-hoc because the persisted identity
+# setting is missing, or a different certificate with the same name) would lose
+# that access and be rolled back after install, so stop before spending a build
+# on it. An unreadable installed signature leaves nothing to compare, and the
+# post-install permission check still runs.
+verify_signing_identity() {
+    local installed_bundle="${VOICEINK_INSTALLED_BUNDLE_PATH:-}"
+    local details
+    local line
+    local installed_name=""
+    local installed_hash=""
+    local certificate_prefix="$work_root/installed-certificate"
+    local matches=false
+    local installed_description
+    local candidate_description
+    local suggested_identity
+
+    [[ -n "$installed_bundle" && -d "$installed_bundle" ]] || return 0
+    details="$(codesign -d --verbose=2 "$installed_bundle" 2>&1)" || return 0
+    while IFS= read -r line; do
+        if [[ "$line" == "Signature=adhoc" ]]; then
+            installed_name="-"
+            break
+        fi
+        if [[ "$line" == Authority=* ]]; then
+            installed_name="${line#Authority=}"
+            break
+        fi
+    done < <(printf '%s\n' "$details")
+    [[ -n "$installed_name" ]] || return 0
+    if [[ "$installed_name" != "-" ]] \
+        && codesign -d --extract-certificates="$certificate_prefix" "$installed_bundle" >/dev/null 2>&1 \
+        && [[ -f "${certificate_prefix}0" ]]
+    then
+        installed_hash="$(shasum -a 1 "${certificate_prefix}0" | awk '{ print toupper($1) }')"
+    fi
+
+    if [[ "$signing_identity" == "-" ]]; then
+        if [[ "$installed_name" == "-" ]]; then
+            matches=true
+        fi
+    else
+        [[ -n "$installed_hash" || "$installed_name" == "-" ]] || return 0
+        if [[ "$installed_hash" == "$signing_fingerprint" ]]; then
+            matches=true
+        fi
+    fi
+    [[ "$matches" == false ]] || return 0
+
+    installed_description="$(describe_signing_identity "$installed_name")"
+    if [[ -n "$installed_hash" ]]; then
+        installed_description="$installed_description ($installed_hash)"
+    fi
+    if [[ "$signing_identity" == "-" ]]; then
+        candidate_description="$(describe_signing_identity "-")"
+    else
+        candidate_description="$(describe_signing_identity "$signing_name") ($signing_fingerprint)"
+    fi
+    suggested_identity="${installed_hash:-$installed_name}"
+    if [[ "$suggested_identity" == *" "* ]]; then
+        suggested_identity="\"$suggested_identity\""
+    fi
+    current_stage=preflight
+    failure_kind=deterministic
+    fail "VoiceInk would sign this update with $candidate_description, but the installed VoiceInk is signed with $installed_description. macOS would treat the update as a different app and drop VoiceInk's privacy access, so the update stopped before building. Set the persisted identity with: git config --global voiceink.localCodesignIdentity $suggested_identity"
+}
+
+resolve_signing_identity
+verify_signing_identity
+
+if [[ "$worktree_added" == false ]]; then
+    add_candidate_worktree "$fork_commit"
+fi
+
 xcode_arguments=(
     -project VoiceInk.xcodeproj
     -scheme VoiceInk
     -configuration Release
-    -derivedDataPath "$derived_data"
+    -clonedSourcePackagesDirPath "$cache_root/SourcePackages"
+    -packageCachePath "$cache_root/PackageCache"
     -xcconfig LocalBuild.xcconfig
     -skipPackagePluginValidation
     -skipMacroValidation
-    "VOICEINK_LOCAL_CODESIGN_IDENTITY=$signing_identity"
+    "VOICEINK_LOCAL_CODESIGN_IDENTITY=${signing_fingerprint:-$signing_identity}"
     "CODE_SIGNING_REQUIRED=$signing_required"
     CODE_SIGNING_ALLOWED=YES
     DEVELOPMENT_TEAM=
@@ -406,18 +652,14 @@ xcode_arguments=(
     VOICEINK_UPDATER_KIND=fork
 )
 
+# The unit suite contains the updater tests, so it runs once. Its testable build
+# embeds the test bundle and cannot be installed, so the release build keeps its
+# own persistent derived data; each pass stays incremental across preparations.
 begin_stage test
 (
     cd "$candidate_worktree"
     xcodebuild "${xcode_arguments[@]}" \
-        ENABLE_TESTABILITY=YES \
-        -only-testing:VoiceInkTests/UpdaterViewModelTests \
-        test
-) || fail "VoiceInk updater tests failed for this candidate."
-begin_stage test
-(
-    cd "$candidate_worktree"
-    xcodebuild "${xcode_arguments[@]}" \
+        -derivedDataPath "$derived_data_root/Test" \
         ENABLE_TESTABILITY=YES \
         -only-testing:VoiceInkTests \
         test
@@ -426,12 +668,14 @@ record_stage_success test
 begin_stage build
 (
     cd "$candidate_worktree"
-    xcodebuild "${xcode_arguments[@]}" build
+    xcodebuild "${xcode_arguments[@]}" \
+        -derivedDataPath "$derived_data_root/Release" \
+        build
 ) || fail "VoiceInk could not build this candidate."
 record_stage_success build
 
 begin_stage staging
-candidate_bundle="$derived_data/Build/Products/Release/VoiceInk.app"
+candidate_bundle="$derived_data_root/Release/Build/Products/Release/VoiceInk.app"
 [[ -d "$candidate_bundle" ]] || fail "The local build did not produce VoiceInk.app."
 codesign --verify --deep --strict "$candidate_bundle" \
     || fail "The candidate bundle failed signature validation."

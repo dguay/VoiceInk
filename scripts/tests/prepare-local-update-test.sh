@@ -5,6 +5,10 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/voiceink-prepare-update-test.XXXXXX")"
 trap 'rm -rf "$fixture_root"' EXIT
+# Keep the suite independent of the developer's global Git settings, such as a
+# persisted signing identity. Scenarios that need one pass their own file.
+export GIT_CONFIG_GLOBAL="$fixture_root/empty-global.gitconfig"
+: > "$GIT_CONFIG_GLOBAL"
 
 fork_bare="$fixture_root/fork.git"
 upstream_bare="$fixture_root/upstream.git"
@@ -72,6 +76,11 @@ set -euo pipefail
 [[ -f "$PWD/candidate-marker" ]]
 printf '%s|%s\n' "$PWD" "$*" >> "$XCODE_LOG"
 
+if [[ -n "${XCODE_HANG_MARKER:-}" ]]; then
+    : > "$XCODE_HANG_MARKER"
+    sleep 600
+fi
+
 if [[ "${XCODE_SHOULD_FAIL:-0}" == 1 ]]; then
     printf 'error: deterministic updater test failure\n' >&2
     exit 1
@@ -103,11 +112,50 @@ EOF
 cat > "$fake_bin/codesign" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+for argument in "$@"; do
+    case "$argument" in
+        --extract-certificates=*)
+            [[ -n "${INSTALLED_LEAF_CERTIFICATE:-}" ]] || exit 1
+            printf '%s' "$INSTALLED_LEAF_CERTIFICATE" > "${argument#--extract-certificates=}0"
+            exit 0
+            ;;
+    esac
+done
+for argument in "$@"; do
+    case "$argument" in
+        -d | --display)
+            printf '%b\n' "${INSTALLED_SIGNATURE_DETAILS:-Signature=adhoc}" >&2
+            exit 0
+            ;;
+    esac
+done
 [[ -d "${@: -1}" ]]
 [[ "${CODESIGN_SHOULD_FAIL:-0}" != 1 ]]
 EOF
 
-chmod +x "$fake_bin/xcodebuild" "$fake_bin/codesign"
+cat > "$fake_bin/caffeinate" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${CAFFEINATE_LOG:-}" ]]; then
+    printf '%s\n' "$*" >> "$CAFFEINATE_LOG"
+fi
+EOF
+
+# Lists the valid signing identities given as "SHA-1|name" lines, the way
+# `security find-identity -v -p codesigning` prints them.
+cat > "$fake_bin/security" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "find-identity -v -p codesigning" ]] || exit 1
+count=0
+while IFS='|' read -r hash name; do
+    [[ -n "$hash" ]] || continue
+    count=$((count + 1))
+    printf '  %d) %s "%s"\n' "$count" "$hash" "$name"
+done < <(printf '%b\n' "${CODESIGNING_IDENTITIES:-}")
+printf '     %d valid identities found\n' "$count"
+EOF
+
+chmod +x "$fake_bin/xcodebuild" "$fake_bin/codesign" "$fake_bin/caffeinate" "$fake_bin/security"
 
 deferred_manifest="$fixture_root/deferred/staged-candidate.plist"
 deferred_result="$fixture_root/deferred/preparation-result.plist"
@@ -265,7 +313,7 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_UPDATE_RETRY_SUPPRESSED_CANDIDATE=1 \
     /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
 if [[ ! -f "$failure_manifest" || -e "$failure_state" \
-    || "$(wc -l < "$xcode_log")" -ne $((xcode_count_after_transient_retry + 3)) ]]
+    || "$(wc -l < "$xcode_log")" -ne $((xcode_count_after_transient_retry + 2)) ]]
 then
     printf 'prepare-local-update-test: explicit retry did not rerun the failed stage\n' >&2
     exit 1
@@ -317,7 +365,10 @@ if /usr/bin/plutil -extract suppressedForkCommit raw "$recovery_state" >/dev/nul
 fi
 staged_bundle="$(/usr/bin/plutil -extract bundlePath raw "$manifest_path")"
 [[ -d "$staged_bundle" ]]
-grep -Fq -- '-only-testing:VoiceInkTests/UpdaterViewModelTests' "$xcode_log"
+if grep -Fq -- 'VoiceInkTests/UpdaterViewModelTests' "$xcode_log"; then
+    printf 'prepare-local-update-test: updater tests ran separately from the unit suite\n' >&2
+    exit 1
+fi
 grep -Fq -- '-only-testing:VoiceInkTests test' "$xcode_log"
 grep -Fq -- '-configuration Release' "$xcode_log"
 grep -Fq -- 'ENABLE_TESTABILITY=YES' "$xcode_log"
@@ -327,9 +378,11 @@ stable_signing_config="$fixture_root/stable-signing.gitconfig"
 stable_signing_manifest="$fixture_root/stable-signing/staged-candidate.plist"
 stable_signing_xcode_log="$fixture_root/stable-signing-xcodebuild.log"
 git config --file "$stable_signing_config" voiceink.localCodesignIdentity "VoiceInk Local Development"
+stable_signing_hash="1111111111111111111111111111111111111111"
 
 PATH="$fake_bin:$PATH" \
     GIT_CONFIG_GLOBAL="$stable_signing_config" \
+    CODESIGNING_IDENTITIES="$stable_signing_hash|VoiceInk Local Development" \
     CANONICAL_PATH="$canonical_clone" \
     XCODE_LOG="$stable_signing_xcode_log" \
     VOICEINK_REPOSITORY_PATH="$canonical_clone" \
@@ -337,8 +390,366 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
     /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
 
-grep -Fq -- 'VOICEINK_LOCAL_CODESIGN_IDENTITY=VoiceInk Local Development' "$stable_signing_xcode_log"
+grep -Fq -- "VOICEINK_LOCAL_CODESIGN_IDENTITY=$stable_signing_hash " "$stable_signing_xcode_log"
 grep -Fq -- 'CODE_SIGNING_REQUIRED=YES' "$stable_signing_xcode_log"
+
+# Consecutive preparations reuse persistent build caches under the updater's
+# directory, run the unit suite (which contains the updater tests) once, and
+# keep the Mac from idle-sleeping while they run.
+cache_root="$fixture_root/cache"
+cache_manifest="$cache_root/staged-candidate.plist"
+cache_xcode_log="$fixture_root/cache-xcodebuild.log"
+caffeinate_log="$fixture_root/caffeinate.log"
+run_cached_preparation() {
+    PATH="$fake_bin:$PATH" \
+        CANONICAL_PATH="$canonical_clone" \
+        XCODE_LOG="$cache_xcode_log" \
+        CAFFEINATE_LOG="$caffeinate_log" \
+        VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+        VOICEINK_UPDATE_MANIFEST_PATH="$cache_manifest" \
+        VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+        /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+}
+run_cached_preparation
+first_cache_invocations="$(cut -d '|' -f 2- "$cache_xcode_log")"
+run_cached_preparation
+if [[ "$(grep -c -- ' test$' "$cache_xcode_log")" -ne 2 \
+    || "$(grep -c -- ' build$' "$cache_xcode_log")" -ne 2 \
+    || "$(wc -l < "$cache_xcode_log")" -ne 4 ]]
+then
+    printf 'prepare-local-update-test: a preparation did not run the unit suite exactly once\n' >&2
+    exit 1
+fi
+if [[ "$(cut -d '|' -f 2- "$cache_xcode_log" | sed -n '3,4p')" != "$first_cache_invocations" ]]; then
+    printf 'prepare-local-update-test: consecutive preparations used different build caches\n' >&2
+    exit 1
+fi
+while IFS= read -r invocation; do
+    [[ "$invocation" == *"-derivedDataPath $cache_root/BuildCache/DerivedData/"* \
+        && "$invocation" == *"-clonedSourcePackagesDirPath $cache_root/BuildCache/SourcePackages "* \
+        && "$invocation" == *"-packageCachePath $cache_root/BuildCache/PackageCache "* ]] || {
+        printf 'prepare-local-update-test: xcodebuild did not use the persistent caches: %s\n' "$invocation" >&2
+        exit 1
+    }
+done < "$cache_xcode_log"
+[[ -d "$cache_root/BuildCache/DerivedData/Release/Build/Products/Release/VoiceInk.app" ]] || {
+    printf 'prepare-local-update-test: the persistent derived data was discarded\n' >&2
+    exit 1
+}
+[[ ! -e "$cache_root/BuildCache/Worktree" ]]
+[[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+if [[ "$(grep -c -- '^-i -w [0-9][0-9]*$' "$caffeinate_log" 2>/dev/null || true)" -ne 2 ]]; then
+    printf 'prepare-local-update-test: preparation did not prevent idle sleep\n' >&2
+    exit 1
+fi
+
+# A worktree left by a preparation that was killed is replaced, not reused.
+git -C "$canonical_clone" worktree add --detach "$cache_root/BuildCache/Worktree" HEAD >/dev/null 2>&1
+printf 'stale\n' > "$cache_root/BuildCache/Worktree/stale-marker"
+run_cached_preparation
+[[ ! -e "$cache_root/BuildCache/Worktree" ]]
+[[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+
+# A checkout killed mid-initialization leaves a locked registration whose
+# directory is gone; the next preparation must still be able to add the worktree.
+git -C "$canonical_clone" worktree add --detach "$cache_root/BuildCache/Worktree" HEAD >/dev/null 2>&1
+git -C "$canonical_clone" worktree lock --reason initializing "$cache_root/BuildCache/Worktree"
+rm -rf "$cache_root/BuildCache/Worktree"
+run_cached_preparation
+[[ ! -e "$cache_root/BuildCache/Worktree" ]]
+[[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+
+# Git never waits for a terminal, askpass dialog, or SSH passphrase prompt.
+ssh_bin="$fixture_root/ssh-bin"
+ssh_log="$fixture_root/ssh.log"
+mkdir -p "$ssh_bin"
+cat > "$ssh_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "${GIT_TERMINAL_PROMPT:-unset}" "${GIT_ASKPASS:-unset}" "$*" >> "$SSH_LOG"
+exit 255
+EOF
+chmod +x "$ssh_bin/ssh"
+noninteractive_result="$fixture_root/noninteractive/preparation-result.plist"
+git -C "$canonical_clone" remote set-url origin "ssh://git@voiceink.invalid/fork.git"
+git -C "$canonical_clone" config core.sshCommand "ssh -o ConnectTimeout=7"
+if PATH="$ssh_bin:$fake_bin:$PATH" \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    SSH_LOG="$ssh_log" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$fixture_root/noninteractive/staged-candidate.plist" \
+    VOICEINK_UPDATE_RESULT_PATH="$noninteractive_result" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/noninteractive-output.log" 2>&1 < /dev/null
+then
+    git -C "$canonical_clone" config --unset core.sshCommand
+    git -C "$canonical_clone" remote set-url origin "$fork_bare"
+    printf 'prepare-local-update-test: unreachable SSH origin was accepted\n' >&2
+    exit 1
+fi
+git -C "$canonical_clone" remote set-url origin "$fork_bare"
+git -C "$canonical_clone" config --unset core.sshCommand
+if ! grep -Eq '^0\|/usr/bin/false\|.*BatchMode=yes' "$ssh_log" \
+    || ! grep -Fq -- "-o ConnectTimeout=7 -o BatchMode=yes" "$ssh_log" \
+    || [[ "$(/usr/bin/plutil -extract stage raw "$noninteractive_result" 2>/dev/null || true)" != "fetch" ]]
+then
+    printf 'prepare-local-update-test: git fetch could prompt for credentials\n' >&2
+    exit 1
+fi
+
+# The candidate must be signed by the identity that signed the installed app,
+# or macOS revokes VoiceInk's permissions after installation. Check before
+# building, and name both identities and the fix.
+installed_bundle="$fixture_root/installed/VoiceInk.app"
+mkdir -p "$installed_bundle/Contents"
+installed_leaf="installed leaf certificate"
+installed_leaf_hash="$(printf '%s' "$installed_leaf" | shasum -a 1 | awk '{ print toupper($1) }')"
+identity_manifest="$fixture_root/identity-mismatch/staged-candidate.plist"
+identity_result="$fixture_root/identity-mismatch/preparation-result.plist"
+xcode_lines_before_identity="$(wc -l < "$xcode_log")"
+if PATH="$fake_bin:$PATH" \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    INSTALLED_SIGNATURE_DETAILS='Executable=VoiceInk\nAuthority=VoiceInk Local Development\nAuthority=VoiceInk Local Root' \
+    INSTALLED_LEAF_CERTIFICATE="$installed_leaf" \
+    VOICEINK_INSTALLED_BUNDLE_PATH="$installed_bundle" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$identity_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$identity_result" \
+    VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/identity-mismatch.log" 2>&1
+then
+    printf 'prepare-local-update-test: mismatched signing identity was accepted\n' >&2
+    exit 1
+fi
+identity_message="$(/usr/bin/plutil -extract message raw "$identity_result" 2>/dev/null || true)"
+if [[ "$(/usr/bin/plutil -extract stage raw "$identity_result" 2>/dev/null || true)" != "preflight" \
+    || "$(/usr/bin/plutil -extract kind raw "$identity_result" 2>/dev/null || true)" != "deterministic" \
+    || "$identity_message" != *"ad-hoc"* \
+    || "$identity_message" != *"VoiceInk Local Development"* \
+    || "$identity_message" != *"git config --global voiceink.localCodesignIdentity $installed_leaf_hash"* \
+    || "$(wc -l < "$xcode_log")" -ne "$xcode_lines_before_identity" \
+    || -e "$identity_manifest" ]]
+then
+    printf 'prepare-local-update-test: identity mismatch did not fail at preflight: %s\n' "$identity_message" >&2
+    exit 1
+fi
+[[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+
+hash_identity_config="$fixture_root/hash-identity.gitconfig"
+git config --file "$hash_identity_config" voiceink.localCodesignIdentity "$installed_leaf_hash"
+hash_identity_manifest="$fixture_root/identity-hash/staged-candidate.plist"
+PATH="$fake_bin:$PATH" \
+    GIT_CONFIG_GLOBAL="$hash_identity_config" \
+    CODESIGNING_IDENTITIES="$installed_leaf_hash|VoiceInk Local Development" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    INSTALLED_SIGNATURE_DETAILS='Authority=VoiceInk Local Development' \
+    INSTALLED_LEAF_CERTIFICATE="$installed_leaf" \
+    VOICEINK_INSTALLED_BUNDLE_PATH="$installed_bundle" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$hash_identity_manifest" \
+    VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+[[ -f "$hash_identity_manifest" ]]
+
+# A name selector resolves to the certificate it names in the keychain, and
+# that certificate's fingerprint is what is compared and handed to xcodebuild.
+name_identity_manifest="$fixture_root/identity-name/staged-candidate.plist"
+name_identity_xcode_log="$fixture_root/identity-name-xcodebuild.log"
+PATH="$fake_bin:$PATH" \
+    GIT_CONFIG_GLOBAL="$stable_signing_config" \
+    CODESIGNING_IDENTITIES="0000000000000000000000000000000000000001|Apple Development: Someone Else\n$installed_leaf_hash|VoiceInk Local Development" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$name_identity_xcode_log" \
+    INSTALLED_SIGNATURE_DETAILS='Authority=VoiceInk Local Development' \
+    INSTALLED_LEAF_CERTIFICATE="$installed_leaf" \
+    VOICEINK_INSTALLED_BUNDLE_PATH="$installed_bundle" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$name_identity_manifest" \
+    VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+[[ -f "$name_identity_manifest" ]]
+grep -Fq -- "VOICEINK_LOCAL_CODESIGN_IDENTITY=$installed_leaf_hash " "$name_identity_xcode_log"
+
+# A replacement certificate that only shares the installed certificate's name
+# is a different identity to macOS, so it fails at preflight.
+replacement_hash="2222222222222222222222222222222222222222"
+replacement_manifest="$fixture_root/identity-replacement/staged-candidate.plist"
+replacement_result="$fixture_root/identity-replacement/preparation-result.plist"
+xcode_lines_before_replacement="$(wc -l < "$xcode_log")"
+if PATH="$fake_bin:$PATH" \
+    GIT_CONFIG_GLOBAL="$stable_signing_config" \
+    CODESIGNING_IDENTITIES="$replacement_hash|VoiceInk Local Development" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    INSTALLED_SIGNATURE_DETAILS='Authority=VoiceInk Local Development' \
+    INSTALLED_LEAF_CERTIFICATE="$installed_leaf" \
+    VOICEINK_INSTALLED_BUNDLE_PATH="$installed_bundle" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$replacement_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$replacement_result" \
+    VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/identity-replacement.log" 2>&1
+then
+    printf 'prepare-local-update-test: a same-name replacement certificate was accepted\n' >&2
+    exit 1
+fi
+replacement_message="$(/usr/bin/plutil -extract message raw "$replacement_result" 2>/dev/null || true)"
+if [[ "$(/usr/bin/plutil -extract stage raw "$replacement_result" 2>/dev/null || true)" != "preflight" \
+    || "$replacement_message" != *"$replacement_hash"* \
+    || "$replacement_message" != *"$installed_leaf_hash"* \
+    || "$(wc -l < "$xcode_log")" -ne "$xcode_lines_before_replacement" \
+    || -e "$replacement_manifest" ]]
+then
+    printf 'prepare-local-update-test: same-name replacement did not fail at preflight: %s\n' "$replacement_message" >&2
+    exit 1
+fi
+
+# A selector that matches several certificates cannot say which one signs the
+# candidate, so it fails at preflight and lists them.
+ambiguous_manifest="$fixture_root/identity-ambiguous/staged-candidate.plist"
+ambiguous_result="$fixture_root/identity-ambiguous/preparation-result.plist"
+if PATH="$fake_bin:$PATH" \
+    GIT_CONFIG_GLOBAL="$stable_signing_config" \
+    CODESIGNING_IDENTITIES="$installed_leaf_hash|VoiceInk Local Development\n$replacement_hash|VoiceInk Local Development (2)" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    INSTALLED_SIGNATURE_DETAILS='Authority=VoiceInk Local Development' \
+    INSTALLED_LEAF_CERTIFICATE="$installed_leaf" \
+    VOICEINK_INSTALLED_BUNDLE_PATH="$installed_bundle" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$ambiguous_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$ambiguous_result" \
+    VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/identity-ambiguous.log" 2>&1
+then
+    printf 'prepare-local-update-test: an ambiguous signing identity was accepted\n' >&2
+    exit 1
+fi
+ambiguous_message="$(/usr/bin/plutil -extract message raw "$ambiguous_result" 2>/dev/null || true)"
+if [[ "$(/usr/bin/plutil -extract stage raw "$ambiguous_result" 2>/dev/null || true)" != "preflight" \
+    || "$(/usr/bin/plutil -extract kind raw "$ambiguous_result" 2>/dev/null || true)" != "deterministic" \
+    || "$ambiguous_message" != *"matches 2 certificates"* \
+    || "$ambiguous_message" != *"$installed_leaf_hash"* \
+    || "$ambiguous_message" != *"$replacement_hash"* \
+    || "$(wc -l < "$xcode_log")" -ne "$xcode_lines_before_replacement" \
+    || -e "$ambiguous_manifest" ]]
+then
+    printf 'prepare-local-update-test: ambiguous identity did not fail at preflight: %s\n' "$ambiguous_message" >&2
+    exit 1
+fi
+[[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+
+# Preparation prunes orphaned candidate references and stage directories that
+# are older than the retention window and not contained in the fork's main.
+# The staged (or retained-for-publication) candidate and recent or published
+# candidates stay.
+prune_root="$fixture_root/prune"
+prune_manifest="$prune_root/staged-candidate.plist"
+orphan_sha="$(git -C "$canonical_clone" commit-tree -p "$before_head" -m "test: orphaned candidate" "$before_head^{tree}")"
+retained_sha="$(git -C "$canonical_clone" commit-tree -p "$before_head" -m "test: retained candidate" "$before_head^{tree}")"
+recent_epoch="$(date +%s)"
+old_orphan_name="$orphan_sha-1000-1"
+recent_orphan_name="$orphan_sha-$recent_epoch-2"
+old_published_name="$before_head-1000-3"
+retained_name="$retained_sha-1000-4"
+for candidate_name in "$old_orphan_name" "$recent_orphan_name" "$old_published_name" "$retained_name"; do
+    git -C "$canonical_clone" update-ref "refs/voiceink-updater/candidates/$candidate_name" "${candidate_name%%-*}"
+    mkdir -p "$prune_root/candidates/$candidate_name/VoiceInk.app"
+done
+/usr/bin/plutil -create xml1 "$prune_manifest"
+/usr/bin/plutil -insert forkCommit -string "$retained_sha" "$prune_manifest"
+/usr/bin/plutil -insert forkBaseCommit -string "$before_head" "$prune_manifest"
+/usr/bin/plutil -insert upstreamCommit -string "$upstream_sha" "$prune_manifest"
+/usr/bin/plutil -insert bundlePath -string "$prune_root/candidates/$retained_name/VoiceInk.app" "$prune_manifest"
+/usr/bin/plutil -insert preparedAt -date "2000-01-01T00:00:00Z" "$prune_manifest"
+/usr/bin/plutil -insert candidateRef -string "refs/voiceink-updater/candidates/$retained_name" "$prune_manifest"
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$prune_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$prune_root/preparation-result.plist" \
+    VOICEINK_UPDATE_DEFER_BUILD=1 \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+if git -C "$canonical_clone" rev-parse --verify --quiet "refs/voiceink-updater/candidates/$old_orphan_name" >/dev/null \
+    || [[ -e "$prune_root/candidates/$old_orphan_name" ]]
+then
+    printf 'prepare-local-update-test: an expired orphaned candidate was not pruned\n' >&2
+    exit 1
+fi
+for candidate_name in "$recent_orphan_name" "$old_published_name" "$retained_name"; do
+    if ! git -C "$canonical_clone" rev-parse --verify --quiet "refs/voiceink-updater/candidates/$candidate_name" >/dev/null \
+        || [[ ! -d "$prune_root/candidates/$candidate_name/VoiceInk.app" ]]
+    then
+        printf 'prepare-local-update-test: protected candidate %s was pruned\n' "$candidate_name" >&2
+        exit 1
+    fi
+    git -C "$canonical_clone" update-ref -d "refs/voiceink-updater/candidates/$candidate_name"
+done
+[[ -f "$prune_manifest" ]]
+
+# Terminating the helper's process group (the in-app watchdog or Cancel)
+# stops a hung build and still removes the worktree and temporary files.
+hang_root="$fixture_root/hang"
+hang_temporary="$fixture_root/hang-tmp"
+hang_marker="$fixture_root/hang-started"
+mkdir -p "$hang_root" "$hang_temporary"
+set -m
+PATH="$fake_bin:$PATH" \
+    TMPDIR="$hang_temporary" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$fixture_root/hang-xcodebuild.log" \
+    XCODE_HANG_MARKER="$hang_marker" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$hang_root/staged-candidate.plist" \
+    VOICEINK_UPDATE_RECOVERY_STATE_PATH="$recovery_state" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+    > "$fixture_root/hang-output.log" 2>&1 &
+hang_pid=$!
+set +m
+for _ in $(seq 1 200); do
+    [[ -f "$hang_marker" ]] && break
+    sleep 0.1
+done
+if [[ ! -f "$hang_marker" ]]; then
+    kill -KILL -- "-$hang_pid" 2>/dev/null || true
+    printf 'prepare-local-update-test: hung build fixture never started\n' >&2
+    exit 1
+fi
+[[ -d "$hang_root/BuildCache/Worktree" ]]
+kill -TERM -- "-$hang_pid"
+hang_stopped=false
+for _ in $(seq 1 100); do
+    if ! kill -0 "$hang_pid" 2>/dev/null; then
+        hang_stopped=true
+        break
+    fi
+    sleep 0.1
+done
+if [[ "$hang_stopped" != true ]]; then
+    kill -KILL -- "-$hang_pid" 2>/dev/null || true
+    printf 'prepare-local-update-test: terminated preparation kept running\n' >&2
+    exit 1
+fi
+if wait "$hang_pid"; then
+    printf 'prepare-local-update-test: terminated preparation reported success\n' >&2
+    exit 1
+fi
+if [[ -e "$hang_root/BuildCache/Worktree" \
+    || -n "$(ls -A "$hang_temporary")" \
+    || -e "$hang_root/staged-candidate.plist" \
+    || "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -ne 1 ]]
+then
+    printf 'prepare-local-update-test: terminated preparation left its worktree or temporary files\n' >&2
+    exit 1
+fi
 
 signature_manifest="$fixture_root/rejected-signature/staged-candidate.plist"
 if PATH="$fake_bin:$PATH" \

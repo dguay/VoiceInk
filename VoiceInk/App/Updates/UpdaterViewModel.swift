@@ -58,6 +58,45 @@ struct UpdaterState: Equatable {
     var restartMessage: String?
     /// Presents `restartMessage` right after the user's restart request was rejected.
     var isPresentingRestartMessage = false
+    var sessionActivity: UpdaterSessionActivity? = nil
+}
+
+/// What an in-progress update session is doing, so the UI can label it and offer
+/// Cancel only while it is safe to stop.
+enum UpdaterSessionActivity: Equatable, Sendable {
+    case preparing(stage: ForkUpdateStage, startedAt: Date)
+    case installing
+    case restoring
+
+    var isPreparing: Bool {
+        if case .preparing = self { return true }
+        return false
+    }
+
+    /// The label Settings shows, e.g. "Building… 2:05".
+    func statusText(at date: Date) -> String {
+        switch self {
+        case .preparing(let stage, let startedAt):
+            let seconds = max(0, Int(date.timeIntervalSince(startedAt)))
+            let elapsed = String(format: "%d:%02d", seconds / 60, seconds % 60)
+            return "\(Self.label(for: stage)) \(elapsed)"
+        case .installing:
+            return "Installing…"
+        case .restoring:
+            return "Restoring…"
+        }
+    }
+
+    private static func label(for stage: ForkUpdateStage) -> String {
+        switch stage {
+        case .fetch: "Fetching…"
+        case .merge: "Merging…"
+        case .test: "Testing…"
+        case .build: "Building…"
+        case .staging: "Staging…"
+        default: "Preparing…"
+        }
+    }
 }
 
 @MainActor
@@ -74,6 +113,7 @@ protocol UpdaterModule: AnyObject {
     func dismissRestartMessage()
     func showRestorePreviousVersion()
     func cancelRestorePreviousVersion()
+    func cancelUpdateCheck()
     func restorePreviousVersion()
     func openUpdateLogs()
     func copyFixUpdatePrompt()
@@ -84,6 +124,7 @@ struct UpdaterAdapterState: Equatable {
     let sessionInProgress: Bool
     let lastUpdateCheckDate: Date?
     let updateCheckInterval: TimeInterval
+    var activity: UpdaterSessionActivity? = nil
 
     static let unavailable = UpdaterAdapterState(
         canCheckForUpdates: false,
@@ -116,6 +157,7 @@ protocol UpdaterAdapter: AnyObject {
     func start()
     func checkForUpdateInformation()
     func checkForUpdates()
+    func cancelUpdateCheck()
     /// Throws when the adapter rejects the request; the staged update stays available.
     func requestRestart(for candidate: StagedForkCandidate) throws
     func restorePreviousVersion()
@@ -123,6 +165,7 @@ protocol UpdaterAdapter: AnyObject {
 
 extension UpdaterAdapter {
     var canRestorePreviousVersion: Bool { false }
+    func cancelUpdateCheck() {}
     func requestRestart(for candidate: StagedForkCandidate) throws {}
     func restorePreviousVersion() {}
 }
@@ -387,6 +430,13 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         state.isPresentingRestorePreviousVersion = false
     }
 
+    /// Stops an in-progress preparation. Installation and restoration cannot be
+    /// cancelled once they start.
+    func cancelUpdateCheck() {
+        guard state.sessionActivity?.isPreparing == true else { return }
+        adapter.cancelUpdateCheck()
+    }
+
     func openUpdateLogs() {
         logOpener.openLogs()
     }
@@ -588,6 +638,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             && adapterState.updateCheckInterval > 0
             ? adapterState.lastUpdateCheckDate?.addingTimeInterval(adapterState.updateCheckInterval)
             : nil
+        state.sessionActivity = adapterState.sessionInProgress ? adapterState.activity : nil
     }
 
     private func handleFoundUpdate(versionIdentifier: String, displayVersion: String) {

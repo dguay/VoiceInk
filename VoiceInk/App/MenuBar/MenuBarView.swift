@@ -163,6 +163,12 @@ struct MenuBarView: View {
                     || updaterViewModel.state.isPreparingUpdate
             )
 
+            if updaterViewModel.state.sessionActivity?.isPreparing == true {
+                Button("Cancel Update Check") {
+                    updaterViewModel.cancelUpdateCheck()
+                }
+            }
+
             if updaterViewModel.state.stagedUpdate != nil {
                 if let reason = updaterViewModel.state.restartBlockedReason {
                     // Menu items cannot show tooltips, so the label carries the reason.
