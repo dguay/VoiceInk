@@ -298,8 +298,11 @@ struct HistoryDetailActionBar: View {
 
         isWorking = true
         let configuration = baseConfiguration.replacingPrompt(prompt)
+        // Blocks "Restart and Update" until the result is saved.
+        FileTranscriptionActivity.shared.begin()
 
-        Task {
+        Task { @MainActor in
+            defer { FileTranscriptionActivity.shared.end() }
             do {
                 transcription.aiEnhancementModelName =
                     configuration.modelName ?? configuration.provider?.defaultModel
