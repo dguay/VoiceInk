@@ -974,6 +974,30 @@ chmod +x "$fake_bin/xcodebuild"
 pending_original_staged_bundle="$staged_bundle"
 staged_bundle="$fixture_root/staging/candidates/$new_sha-1-1/VoiceInk.app"
 
+expect_pending_retry_failure() {
+    local retry_scenario="$1"
+    local retry_result="$fixture_root/$retry_scenario-preparation.plist"
+
+    if PATH="$fake_bin:$PATH" \
+        VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+        VOICEINK_UPDATE_MANIFEST_PATH="$manifest_path" \
+        VOICEINK_UPDATE_RESULT_PATH="$retry_result" \
+        VOICEINK_INSTALLED_FORK_COMMIT="$new_sha" \
+        /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" \
+        > "$fixture_root/$retry_scenario-output.log" 2>&1
+    then
+        printf 'install-local-update-test: %s retry succeeded unexpectedly\n' "$retry_scenario" >&2
+        exit 1
+    fi
+    [[ "$(/usr/bin/plutil -extract outcome raw "$retry_result")" == "failure" ]]
+    [[ "$(/usr/bin/plutil -extract stage raw "$retry_result")" == "publication" ]]
+    [[ "$(/usr/bin/plutil -extract kind raw "$retry_result")" == "transient" ]]
+    grep -Fq "publication to the fork is pending" "$retry_result"
+    [[ "$(/usr/bin/plutil -extract forkCommit raw "$manifest_path")" == "$new_sha" ]]
+    [[ "$(git -C "$canonical_clone" rev-parse "$candidate_ref")" == "$new_sha" ]]
+    [[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$fork_base_sha" ]]
+}
+
 run_pending_publication() {
     local scenario="$1"
     shift
@@ -1059,8 +1083,14 @@ run_pending_publication() {
     fi
     grep -Fq "publication is pending" "$output_log"
 
+    # A retry that still cannot publish keeps reporting the pending publication.
     if [[ -n "${pending_cleanup_path:-}" ]]; then
+        expect_pending_retry_failure "$scenario-still-dirty"
         /bin/rm -f "$pending_cleanup_path"
+    else
+        git -C "$canonical_clone" remote set-url origin "$fixture_root/unreachable.git"
+        expect_pending_retry_failure "$scenario-still-offline"
+        git -C "$canonical_clone" remote set-url origin "$fork_bare"
     fi
     PATH="$fake_bin:$PATH" \
         VOICEINK_REPOSITORY_PATH="$canonical_clone" \

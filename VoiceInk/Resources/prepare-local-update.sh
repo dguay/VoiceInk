@@ -17,9 +17,13 @@ progress_path="${VOICEINK_UPDATE_PROGRESS_PATH:-}"
 stage_root="$(dirname "$manifest_path")"
 failure_state_path="${VOICEINK_UPDATE_FAILURE_STATE_PATH:-$stage_root/failure-state.plist}"
 failure_written=false
+publication_pending_retry=false
 
 fail() {
     local message="$*"
+    if [[ "$publication_pending_retry" == true ]]; then
+        message="VoiceInk installed the update; publication to the fork is pending: $message"
+    fi
     write_failure_result "$message"
     printf 'Error: %s\n' "$message" >&2
     exit 1
@@ -143,6 +147,17 @@ begin_stage() {
     exit_if_stage_failure_is_unchanged
 }
 
+# A retained manifest for the installed commit means an earlier post-health
+# publication is still pending. Report every failure until it is published as
+# a publication failure, so the installed-and-pending state stays visible.
+if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" && -f "$manifest_path" \
+    && "$(/usr/bin/plutil -extract forkCommit raw "$manifest_path" 2>/dev/null || true)" == "$VOICEINK_INSTALLED_FORK_COMMIT" \
+    && -n "$(/usr/bin/plutil -extract forkBaseCommit raw "$manifest_path" 2>/dev/null || true)" ]]
+then
+    publication_pending_retry=true
+    begin_stage publication transient
+fi
+
 repository_path="${VOICEINK_REPOSITORY_PATH:-}"
 if [[ -z "$repository_path" ]]; then
     repository_path="$(git config --global --get voiceink.repositoryPath 2>/dev/null || true)"
@@ -245,7 +260,7 @@ publish_retained_candidate() {
     record_stage_success publication
 }
 
-begin_stage fetch
+[[ "$publication_pending_retry" == true ]] || begin_stage fetch
 git -C "$repository_path" fetch origin main \
     || fail "VoiceInk could not fetch origin/main."
 fork_commit="$(git -C "$repository_path" rev-parse refs/remotes/origin/main)" \
@@ -285,6 +300,9 @@ if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" && -f "$manifest_path" ]]; then
         exit 0
     fi
 fi
+# Origin moved past the retained candidate's base, so it is no longer a
+# pending publication; later stages report their own failures.
+publication_pending_retry=false
 
 fork_commit="$fork_base_commit"
 begin_stage merge
