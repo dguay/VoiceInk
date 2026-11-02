@@ -163,10 +163,29 @@ struct MenuBarView: View {
                     || updaterViewModel.state.isPreparingUpdate
             )
 
+            if updaterViewModel.state.sessionActivity?.isPreparing == true {
+                Button("Cancel Update Check") {
+                    updaterViewModel.cancelUpdateCheck()
+                }
+            }
+
             if updaterViewModel.state.stagedUpdate != nil {
-                Button("Update Ready…") {
-                    showMainWindow()
-                    updaterViewModel.showStagedUpdate()
+                if let reason = updaterViewModel.state.restartBlockedReason {
+                    // Menu items cannot show tooltips, so the label carries the reason.
+                    Button("Update Ready (available when idle)") {}
+                        .disabled(true)
+                        .help(reason)
+                } else {
+                    Button("Update Ready…") {
+                        showMainWindow()
+                        updaterViewModel.showStagedUpdate()
+                    }
+                }
+            }
+
+            if updaterViewModel.state.needsAttention {
+                Button("Update needs attention…") {
+                    updaterViewModel.showUpdateSettings()
                 }
             }
 

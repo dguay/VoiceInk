@@ -20,6 +20,7 @@ final class MainWindowNavigation: ObservableObject {
 
     @Published var selectedView: ViewType = .dashboard
     @Published var dictionarySettingsRequested = false
+    @Published var updateSettingsRequested = false
 
     private init() {}
 
@@ -38,6 +39,11 @@ final class MainWindowNavigation: ObservableObject {
     func openDictionarySettings() {
         dictionarySettingsRequested = true
         navigate(to: .dictionary)
+    }
+
+    func openUpdateSettings() {
+        updateSettingsRequested = true
+        navigate(to: .settings)
     }
 }
 

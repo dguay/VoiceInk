@@ -6,6 +6,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var updaterViewModel: UpdaterViewModel
+    @EnvironmentObject private var navigation: MainWindowNavigation
     @EnvironmentObject private var menuBarManager: MenuBarManager
     @EnvironmentObject private var recordingShortcutManager: RecordingShortcutManager
     @EnvironmentObject private var recorderUIManager: RecorderUIManager
@@ -34,7 +35,24 @@ struct SettingsView: View {
     @State private var isRestoreClipboardExpanded = false
     @State private var copiedFixUpdatePrompt = false
 
+    private static let updateSettingsAnchor = "settings-general-updates"
+
     var body: some View {
+        ScrollViewReader { proxy in
+            settingsForm
+                .onChange(of: navigation.updateSettingsRequested, initial: true) { _, requested in
+                    guard requested else { return }
+                    navigation.updateSettingsRequested = false
+                    DispatchQueue.main.async {
+                        withAnimation {
+                            proxy.scrollTo(Self.updateSettingsAnchor, anchor: .top)
+                        }
+                    }
+                }
+        }
+    }
+
+    private var settingsForm: some View {
         Form {
             Section {
                 LabeledContent("Primary Shortcut") {
@@ -298,21 +316,48 @@ struct SettingsView: View {
 
                 if updaterViewModel.state.isPreparingUpdate {
                     LabeledContent("Local Update") {
-                        ProgressView("Preparing…")
-                            .controlSize(.small)
+                        UpdateSessionProgressView(
+                            activity: updaterViewModel.state.sessionActivity,
+                            cancel: updaterViewModel.cancelUpdateCheck
+                        )
                     }
                 } else if let stagedUpdate = updaterViewModel.state.stagedUpdate {
                     LabeledContent("Local Update") {
                         Button("Update Ready") {
                             updaterViewModel.showStagedUpdate()
                         }
-                        .help("Staged fork commit \(stagedUpdate.forkCommit.prefix(12))")
+                        .disabled(updaterViewModel.state.restartBlockedReason != nil)
+                        .help(
+                            updaterViewModel.state.restartBlockedReason
+                                ?? "Staged fork commit \(stagedUpdate.forkCommit.prefix(12))"
+                        )
                     }
+                    if let reason = updaterViewModel.state.restartBlockedReason
+                        ?? updaterViewModel.state.restartMessage {
+                        Text(reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    StagedUpdateSummaryView(candidate: stagedUpdate)
                 } else if let failure = updaterViewModel.state.failure {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(failure.message)
                             .foregroundStyle(.red)
                             .textSelection(.enabled)
+                        Text("Failed stage: \(failure.stage.displayName)")
+                            .foregroundStyle(.secondary)
+                        if !failure.conflictedFiles.isEmpty {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Conflicted files:")
+                                    .foregroundStyle(.secondary)
+                                ForEach(failure.conflictedFiles, id: \.self) { path in
+                                    Text(verbatim: path)
+                                        .font(.caption.monospaced())
+                                }
+                            }
+                            .textSelection(.enabled)
+                        }
                         Text(failure.recoverySuggestion)
                             .foregroundStyle(.secondary)
                         HStack {
@@ -323,6 +368,11 @@ struct SettingsView: View {
                                 Button(copiedFixUpdatePrompt ? "Copied" : "Copy fix update prompt") {
                                     updaterViewModel.copyFixUpdatePrompt()
                                     copiedFixUpdatePrompt = updaterViewModel.state.recoveryWarning == nil
+                                }
+                            }
+                            if failure.repositoryURL != nil {
+                                Button("Open Repository") {
+                                    updaterViewModel.openUpdateRepository()
                                 }
                             }
                             Button("Open Update Logs") {
@@ -347,16 +397,10 @@ struct SettingsView: View {
                 }
 
                 if let provenance = updaterViewModel.state.sourceProvenance {
-                    LabeledContent("Installed Source") {
-                        VStack(alignment: .trailing, spacing: 2) {
-                            Text("Fork \(provenance.forkCommit)")
-                            Text("Upstream \(provenance.upstreamCommit)")
-                        }
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                    }
+                    InstalledSourceView(provenance: provenance, state: updaterViewModel.state)
                 }
             }
+            .id(Self.updateSettingsAnchor)
 
             Section {
                 LabeledContent("Export Settings") {
