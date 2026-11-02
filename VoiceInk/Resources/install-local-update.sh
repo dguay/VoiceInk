@@ -121,8 +121,9 @@ discard_staged_candidate() {
     local discard_stage
 
     # A discarded candidate can no longer be published, so its failure is not a
-    # pending publication and keeps the ordinary rollback path.
+    # pending publication and keeps the ordinary rollback path and stage.
     publication_pending=false
+    [[ "$failure_stage" != "publication" ]] || failure_stage="installation"
     discard_bundle="$(/usr/bin/plutil -extract bundlePath raw "$manifest_path" 2>/dev/null || true)"
     discard_stage="$(dirname "$discard_bundle")"
     if [[ "$(dirname "$discard_stage")" == "$stage_root/candidates" \

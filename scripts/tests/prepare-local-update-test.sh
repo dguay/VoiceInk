@@ -472,6 +472,24 @@ fi
 [[ "$(wc -l < "$xcode_log")" -eq "$xcode_lines_before_retry" ]]
 [[ "$(git -C "$canonical_clone" rev-parse "$fast_forward_candidate_ref")" == "$upstream_fast_forward_sha" ]]
 
+# Origin already has the installed candidate but local main did not converge.
+# The retry must still advance local main before it drops the retained state.
+git -C "$canonical_clone" reset --hard --quiet "$before_head"
+mkdir -p "$retry_stage"
+/usr/bin/ditto "$fast_forward_staged_bundle" "$retry_stage/VoiceInk.app"
+cp "$fast_forward_manifest" "$retry_manifest"
+/usr/bin/plutil -replace bundlePath -string "$retry_stage/VoiceInk.app" "$retry_manifest"
+/usr/bin/plutil -replace candidateRef -string "$retry_ref" "$retry_manifest"
+git -C "$canonical_clone" update-ref "$retry_ref" "$upstream_fast_forward_sha"
+run_publication_retry
+[[ "$(/usr/bin/plutil -extract outcome raw "$retry_result")" == "upToDate" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$upstream_fast_forward_sha" ]]
+[[ ! -e "$retry_manifest" && ! -e "$retry_stage" ]]
+if git -C "$canonical_clone" rev-parse --verify --quiet "$retry_ref" >/dev/null; then
+    printf 'prepare-local-update-test: converged candidate reference was not cleaned up\n' >&2
+    exit 1
+fi
+
 git --git-dir="$fork_bare" update-ref refs/heads/main "$candidate_sha" "$upstream_fast_forward_sha"
 git -C "$canonical_clone" reset --hard --quiet "$before_head"
 git -C "$canonical_clone" fetch --quiet origin main
@@ -538,6 +556,29 @@ merge_candidate_ref="$(/usr/bin/plutil -extract candidateRef raw "$merge_manifes
 [[ "$(git -C "$canonical_clone" rev-parse HEAD)" == "$before_head" ]]
 [[ "$(git -C "$canonical_clone" status --porcelain)" == "" ]]
 [[ "$(git -C "$canonical_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]]
+
+# A retained merge candidate is identified from its manifest, because a
+# recomputed merge commit gets a different SHA one second later.
+sleep 1
+merge_retry_result="$fixture_root/merge/publication-retry-result.plist"
+xcode_lines_before_merge_retry="$(wc -l < "$xcode_log")"
+PATH="$fake_bin:$PATH" \
+    CANONICAL_PATH="$canonical_clone" \
+    XCODE_LOG="$xcode_log" \
+    VOICEINK_REPOSITORY_PATH="$canonical_clone" \
+    VOICEINK_UPDATE_MANIFEST_PATH="$merge_manifest" \
+    VOICEINK_UPDATE_RESULT_PATH="$merge_retry_result" \
+    VOICEINK_INSTALLED_FORK_COMMIT="$merge_candidate_sha" \
+    /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh"
+[[ "$(/usr/bin/plutil -extract outcome raw "$merge_retry_result")" == "upToDate" ]]
+[[ "$(/usr/bin/plutil -extract forkCommit raw "$merge_retry_result")" == "$merge_candidate_sha" ]]
+[[ "$(git --git-dir="$fork_bare" rev-parse refs/heads/main)" == "$merge_candidate_sha" ]]
+[[ "$(git -C "$canonical_clone" rev-parse refs/heads/main)" == "$merge_candidate_sha" ]]
+[[ ! -e "$merge_manifest" ]]
+[[ "$(wc -l < "$xcode_log")" -eq "$xcode_lines_before_merge_retry" ]]
+git --git-dir="$fork_bare" update-ref refs/heads/main "$diverged_fork_sha" "$merge_candidate_sha"
+git -C "$canonical_clone" reset --hard --quiet "$before_head"
+git -C "$canonical_clone" fetch --quiet origin main
 
 printf 'fork-conflict\n' > "$fork_writer/README.md"
 git -C "$fork_writer" add README.md

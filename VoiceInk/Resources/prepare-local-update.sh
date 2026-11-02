@@ -210,7 +210,8 @@ cleanup() {
 trap cleanup EXIT
 
 # The installed app already is this verified candidate, but an earlier
-# post-health publication did not finish. Publish it without rebuilding.
+# post-health publication or local-main convergence did not finish. Publish it
+# and converge local main without rebuilding. Artifacts stay until both finish.
 publish_retained_candidate() {
     local retained_ref
     local retained_bundle
@@ -219,15 +220,17 @@ publish_retained_candidate() {
     begin_stage publication transient
     retained_ref="$(/usr/bin/plutil -extract candidateRef raw "$manifest_path" 2>/dev/null || true)"
     retained_bundle="$(/usr/bin/plutil -extract bundlePath raw "$manifest_path" 2>/dev/null || true)"
-    [[ -n "$retained_ref" \
-        && "$(git -C "$repository_path" rev-parse --verify --quiet "$retained_ref" 2>/dev/null || true)" == "$fork_commit" ]] \
-        || fail "The installed update's preparation reference is missing, so VoiceInk cannot publish it."
     local_main_sha="$(git -C "$repository_path" rev-parse --verify --quiet refs/heads/main)" \
         || fail "The VoiceInk clone does not have a local main branch."
     git -C "$repository_path" merge-base --is-ancestor "$local_main_sha" "$fork_commit" \
         || fail "Local main cannot fast-forward to the installed update. Reconcile local main, then check for updates again."
-    git -C "$repository_path" push origin "$fork_commit:refs/heads/main" \
-        || fail "VoiceInk could not publish the installed update to origin. It will retry on the next update check."
+    if [[ "$fork_base_commit" != "$fork_commit" ]]; then
+        [[ -n "$retained_ref" \
+            && "$(git -C "$repository_path" rev-parse --verify --quiet "$retained_ref" 2>/dev/null || true)" == "$fork_commit" ]] \
+            || fail "The installed update's preparation reference is missing, so VoiceInk cannot publish it."
+        git -C "$repository_path" push origin "$fork_commit:refs/heads/main" \
+            || fail "VoiceInk could not publish the installed update to origin. It will retry on the next update check."
+    fi
     if [[ "$local_main_sha" != "$fork_commit" ]]; then
         if [[ "$(git -C "$repository_path" symbolic-ref --quiet --short HEAD || true)" == "main" ]]; then
             git -C "$repository_path" merge --ff-only "$fork_commit" >/dev/null \
@@ -258,6 +261,28 @@ if [[ -f "$failure_state_path" ]]; then
     failed_candidate="$(/usr/bin/plutil -extract candidateIdentifier raw "$failure_state_path" 2>/dev/null || true)"
     if [[ "$failed_candidate" != "$candidate_identifier" ]]; then
         rm -f "$failure_state_path"
+    fi
+fi
+
+# Identify a retained installed candidate before recomputing the merge: a
+# recomputed merge commit has a new SHA, so only the retained manifest names
+# the installed candidate. Origin must still be the candidate's base, or
+# already be the candidate when only local-main convergence is left.
+if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" && -f "$manifest_path" ]]; then
+    retained_fork_commit="$(/usr/bin/plutil -extract forkCommit raw "$manifest_path" 2>/dev/null || true)"
+    retained_base_commit="$(/usr/bin/plutil -extract forkBaseCommit raw "$manifest_path" 2>/dev/null || true)"
+    retained_upstream_commit="$(/usr/bin/plutil -extract upstreamCommit raw "$manifest_path" 2>/dev/null || true)"
+    if [[ "$retained_fork_commit" == "$VOICEINK_INSTALLED_FORK_COMMIT" \
+        && -n "$retained_base_commit" \
+        && ( "$fork_base_commit" == "$retained_base_commit" \
+            || "$fork_base_commit" == "$retained_fork_commit" ) ]]
+    then
+        fork_commit="$retained_fork_commit"
+        upstream_commit="${retained_upstream_commit:-$upstream_commit}"
+        publish_retained_candidate
+        write_preparation_result upToDate
+        printf 'Published retained VoiceInk candidate %s.\n' "$fork_commit"
+        exit 0
     fi
 fi
 
@@ -297,13 +322,6 @@ record_stage_success merge
 if [[ -n "${VOICEINK_INSTALLED_FORK_COMMIT:-}" \
     && "$VOICEINK_INSTALLED_FORK_COMMIT" == "$fork_commit" ]]
 then
-    staged_manifest_sha="$(/usr/bin/plutil -extract forkCommit raw "$manifest_path" 2>/dev/null || true)"
-    if [[ "$fork_base_commit" != "$fork_commit" && "$staged_manifest_sha" == "$fork_commit" ]]; then
-        publish_retained_candidate
-        write_preparation_result upToDate
-        printf 'Published retained VoiceInk candidate %s.\n' "$fork_commit"
-        exit 0
-    fi
     if [[ -f "$manifest_path" ]]; then
         cleanup_candidate_artifacts \
             "$(/usr/bin/plutil -extract forkCommit raw "$manifest_path" 2>/dev/null || true)" \

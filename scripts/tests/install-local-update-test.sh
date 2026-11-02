@@ -677,6 +677,8 @@ PATH="$fake_bin:$PATH" \
     VOICEINK_TEST_PEER_CLONE="$peer_clone" \
     VOICEINK_TEST_PEER_PUSHED_PATH="$peer_pushed_path" \
     VOICEINK_TEST_FETCH_LOG="$peer_fetch_log" \
+    VOICEINK_UPDATE_OUTCOME_RECORDER="$fake_bin/record-outcome" \
+    VOICEINK_TEST_OUTCOME_REPORT="$fixture_root/rejected-push-outcome.plist" \
     /bin/bash "$project_root/VoiceInk/Resources/install-local-update.sh" \
     "$new_sha" \
     "$manifest_path" \
@@ -704,6 +706,13 @@ if git -C "$canonical_clone" rev-parse "$candidate_ref" >/dev/null 2>&1; then
 fi
 [[ "$(grep -c '^fetch$' "$peer_fetch_log")" -eq 4 ]]
 grep -Fq "another Mac changed the fork; prepare and approve a new candidate" "$fixture_root/rejected-push-output.log"
+# A discarded candidate is a rolled-back installation, not a pending publication.
+[[ "$(/usr/bin/plutil -extract failureStage raw "$fixture_root/rejected-push-outcome.plist")" == "installation" ]]
+[[ "$(/usr/bin/plutil -extract rollbackOutcome raw "$fixture_root/rejected-push-outcome.plist")" == "succeeded" ]]
+if grep -Fq "publication to the fork is pending" "$fixture_root/rejected-push-outcome.plist"; then
+    printf 'install-local-update-test: discarded candidate was reported as pending publication\n' >&2
+    exit 1
+fi
 
 git --git-dir="$fork_bare" update-ref refs/heads/main "$fork_base_sha" "$peer_sha"
 original_new_sha="$new_sha"
