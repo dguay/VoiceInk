@@ -27,6 +27,8 @@ final class PhoneDictationController: ObservableObject {
     private let defaults: UserDefaults
     private let tokenStore: PhoneDictationTokenStore
     private var server: PhoneDictationServer?
+    /// Shared by every server instance so restarts never run two transcriptions at once.
+    private let requestQueue = PhoneDictationSerialQueue()
     private var startGeneration: UInt64 = 0
     private var pipeline: AudioFileTranscriptionPipeline?
     private var engine: VoiceInkEngine?
@@ -118,7 +120,8 @@ final class PhoneDictationController: ObservableObject {
         refreshAddresses()
 
         server?.stop()
-        let server = PhoneDictationServer(tokenStore: tokenStore, handlers: makeHandlers())
+        let server = PhoneDictationServer(
+            tokenStore: tokenStore, handlers: makeHandlers(), queue: requestQueue)
         server.onFailure = { [weak self, weak server] error in
             guard let self, let server, self.server === server else { return }
             self.serverState = .failed(error.localizedDescription)

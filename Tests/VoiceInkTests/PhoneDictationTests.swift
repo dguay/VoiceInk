@@ -314,12 +314,13 @@ struct PhoneDictationServerTests {
 
         func request(
             _ path: String, method: String = "GET", token: String?, body: Data? = nil,
-            contentType: String? = "audio/mp4"
+            contentType: String? = "audio/mp4", extraHeaders: [String: String] = [:]
         ) async throws -> (status: Int, data: Data) {
             var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
             request.httpMethod = method
             request.timeoutInterval = 10
             if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+            for (name, value) in extraHeaders { request.setValue(value, forHTTPHeaderField: name) }
             if let body {
                 request.httpBody = body
                 if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
@@ -331,17 +332,23 @@ struct PhoneDictationServerTests {
         }
     }
 
-    private func start(maxBodyBytes: Int = 4096) async throws -> Harness {
-        let tokenStore = PhoneDictationTokenStore(storage: InMemoryTokenStorage())
+    private func start(
+        maxBodyBytes: Int = 4096,
+        tokenStore: PhoneDictationTokenStore? = nil,
+        probe: ServerProbe? = nil,
+        queue: PhoneDictationSerialQueue = PhoneDictationSerialQueue()
+    ) async throws -> Harness {
+        let tokenStore = tokenStore ?? PhoneDictationTokenStore(storage: InMemoryTokenStorage())
         let token = try tokenStore.currentToken()
-        let probe = ServerProbe()
+        let probe = probe ?? ServerProbe()
         let server = PhoneDictationServer(
             tokenStore: tokenStore,
             handlers: PhoneDictationHandlers(
                 readiness: { probe.readiness },
                 transcribe: { try await probe.transcribe($0) }
             ),
-            maxBodyBytes: maxBodyBytes
+            maxBodyBytes: maxBodyBytes,
+            queue: queue
         )
         let port = try await server.start(port: 0)
         return Harness(server: server, tokenStore: tokenStore, probe: probe, port: port, token: token)
@@ -506,6 +513,44 @@ struct PhoneDictationServerTests {
         #expect(harness.probe.maxActive == 1)
     }
 
+    @Test func turningTheServerOffAndOnNeverOverlapsTranscriptions() async throws {
+        let queue = PhoneDictationSerialQueue()
+        let first = try await start(queue: queue)
+        let probe = first.probe
+        probe.transcribeDelay = .milliseconds(400)
+
+        // One request transcribing and one queued behind it when the server is turned off.
+        let running = Task { try? await first.request("/v1/transcribe", method: "POST", token: first.token, body: Data([1])) }
+        try await Task.sleep(for: .milliseconds(100))
+        let queued = Task { try? await first.request("/v1/transcribe", method: "POST", token: first.token, body: Data([2])) }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(probe.active == 1)
+        first.server.stop()
+
+        let second = try await start(tokenStore: first.tokenStore, probe: probe, queue: queue)
+        defer { second.server.stop() }
+        let afterRestart = try await second.request(
+            "/v1/transcribe", method: "POST", token: second.token, body: Data([3]))
+        _ = await running.value
+        _ = await queued.value
+
+        #expect(afterRestart.status == 200)
+        #expect(probe.maxActive == 1)
+        #expect(probe.uploads.map(\.data) == [Data([1]), Data([3])])
+    }
+
+    @Test func oversizedHeadersAreRejected() async throws {
+        let harness = try await start()
+        defer { harness.server.stop() }
+
+        let response = try await harness.request(
+            "/v1/status", token: harness.token,
+            extraHeaders: ["X-Padding": String(repeating: "a", count: PhoneDictationAPI.maxHeadBytes + 1)])
+
+        #expect(response.status == 400)
+        #expect(try errorCode(response.data) == .badRequest)
+    }
+
     @Test func stoppingReleasesThePortAndRestartingReusesIt() async throws {
         let harness = try await start()
         #expect(try await harness.request("/v1/status", token: harness.token).status == 200)
@@ -566,6 +611,14 @@ struct PhoneDictationRouterTests {
             "POST /v1/transcribe HTTP/1.1\r\nauthorization: bearer secret\r\ncontent-type: audio/wav\r\ncontent-length: 10"
         )
         #expect(router.decide(accepted) == .readBody(length: 10, fileExtension: "wav"))
+    }
+
+    @Test func anUnsupportedExplicitFormatIsRejectedEvenWithAKnownContentType() throws {
+        let router = router(token: "secret")
+        let request = try head(
+            "POST /v1/transcribe?format=xyz HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Type: audio/wav\r\nContent-Length: 10"
+        )
+        #expect(router.decide(request) == .respond(.error(.unsupportedMediaType)))
     }
 
     @Test func malformedRequestLinesAreNotParsed() {

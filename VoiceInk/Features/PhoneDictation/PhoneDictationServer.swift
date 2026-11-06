@@ -27,13 +27,34 @@ final class PhoneDictationRouter: @unchecked Sendable {
     private let handlers: PhoneDictationHandlers
     private let maxBodyBytes: Int
     private let queue: PhoneDictationSerialQueue
+    private let lock = NSLock()
+    /// Bumped on every stop, so requests admitted before a stop never start afterwards.
+    private var generation: UInt64 = 0
     private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "PhoneDictation")
 
-    init(tokenStore: PhoneDictationTokenStore, handlers: PhoneDictationHandlers, maxBodyBytes: Int) {
+    init(
+        tokenStore: PhoneDictationTokenStore,
+        handlers: PhoneDictationHandlers,
+        maxBodyBytes: Int,
+        queue: PhoneDictationSerialQueue = PhoneDictationSerialQueue()
+    ) {
         self.tokenStore = tokenStore
         self.handlers = handlers
         self.maxBodyBytes = maxBodyBytes
-        self.queue = PhoneDictationSerialQueue()
+        self.queue = queue
+    }
+
+    /// Drops requests that are queued but not yet transcribing.
+    func cancelPendingRequests() {
+        lock.lock()
+        generation &+= 1
+        lock.unlock()
+    }
+
+    private var currentGeneration: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation
     }
 
     func decide(_ head: PhoneDictationHTTPRequestHead) -> HeadDecision {
@@ -75,8 +96,12 @@ final class PhoneDictationRouter: @unchecked Sendable {
         guard head.path == PhoneDictationAPI.transcribePath, let fileExtension else {
             return await status()
         }
+        let admitted = currentGeneration
         return await queue.run { [self] in
-            await transcribe(token: head.bearerToken, body: body, fileExtension: fileExtension)
+            guard currentGeneration == admitted else {
+                return .error(.transcriptionFailed, message: "Phone dictation was turned off.")
+            }
+            return await transcribe(token: head.bearerToken, body: body, fileExtension: fileExtension)
         }
     }
 
@@ -118,7 +143,8 @@ final class PhoneDictationRouter: @unchecked Sendable {
     }
 }
 
-/// Runs operations one at a time, in the order they were submitted.
+/// Runs operations one at a time, in the order they were submitted. One queue is shared by every
+/// server instance, so turning the option off and on never lets two transcriptions overlap.
 @MainActor
 final class PhoneDictationSerialQueue {
     private var tail: Task<Void, Never>?
@@ -160,9 +186,11 @@ final class PhoneDictationServer: @unchecked Sendable {
         tokenStore: PhoneDictationTokenStore,
         handlers: PhoneDictationHandlers,
         maxBodyBytes: Int = PhoneDictationAPI.maxBodyBytes,
-        requestTimeout: TimeInterval = 300
+        requestTimeout: TimeInterval = 300,
+        queue: PhoneDictationSerialQueue = PhoneDictationSerialQueue()
     ) {
-        self.router = PhoneDictationRouter(tokenStore: tokenStore, handlers: handlers, maxBodyBytes: maxBodyBytes)
+        self.router = PhoneDictationRouter(
+            tokenStore: tokenStore, handlers: handlers, maxBodyBytes: maxBodyBytes, queue: queue)
         self.requestTimeout = requestTimeout
     }
 
@@ -220,8 +248,10 @@ final class PhoneDictationServer: @unchecked Sendable {
         }
     }
 
-    /// Stops listening and drops open connections. Safe to call when stopped.
+    /// Stops listening, drops open connections and queued requests. A transcription that is
+    /// already running finishes (and is saved to History). Safe to call when stopped.
     func stop() {
+        router.cancelPendingRequests()
         lock.lock()
         let listener = self.listener
         self.listener = nil
@@ -343,7 +373,8 @@ final class PhoneDictationConnection: @unchecked Sendable {
     }
 
     func cancel() {
-        queue.async { [weak self] in self?.close() }
+        // Strong capture: the server has already released this connection.
+        queue.async { self.close() }
     }
 
     private func receiveHead() {
@@ -353,6 +384,10 @@ final class PhoneDictationConnection: @unchecked Sendable {
             if let data { self.buffer.append(data) }
 
             if let range = self.buffer.range(of: Self.headTerminator) {
+                guard range.lowerBound - self.buffer.startIndex <= PhoneDictationAPI.maxHeadBytes else {
+                    self.send(.error(.badRequest, message: "Request headers are too large."))
+                    return
+                }
                 let headData = self.buffer.subdata(in: self.buffer.startIndex..<range.lowerBound)
                 let rest = self.buffer.subdata(in: range.upperBound..<self.buffer.endIndex)
                 self.buffer = Data()

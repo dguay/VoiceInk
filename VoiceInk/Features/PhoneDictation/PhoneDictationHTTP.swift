@@ -39,10 +39,11 @@ enum PhoneDictationAPI {
         "video/quicktime": "mov",
     ]
 
-    /// The file extension for an upload: an explicit supported `format` wins over `Content-Type`.
+    /// The file extension for an upload: an explicit `format` wins over `Content-Type`, and an
+    /// unsupported `format` is rejected rather than ignored.
     static func audioFileExtension(contentType: String?, format: String?) -> String? {
-        if let format = format?.lowercased(), SupportedMedia.extensions.contains(format) {
-            return format
+        if let format = format?.lowercased() {
+            return SupportedMedia.extensions.contains(format) ? format : nil
         }
         guard let contentType else { return nil }
         let mediaType = contentType.split(separator: ";").first

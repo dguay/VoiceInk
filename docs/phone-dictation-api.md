@@ -92,10 +92,11 @@ Request:
 | `video/quicktime` | `mov` |
 
 Accepted `format` values: `wav`, `mp3`, `m4a`, `aiff`, `mp4`, `mov`, `aac`, `flac`, `caf`,
-`amr`, `ogg`, `oga`, `opus`, `3gp`. Any other type gets `415`.
+`amr`, `ogg`, `oga`, `opus`, `3gp`. Any other `format` or type gets `415`.
 
-Requests are processed one at a time in arrival order; a request that arrives while another is
-transcribing waits. Set a generous read timeout (transcription and AI cleanup can take a while
+Requests are processed one at a time, in the order their uploads complete; a request that
+arrives while another is transcribing waits. Turning the option off drops waiting requests; a
+transcription already running finishes and is saved to History. Set a generous read timeout (transcription and AI cleanup can take a while
 for long recordings).
 
 `200 OK`:
