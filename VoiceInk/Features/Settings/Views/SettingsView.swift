@@ -15,6 +15,7 @@ struct SettingsView: View {
     @ObservedObject private var launchAtLoginManager = LaunchAtLoginManager.shared
     @ObservedObject private var mediaController = MediaController.shared
     @ObservedObject private var playbackController = PlaybackController.shared
+    @ObservedObject private var phoneDictationController = PhoneDictationController.shared
     @AppStorage(OnboardingSettings.completedV2Key) private var hasCompletedOnboardingV2 = true
     @AppStorage("enableAnnouncements") private var enableAnnouncements = true
     @AppStorage("restoreClipboardAfterPaste") private var restoreClipboardAfterPaste = true
@@ -401,6 +402,8 @@ struct SettingsView: View {
                 }
             }
             .id(Self.updateSettingsAnchor)
+
+            PhoneDictationSettingsSection(controller: phoneDictationController)
 
             Section {
                 LabeledContent("Export Settings") {
