@@ -231,12 +231,10 @@ struct VoiceInkApp: App {
 
         appDelegate.menuBarManager = menuBarManager
 
-        // Test hosts and update health checks must not take over the phone dictation port.
-        var startsPhoneDictation = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
-        #if LOCAL_BUILD
-            startsPhoneDictation = startsPhoneDictation && !LocalUpdateHealthReporter.isRequested()
-        #endif
-        if startsPhoneDictation {
+        // Test hosts must not take over the phone dictation port. The update health-check launch
+        // does start it: the installer quits the old app first, and that launch stays running as
+        // the user's app after a successful update.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
             PhoneDictationController.shared.configure(
                 modelContext: resolvedContainer.mainContext, engine: engine)
         }
