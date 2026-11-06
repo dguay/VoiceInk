@@ -14,6 +14,8 @@
     <string name="status_not_paired">Pair with your Mac first.</string>
     <string name="status_needs_mic">Microphone access is needed to dictate.</string>
     <string name="status_kept">Recording kept. Tap retry to send it.</string>
+    <string name="status_field_changed">The field changed before the text arrived. Recording kept: tap retry to insert it here.</string>
+    <string name="status_insert_rejected">This field didn\'t accept the text. Recording kept: tap retry.</string>
     <string name="error_unreachable">Mac unreachable. Is it awake and on your network or Tailscale? Tap retry.</string>
     <string name="error_unauthorized">Token rejected by the Mac. Pair again, then retry.</string>
     <string name="error_no_model">No model selected on the Mac. Choose one in VoiceInk, then retry.</string>

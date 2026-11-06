@@ -38,21 +38,23 @@ class VoiceKeyboardService : InputMethodService() {
         data object Sending : State
         data object NoSpeech : State
 
-        /** A kept recording waits for a retry; [error] is null when it was only interrupted. */
-        data class Kept(val error: ApiError?) : State
+        /** A kept recording waits for a retry; [error] is null when no request failed. */
+        data class Kept(val error: ApiError?, val reason: KeptReason = KeptReason.INTERRUPTED) : State
         data object NotPaired : State
         data object NeedsMicrophone : State
         data object RecorderFailed : State
     }
 
+    enum class KeptReason { INTERRUPTED, FIELD_CHANGED, REJECTED }
+
     private val scope: CoroutineScope = MainScope()
+    private val delivery = TextDelivery()
     private val client = VoiceInkClient()
     private lateinit var pairingStore: PairingStore
     private lateinit var pending: PendingRecording
     private lateinit var recorder: AudioRecorder
 
     private var state: State = State.Idle
-    private var inputViewShown = false
 
     private var statusView: TextView? = null
     private var micButton: ImageButton? = null
@@ -96,19 +98,25 @@ class VoiceKeyboardService : InputMethodService() {
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
-        inputViewShown = true
+        delivery.startSession(sameField = restarting)
         if (state == State.Sending || state == State.Recording) return
         setState(restingState())
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
-        inputViewShown = false
+        delivery.endSession()
         if (recorder.isRecording) {
             // Never send audio into a field the user has left; keep it for a retry instead.
             val file = recorder.stop()
             if (file != null && pending.keep(file)) setState(State.Kept(null)) else setState(State.Idle)
         }
         super.onFinishInputView(finishingInput)
+    }
+
+    override fun onFinishInput() {
+        // The editor connection ended (field or app changed), even if the view stays up.
+        delivery.endSession()
+        super.onFinishInput()
     }
 
     /** What to show when nothing is in progress. */
@@ -161,36 +169,41 @@ class VoiceKeyboardService : InputMethodService() {
         val pairing = pairingStore.load() ?: return setState(State.NotPaired)
         if (!pending.exists()) return setState(State.Idle)
         setState(State.Sending)
+        val ticket = delivery.ticket()
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 client.transcribe(pairing, pending.file, "audio/mp4", pairingStore.lastHost)
             }
-            onTranscribed(pairing, result)
+            onTranscribed(pairing, ticket, result)
         }
     }
 
-    private fun onTranscribed(pairing: Pairing, result: ApiResult<Transcription>) {
+    private fun onTranscribed(pairing: Pairing, ticket: TextDelivery.Ticket, result: ApiResult<Transcription>) {
         when (result) {
             is ApiResult.Failure -> setState(State.Kept(result.error))
             is ApiResult.Success -> {
                 pairingStore.lastHost = result.host
-                val connection = currentInputConnection
-                if (!inputViewShown || connection == null) {
-                    // The field is gone; keep the recording rather than typing somewhere else.
-                    setState(State.Kept(null))
-                    return
+                val outcome = delivery.deliver(ticket, result.value.text.trim(), ::commit, pending::discard)
+                when (outcome) {
+                    TextDelivery.Outcome.INSERTED -> {
+                        setState(State.Idle)
+                        statusView?.text = getString(R.string.status_inserted, pairing.name)
+                        switchBack()
+                    }
+                    TextDelivery.Outcome.EMPTY -> setState(State.NoSpeech)
+                    TextDelivery.Outcome.FIELD_CHANGED -> setState(State.Kept(null, KeptReason.FIELD_CHANGED))
+                    TextDelivery.Outcome.REJECTED -> setState(State.Kept(null, KeptReason.REJECTED))
                 }
-                pending.discard()
-                val text = result.value.text.trim()
-                if (text.isEmpty()) return setState(State.NoSpeech)
-                val before = connection.getTextBeforeCursor(1, 0)
-                val separator = if (!before.isNullOrEmpty() && !before.last().isWhitespace()) " " else ""
-                connection.commitText(separator + text, 1)
-                setState(State.Idle)
-                statusView?.text = getString(R.string.status_inserted, pairing.name)
-                switchBack()
             }
         }
+    }
+
+    /** Types [text] at the cursor, separated from a preceding word by a space. */
+    private fun commit(text: String): Boolean {
+        val connection = currentInputConnection ?: return false
+        val before = connection.getTextBeforeCursor(1, 0)
+        val separator = if (!before.isNullOrEmpty() && !before.last().isWhitespace()) " " else ""
+        return connection.commitText(separator + text, 1)
     }
 
     private fun switchBack() {
@@ -249,7 +262,11 @@ class VoiceKeyboardService : InputMethodService() {
             State.NotPaired -> getString(R.string.status_not_paired).also { action.show(R.string.action_open_app) }
             State.NeedsMicrophone -> getString(R.string.status_needs_mic).also { action.show(R.string.action_allow_mic) }
             is State.Kept -> when (val e = s.error) {
-                null -> getString(R.string.status_kept)
+                null -> when (s.reason) {
+                    KeptReason.INTERRUPTED -> getString(R.string.status_kept)
+                    KeptReason.FIELD_CHANGED -> getString(R.string.status_field_changed)
+                    KeptReason.REJECTED -> getString(R.string.status_insert_rejected)
+                }
                 ApiError.Unreachable -> getString(R.string.error_unreachable)
                 ApiError.Unauthorized -> getString(R.string.error_unauthorized).also { action.show(R.string.action_pair_again) }
                 is ApiError.NoModelSelected -> getString(R.string.error_no_model)
