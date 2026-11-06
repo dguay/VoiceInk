@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="accent">#FF3D5AFE</color>
+    <color name="recording">#FFE53935</color>
+    <color name="keyboard_background">#FFF1F3F6</color>
+    <color name="keyboard_text">#FF1F2328</color>
+    <color name="keyboard_secondary">#FF5F6670</color>
+</resources>

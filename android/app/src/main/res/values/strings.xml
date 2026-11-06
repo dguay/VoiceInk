@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">VoiceInk Keyboard</string>
+    <string name="keyboard_name">VoiceInk voice</string>
+    <string name="your_mac">your Mac</string>
+
+    <!-- Keyboard -->
+    <string name="status_idle">Tap the mic and speak</string>
+    <string name="status_recording">Listening… tap to stop</string>
+    <string name="status_sending">Transcribing on %1$s…</string>
+    <string name="status_inserted">Inserted from %1$s</string>
+    <string name="status_no_speech">Nothing was heard. Tap to try again.</string>
+    <string name="status_recorder_failed">The microphone could not start. Tap to try again.</string>
+    <string name="status_not_paired">Pair with your Mac first.</string>
+    <string name="status_needs_mic">Microphone access is needed to dictate.</string>
+    <string name="status_kept">Recording kept. Tap retry to send it.</string>
+    <string name="error_unreachable">Mac unreachable. Is it awake and on your network or Tailscale? Tap retry.</string>
+    <string name="error_unauthorized">Token rejected by the Mac. Pair again, then retry.</string>
+    <string name="error_no_model">No model selected on the Mac. Choose one in VoiceInk, then retry.</string>
+    <string name="error_transcription_failed">Transcription failed on the Mac. Tap retry.</string>
+    <string name="error_server">The Mac returned an error (%1$s). Tap retry.</string>
+    <string name="error_invalid_response">Unexpected reply from the Mac. Tap retry.</string>
+    <string name="action_open_app">Open setup</string>
+    <string name="action_allow_mic">Allow microphone</string>
+    <string name="action_pair_again">Pair again</string>
+    <string name="action_discard">Discard</string>
+    <string name="cd_start">Start dictation</string>
+    <string name="cd_stop">Stop and transcribe</string>
+    <string name="cd_retry">Retry sending the recording</string>
+    <string name="cd_sending">Transcribing</string>
+    <string name="cd_switch_back">Switch back to the previous keyboard</string>
+
+    <!-- Setup -->
+    <string name="setup_title">VoiceInk Keyboard</string>
+    <string name="setup_intro">Dictate into any app through VoiceInk on your Mac, then return to your usual keyboard.</string>
+    <string name="section_pair">1. Pair with your Mac</string>
+    <string name="pair_help">On the Mac, open VoiceInk → Settings → Phone Dictation and turn on Allow Phone Dictation. Scan its code, or type an address and the token shown there (Copy).</string>
+    <string name="scan_qr">Scan QR code</string>
+    <string name="address_hint">Mac address (e.g. 192.168.1.20)</string>
+    <string name="port_hint">Port (47821)</string>
+    <string name="token_hint">Pairing token</string>
+    <string name="connect">Connect</string>
+    <string name="unpair">Forget this Mac</string>
+    <string name="not_paired">Not paired yet.</string>
+    <string name="paired_with">Paired with %1$s (%2$s).</string>
+    <string name="paired_with_model">Paired with %1$s (%2$s). Model: %3$s.</string>
+    <string name="address_format">%1$s:%2$d</string>
+    <string name="pair_checking">Checking the Mac…</string>
+    <string name="pair_success">Paired with %1$s. It will transcribe with %2$s.</string>
+    <string name="pair_wrong_token">Wrong token: the Mac rejected it. Copy the current token from VoiceInk, or scan the code again.</string>
+    <string name="pair_unreachable">Can\'t reach %1$s on port %2$d. Check that the Mac is awake, Allow Phone Dictation is on, and the phone is on the same network or Tailscale.</string>
+    <string name="pair_no_model">Paired with %1$s, but no transcription model is selected there. Choose one in VoiceInk before dictating.</string>
+    <string name="pair_unexpected">The Mac answered unexpectedly. Make sure VoiceInk is up to date.</string>
+    <string name="pair_rejected_from_keyboard">The Mac rejected the saved token, probably because it was regenerated. Scan the new code or enter the new token.</string>
+    <string name="scan_unavailable">The QR scanner isn\'t available on this phone. Enter the address and token instead.</string>
+    <string name="invalid_not_voiceink">That isn\'t a VoiceInk pairing code.</string>
+    <string name="invalid_version">This code is for a newer VoiceInk. Update this app.</string>
+    <string name="invalid_missing_address">Enter the Mac\'s address.</string>
+    <string name="invalid_bad_address">That address isn\'t valid. Use an IP address or host name.</string>
+    <string name="invalid_bad_port">The port must be a number from 1 to 65535.</string>
+    <string name="invalid_missing_token">Enter the pairing token.</string>
+
+    <string name="section_mic">2. Allow the microphone</string>
+    <string name="mic_rationale">The VoiceInk keyboard records your voice only while you dictate, and sends it only to your paired Mac to turn it into text.</string>
+    <string name="mic_granted">Microphone allowed. Audio is recorded only while dictating and sent only to your Mac.</string>
+    <string name="allow_mic">Allow microphone</string>
+
+    <string name="section_enable">3. Turn on the VoiceInk keyboard</string>
+    <string name="keyboard_enabled">VoiceInk voice is turned on. Keep your usual keyboard as the default.</string>
+    <string name="keyboard_not_enabled">Not turned on yet. In the list, turn on VoiceInk voice, then come back.</string>
+    <string name="open_keyboard_settings">Open keyboard settings</string>
+
+    <string name="section_switch">4. Switch to it while typing</string>
+    <string name="switch_help">While any keyboard is open, tap the keyboard button at the bottom right of the navigation bar, or long-press the space bar (SwiftKey, Samsung Keyboard and Gboard), and choose VoiceInk voice. After dictating it returns to your keyboard by itself; the keyboard icon on it goes back without dictating.\n\nSamsung: to show that button, turn on Settings → General management → Keyboard list and default → Keyboard button on navigation bar.</string>
+    <string name="show_picker">Choose keyboard</string>
+    <string name="try_hint">Try it here</string>
+</resources>
