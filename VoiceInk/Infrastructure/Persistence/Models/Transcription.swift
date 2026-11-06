@@ -8,6 +8,11 @@ enum TranscriptionStatus: String, Codable {
     case canceled
 }
 
+/// Where the audio of a transcription came from. `nil` in the store means the Mac itself.
+enum TranscriptionSource: String, Codable {
+    case phone
+}
+
 @Model
 final class Transcription {
     static let canceledTranscriptionText = "The transcription was canceled."
@@ -30,6 +35,8 @@ final class Transcription {
     @Attribute(originalName: "powerModeEmoji")
     var modeEmoji: String?
     var transcriptionStatus: String?
+    /// Raw `TranscriptionSource`; `nil` for recordings and imports made on this Mac.
+    var source: String?
 
     init(
         text: String,
@@ -45,7 +52,8 @@ final class Transcription {
         aiRequestUserMessage: String? = nil,
         modeName: String? = nil,
         modeEmoji: String? = nil,
-        transcriptionStatus: TranscriptionStatus = .pending
+        transcriptionStatus: TranscriptionStatus = .pending,
+        source: TranscriptionSource? = nil
     ) {
         self.id = UUID()
         self.text = text
@@ -63,6 +71,11 @@ final class Transcription {
         self.modeName = modeName
         self.modeEmoji = modeEmoji
         self.transcriptionStatus = transcriptionStatus.rawValue
+        self.source = source?.rawValue
+    }
+
+    var transcriptionSource: TranscriptionSource? {
+        source.flatMap(TranscriptionSource.init(rawValue:))
     }
 
     func markAsCanceledTranscription(

@@ -230,6 +230,16 @@ struct VoiceInkApp: App {
 
         appDelegate.menuBarManager = menuBarManager
 
+        // Test hosts and update health checks must not take over the phone dictation port.
+        var startsPhoneDictation = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+        #if LOCAL_BUILD
+            startsPhoneDictation = startsPhoneDictation && !LocalUpdateHealthReporter.isRequested()
+        #endif
+        if startsPhoneDictation {
+            PhoneDictationController.shared.configure(
+                modelContext: resolvedContainer.mainContext, engine: engine)
+        }
+
         // Ensure no lingering recording state from previous runs
         Task {
             await recorderUIManager.resetOnLaunch()

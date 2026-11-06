@@ -177,6 +177,16 @@ struct HistoryTranscriptionRow: View {
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
+                if transcription.transcriptionSource == .phone {
+                    Label("From phone", systemImage: "iphone")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(AppTheme.Text.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .help("Dictated on a paired phone")
+                }
+
                 Text(transcription.timestamp, format: .relative(presentation: .named))
                     .font(.system(size: 10))
                     .foregroundStyle(AppTheme.Text.secondary)

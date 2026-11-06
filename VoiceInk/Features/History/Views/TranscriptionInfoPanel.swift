@@ -116,6 +116,14 @@ struct TranscriptionInfoPanel: View {
                         value: modeName
                     )
                 }
+
+                if transcription.transcriptionSource == .phone {
+                    TranscriptionMetadataRow(
+                        icon: "iphone",
+                        label: "Source",
+                        value: String(localized: "Phone")
+                    )
+                }
             }
         }
     }

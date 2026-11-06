@@ -28,7 +28,6 @@ class AudioTranscriptionManager: ObservableObject {
 
     private var processingTask: Task<Void, Never>?
     private var processingGeneration: UInt64 = 0
-    private let audioProcessor = AudioProcessor()
     private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "AudioTranscriptionManager")
 
     private init() {}
@@ -132,155 +131,26 @@ class AudioTranscriptionManager: ObservableObject {
     private func processItem(
         _ item: AudioFileQueueItem, modelContext: ModelContext, engine: VoiceInkEngine, mode: ModeConfig
     ) async {
-        let serviceRegistry = TranscriptionServiceRegistry(
-            modelProvider: engine.whisperModelManager,
-            modelsDirectory: engine.whisperModelManager.modelsDirectory,
-            modelContext: modelContext
-        )
+        let pipeline = AudioFileTranscriptionPipeline(modelContext: modelContext, engine: engine)
+
+        let accessing = item.url.startAccessingSecurityScopedResource()
+        defer { if accessing { item.url.stopAccessingSecurityScopedResource() } }
 
         do {
-            guard
-                let transcriptionConfiguration = ModeRuntimeResolver.transcriptionConfiguration(
-                    mode: mode,
-                    transcriptionModelManager: engine.transcriptionModelManager
-                )
-            else {
-                throw TranscriptionError.noModelSelected
-            }
-            let currentModel = transcriptionConfiguration.model
-
-            // Phase: Loading
-            item.status = .processing(phase: .loading)
-            try Task.checkCancellation()
-
-            // Phase: Processing Audio
-            item.status = .processing(phase: .processingAudio)
-
-            let accessing = item.url.startAccessingSecurityScopedResource()
-            defer { if accessing { item.url.stopAccessingSecurityScopedResource() } }
-
-            let samples = try await audioProcessor.processAudioToSamples(item.url)
-            try Task.checkCancellation()
-
-            let audioAsset = AVURLAsset(url: item.url)
-            let duration = CMTimeGetSeconds(try await audioAsset.load(.duration))
-
-            let recordingsDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[
-                0
-            ]
-            .appendingPathComponent("com.prakashjoshipax.VoiceInk")
-            .appendingPathComponent("Recordings")
-
-            let fileName = "transcribed_\(UUID().uuidString).wav"
-            let permanentURL = recordingsDirectory.appendingPathComponent(fileName)
-
-            try FileManager.default.createDirectory(at: recordingsDirectory, withIntermediateDirectories: true)
-            try audioProcessor.saveSamplesAsWav(samples: samples, to: permanentURL)
-            try Task.checkCancellation()
-
-            // Phase: Transcribing
-            item.status = .processing(phase: .transcribing)
-            let vocabulary = CustomVocabularyService.shared.loadSavedVocabulary(from: modelContext)
-            let transcriptionStart = Date()
-            var text = try await serviceRegistry.transcribe(
-                audioURL: permanentURL,
-                model: currentModel,
-                context: transcriptionConfiguration.requestContext.withVocabulary(vocabulary)
-            )
-            let transcriptionDuration = Date().timeIntervalSince(transcriptionStart)
-            text = TranscriptionOutputFilter.filter(text)
-            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            text = try await vocabulary.correctTranscription(text)
-
-            let modeMetadata = transcriptionConfiguration.metadata
-            let formattingConfiguration = ModeRuntimeResolver.transcriptionFormattingConfiguration(mode: mode)
-
-            if formattingConfiguration.isTextFormattingEnabled {
-                text = ParagraphFormatter.format(text)
-            }
-
-            text = WordReplacementService.shared.applyReplacements(to: text, using: modelContext)
-            let cleanedText = text
-            try Task.checkCancellation()
-
-            // Handle enhancement if enabled
-            var transcription: Transcription
-
-            let enhancementConfiguration = engine.enhancementService
-                .flatMap { enhancementService in
-                    enhancementService.getAIService().map { aiService in
-                        ModeRuntimeResolver.currentEnhancementConfiguration(
-                            mode: mode,
-                            enhancementService: enhancementService,
-                            aiService: aiService
-                        )
-                    }
+            let result = try await pipeline.transcribe(audioURL: item.url, mode: mode) { phase in
+                switch phase {
+                case .loading:
+                    item.status = .processing(phase: .loading)
+                case .processingAudio:
+                    item.status = .processing(phase: .processingAudio)
+                case .transcribing:
+                    item.status = .processing(phase: .transcribing)
+                case .enhancing:
+                    item.status = .processing(phase: .enhancing)
                 }
-
-            if let enhancementService = engine.enhancementService,
-                let enhancementConfiguration,
-                enhancementConfiguration.isEnabled,
-                enhancementService.isConfigured(for: enhancementConfiguration)
-            {
-                item.status = .processing(phase: .enhancing)
-                do {
-                    let enhancementResult = try await enhancementService.enhance(
-                        text,
-                        configuration: enhancementConfiguration,
-                        vocabulary: vocabulary
-                    )
-                    transcription = Transcription(
-                        text: cleanedText,
-                        duration: duration,
-                        enhancedText: enhancementResult.text,
-                        audioFileURL: permanentURL.absoluteString,
-                        transcriptionModelName: currentModel.displayName,
-                        aiEnhancementModelName: enhancementConfiguration.modelName
-                            ?? enhancementConfiguration.provider?.defaultModel,
-                        promptName: enhancementResult.promptName
-                            ?? enhancementConfiguration.prompt?.title,
-                        transcriptionDuration: transcriptionDuration,
-                        enhancementDuration: enhancementResult.duration,
-                        aiRequestSystemMessage: enhancementResult.systemMessage,
-                        aiRequestUserMessage: enhancementResult.userMessage,
-                        modeName: modeMetadata.name,
-                        modeEmoji: modeMetadata.emoji
-                    )
-                } catch {
-                    let failureMessage = EnhancementFailureFormatter.message(for: error)
-                    transcription = Transcription(
-                        text: cleanedText,
-                        duration: duration,
-                        enhancedText: failureMessage,
-                        audioFileURL: permanentURL.absoluteString,
-                        transcriptionModelName: currentModel.displayName,
-                        aiEnhancementModelName: enhancementConfiguration.modelName
-                            ?? enhancementConfiguration.provider?.defaultModel,
-                        promptName: enhancementConfiguration.prompt?.title,
-                        transcriptionDuration: transcriptionDuration,
-                        modeName: modeMetadata.name,
-                        modeEmoji: modeMetadata.emoji
-                    )
-                }
-            } else {
-                transcription = Transcription(
-                    text: cleanedText,
-                    duration: duration,
-                    audioFileURL: permanentURL.absoluteString,
-                    transcriptionModelName: currentModel.displayName,
-                    promptName: nil,
-                    transcriptionDuration: transcriptionDuration,
-                    modeName: modeMetadata.name,
-                    modeEmoji: modeMetadata.emoji
-                )
             }
 
-            modelContext.insert(transcription)
-            try modelContext.save()
-            NotificationCenter.default.post(name: .transcriptionCreated, object: transcription)
-            NotificationCenter.default.post(name: .transcriptionCompleted, object: transcription)
-
-            item.transcription = transcription
+            item.transcription = result.transcription
             item.status = .completed
             lastCompletedItemId = item.id
 
@@ -292,8 +162,6 @@ class AudioTranscriptionManager: ObservableObject {
                 item.status = .failed(message: error.localizedDescription)
             }
         }
-
-        await serviceRegistry.cleanup()
     }
 }
 
