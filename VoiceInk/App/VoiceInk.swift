@@ -95,6 +95,7 @@ struct VoiceInkApp: App {
         URLCache.shared = URLCache(memoryCapacity: 0, diskCapacity: 0)
 
         AppDefaults.registerDefaults()
+        StreamingKeysMigration.migrateSonioxV6()
         AppLanguagePreference.applyStored()
         AppAppearancePreference.applyStored()
         OnboardingV2Migration.prepareIfNeeded()

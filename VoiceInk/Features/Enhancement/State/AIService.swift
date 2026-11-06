@@ -2,7 +2,7 @@ import Combine
 import Foundation
 import LLMkit
 
-enum AIProvider: String, CaseIterable {
+enum AIProvider: String, CaseIterable, Sendable {
     case cerebras = "Cerebras"
     case groq = "Groq"
     case gemini = "Gemini"
@@ -76,7 +76,7 @@ enum AIProvider: String, CaseIterable {
         case .deepgram:
             return "whisper-1"
         case .soniox:
-            return "stt-async-v5"
+            return "stt-async-v6"
         case .speechmatics:
             return "speechmatics-enhanced"
         case .assemblyAI:
@@ -150,7 +150,7 @@ enum AIProvider: String, CaseIterable {
         case .deepgram:
             return ["whisper-1"]
         case .soniox:
-            return ["stt-async-v5"]
+            return ["stt-async-v6"]
         case .speechmatics:
             return ["speechmatics-enhanced"]
         case .assemblyAI:
