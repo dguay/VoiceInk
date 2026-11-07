@@ -6,7 +6,9 @@ hands control back to your usual keyboard (SwiftKey, Samsung Keyboard, Gboard…
 - **Pairing**: scan the QR code from VoiceInk → Settings → Phone Dictation, or type the Mac's
   address, port and token. The app checks the pairing with `GET /v1/status` and keeps the token
   encrypted with an Android Keystore key that never leaves the phone.
-- **Keyboard**: one large mic button and a status line. Tap to record, tap again to stop. The
+- **Keyboard**: one large mic button and a status line. Switching to the keyboard starts
+  recording right away; tap once to stop. (It waits for a tap instead when a kept recording is
+  waiting for Retry, or when pairing or the microphone permission is missing.) The
   recording (AAC in MP4) goes to the Mac's `POST /v1/transcribe`; the text comes back through
   VoiceInk's pipeline (model, dictionary, word replacements, AI cleanup) and is inserted at the
   cursor. The keyboard then switches back to the previous one. The keyboard icon at the top left

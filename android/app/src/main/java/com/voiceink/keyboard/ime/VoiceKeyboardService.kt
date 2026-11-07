@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.inputmethodservice.InputMethodService
+import android.text.InputType
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
@@ -32,21 +33,6 @@ import kotlinx.coroutines.withContext
  * paired Mac, the returned text is inserted at the cursor and the previous keyboard comes back.
  */
 class VoiceKeyboardService : InputMethodService() {
-    private sealed interface State {
-        data object Idle : State
-        data object Recording : State
-        data object Sending : State
-        data object NoSpeech : State
-
-        /** A kept recording waits for a retry; [error] is null when no request failed. */
-        data class Kept(val error: ApiError?, val reason: KeptReason = KeptReason.INTERRUPTED) : State
-        data object NotPaired : State
-        data object NeedsMicrophone : State
-        data object RecorderFailed : State
-    }
-
-    enum class KeptReason { INTERRUPTED, FIELD_CHANGED, REJECTED }
-
     private val scope: CoroutineScope = MainScope()
     private val delivery = TextDelivery()
     private val client = VoiceInkClient()
@@ -54,7 +40,7 @@ class VoiceKeyboardService : InputMethodService() {
     private lateinit var pending: PendingRecording
     private lateinit var recorder: AudioRecorder
 
-    private var state: State = State.Idle
+    private var state: KeyboardState = KeyboardState.Idle
 
     private var statusView: TextView? = null
     private var micButton: ImageButton? = null
@@ -88,7 +74,7 @@ class VoiceKeyboardService : InputMethodService() {
         discardButton = root.findViewById<Button>(R.id.discard).apply {
             setOnClickListener {
                 pending.discard()
-                setState(State.Idle)
+                setState(KeyboardState.Idle)
             }
         }
         root.findViewById<ImageButton>(R.id.switch_back).setOnClickListener { switchBack() }
@@ -99,8 +85,16 @@ class VoiceKeyboardService : InputMethodService() {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         delivery.startSession(sameField = restarting)
-        if (state == State.Sending || state == State.Recording) return
-        setState(restingState())
+        val opening = KeyboardOpening.decide(
+            current = state,
+            restarting = restarting,
+            textField = info != null && info.inputType != InputType.TYPE_NULL,
+            paired = pairingStore.load() != null,
+            hasMicrophone = hasMicrophone(),
+            hasKeptRecording = pending.exists(),
+        )
+        setState(opening.state)
+        if (opening.startRecording) startRecording()
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -108,7 +102,7 @@ class VoiceKeyboardService : InputMethodService() {
         if (recorder.isRecording) {
             // Never send audio into a field the user has left; keep it for a retry instead.
             val file = recorder.stop()
-            if (file != null && pending.keep(file)) setState(State.Kept(null)) else setState(State.Idle)
+            if (file != null && pending.keep(file)) setState(KeyboardState.Kept(null)) else setState(KeyboardState.Idle)
         }
         super.onFinishInputView(finishingInput)
     }
@@ -119,56 +113,47 @@ class VoiceKeyboardService : InputMethodService() {
         super.onFinishInput()
     }
 
-    /** What to show when nothing is in progress. */
-    private fun restingState(): State = when {
-        pairingStore.load() == null -> State.NotPaired
-        !hasMicrophone() -> State.NeedsMicrophone
-        pending.exists() -> (state as? State.Kept) ?: State.Kept(null)
-        state == State.NoSpeech -> State.NoSpeech
-        else -> State.Idle
-    }
-
     private fun onMicTapped() {
         when (state) {
-            State.Recording -> finishRecording()
-            State.Sending -> Unit
-            is State.Kept -> send()
-            State.NotPaired -> openApp(MainActivity.REASON_PAIR)
-            State.NeedsMicrophone -> openApp(MainActivity.REASON_MICROPHONE)
-            State.Idle, State.NoSpeech, State.RecorderFailed -> startRecording()
+            KeyboardState.Recording -> finishRecording()
+            KeyboardState.Sending -> Unit
+            is KeyboardState.Kept -> send()
+            KeyboardState.NotPaired -> openApp(MainActivity.REASON_PAIR)
+            KeyboardState.NeedsMicrophone -> openApp(MainActivity.REASON_MICROPHONE)
+            KeyboardState.Idle, KeyboardState.NoSpeech, KeyboardState.RecorderFailed -> startRecording()
         }
     }
 
     private fun onActionTapped() {
         when (val s = state) {
-            State.NotPaired -> openApp(MainActivity.REASON_PAIR)
-            State.NeedsMicrophone -> openApp(MainActivity.REASON_MICROPHONE)
-            is State.Kept -> if (s.error == ApiError.Unauthorized) openApp(MainActivity.REASON_REJECTED) else send()
+            KeyboardState.NotPaired -> openApp(MainActivity.REASON_PAIR)
+            KeyboardState.NeedsMicrophone -> openApp(MainActivity.REASON_MICROPHONE)
+            is KeyboardState.Kept -> if (s.error == ApiError.Unauthorized) openApp(MainActivity.REASON_REJECTED) else send()
             else -> Unit
         }
     }
 
     private fun startRecording() {
-        if (pairingStore.load() == null) return setState(State.NotPaired)
-        if (!hasMicrophone()) return setState(State.NeedsMicrophone)
+        if (pairingStore.load() == null) return setState(KeyboardState.NotPaired)
+        if (!hasMicrophone()) return setState(KeyboardState.NeedsMicrophone)
         try {
-            recorder.start(pending.newScratchFile()) { if (state == State.Recording) finishRecording() }
-            setState(State.Recording)
+            recorder.start(pending.newScratchFile()) { if (state == KeyboardState.Recording) finishRecording() }
+            setState(KeyboardState.Recording)
         } catch (_: Exception) {
-            setState(State.RecorderFailed)
+            setState(KeyboardState.RecorderFailed)
         }
     }
 
     private fun finishRecording() {
         val file = recorder.stop()
-        if (file == null || !pending.keep(file)) return setState(State.NoSpeech)
+        if (file == null || !pending.keep(file)) return setState(KeyboardState.NoSpeech)
         send()
     }
 
     private fun send() {
-        val pairing = pairingStore.load() ?: return setState(State.NotPaired)
-        if (!pending.exists()) return setState(State.Idle)
-        setState(State.Sending)
+        val pairing = pairingStore.load() ?: return setState(KeyboardState.NotPaired)
+        if (!pending.exists()) return setState(KeyboardState.Idle)
+        setState(KeyboardState.Sending)
         val ticket = delivery.ticket()
         scope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -180,19 +165,19 @@ class VoiceKeyboardService : InputMethodService() {
 
     private fun onTranscribed(pairing: Pairing, ticket: TextDelivery.Ticket, result: ApiResult<Transcription>) {
         when (result) {
-            is ApiResult.Failure -> setState(State.Kept(result.error))
+            is ApiResult.Failure -> setState(KeyboardState.Kept(result.error))
             is ApiResult.Success -> {
                 pairingStore.lastHost = result.host
                 val outcome = delivery.deliver(ticket, result.value.text.trim(), ::commit, pending::discard)
                 when (outcome) {
                     TextDelivery.Outcome.INSERTED -> {
-                        setState(State.Idle)
+                        setState(KeyboardState.Idle)
                         statusView?.text = getString(R.string.status_inserted, pairing.name)
                         switchBack()
                     }
-                    TextDelivery.Outcome.EMPTY -> setState(State.NoSpeech)
-                    TextDelivery.Outcome.FIELD_CHANGED -> setState(State.Kept(null, KeptReason.FIELD_CHANGED))
-                    TextDelivery.Outcome.REJECTED -> setState(State.Kept(null, KeptReason.REJECTED))
+                    TextDelivery.Outcome.EMPTY -> setState(KeyboardState.NoSpeech)
+                    TextDelivery.Outcome.FIELD_CHANGED -> setState(KeyboardState.Kept(null, KeptReason.FIELD_CHANGED))
+                    TextDelivery.Outcome.REJECTED -> setState(KeyboardState.Kept(null, KeptReason.REJECTED))
                 }
             }
         }
@@ -208,7 +193,7 @@ class VoiceKeyboardService : InputMethodService() {
 
     private fun switchBack() {
         if (recorder.isRecording) {
-            recorder.stop()?.let { if (pending.keep(it)) setState(State.Kept(null)) }
+            recorder.stop()?.let { if (pending.keep(it)) setState(KeyboardState.Kept(null)) }
         }
         if (!switchToPreviousInputMethod()) {
             getSystemService(InputMethodManager::class.java).showInputMethodPicker()
@@ -226,7 +211,7 @@ class VoiceKeyboardService : InputMethodService() {
     private fun hasMicrophone(): Boolean =
         checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
-    private fun setState(newState: State) {
+    private fun setState(newState: KeyboardState) {
         state = newState
         render()
     }
@@ -238,30 +223,30 @@ class VoiceKeyboardService : InputMethodService() {
         val discard = discardButton ?: return
         val macName = pairingStore.load()?.name ?: getString(R.string.your_mac)
 
-        progress?.visibility = if (state == State.Sending) View.VISIBLE else View.GONE
-        mic.isEnabled = state != State.Sending
-        mic.isActivated = state == State.Recording
-        discard.visibility = if (state is State.Kept) View.VISIBLE else View.GONE
+        progress?.visibility = if (state == KeyboardState.Sending) View.VISIBLE else View.GONE
+        mic.isEnabled = state != KeyboardState.Sending
+        mic.isActivated = state == KeyboardState.Recording
+        discard.visibility = if (state is KeyboardState.Kept) View.VISIBLE else View.GONE
         action.visibility = View.GONE
 
         val (icon, description) = when (state) {
-            State.Recording -> R.drawable.ic_stop to R.string.cd_stop
-            is State.Kept -> R.drawable.ic_retry to R.string.cd_retry
-            State.Sending -> R.drawable.ic_mic to R.string.cd_sending
+            KeyboardState.Recording -> R.drawable.ic_stop to R.string.cd_stop
+            is KeyboardState.Kept -> R.drawable.ic_retry to R.string.cd_retry
+            KeyboardState.Sending -> R.drawable.ic_mic to R.string.cd_sending
             else -> R.drawable.ic_mic to R.string.cd_start
         }
         mic.setImageResource(icon)
         mic.contentDescription = getString(description)
 
         status.text = when (val s = state) {
-            State.Idle -> getString(R.string.status_idle)
-            State.Recording -> getString(R.string.status_recording)
-            State.Sending -> getString(R.string.status_sending, macName)
-            State.NoSpeech -> getString(R.string.status_no_speech)
-            State.RecorderFailed -> getString(R.string.status_recorder_failed)
-            State.NotPaired -> getString(R.string.status_not_paired).also { action.show(R.string.action_open_app) }
-            State.NeedsMicrophone -> getString(R.string.status_needs_mic).also { action.show(R.string.action_allow_mic) }
-            is State.Kept -> when (val e = s.error) {
+            KeyboardState.Idle -> getString(R.string.status_idle)
+            KeyboardState.Recording -> getString(R.string.status_recording)
+            KeyboardState.Sending -> getString(R.string.status_sending, macName)
+            KeyboardState.NoSpeech -> getString(R.string.status_no_speech)
+            KeyboardState.RecorderFailed -> getString(R.string.status_recorder_failed)
+            KeyboardState.NotPaired -> getString(R.string.status_not_paired).also { action.show(R.string.action_open_app) }
+            KeyboardState.NeedsMicrophone -> getString(R.string.status_needs_mic).also { action.show(R.string.action_allow_mic) }
+            is KeyboardState.Kept -> when (val e = s.error) {
                 null -> when (s.reason) {
                     KeptReason.INTERRUPTED -> getString(R.string.status_kept)
                     KeptReason.FIELD_CHANGED -> getString(R.string.status_field_changed)
