@@ -3,6 +3,7 @@ package com.voiceink.keyboard.setup
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.Settings
@@ -52,6 +53,8 @@ class MainActivity : Activity() {
     private lateinit var bubbleButton: Button
     private lateinit var excludedSummary: TextView
     private lateinit var resetBubbleButton: Button
+    // The bubble can be dragged over this screen; show Reset as soon as it is.
+    private val bubbleSettingsChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> refresh() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -111,7 +114,13 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        bubbleSettings.registerListener(bubbleSettingsChanged)
         refresh()
+    }
+
+    override fun onPause() {
+        bubbleSettings.unregisterListener(bubbleSettingsChanged)
+        super.onPause()
     }
 
     override fun onDestroy() {
