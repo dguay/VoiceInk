@@ -6,9 +6,13 @@ import java.io.File
 /**
  * The one recording waiting to be transcribed. It survives failures and process death so the
  * user can retry, and is deleted only once its text was inserted or the user discards it.
+ *
+ * Each entry point keeps its own: the keyboard's lives in `recordings/`, and another one, such as
+ * the mic bubble, in the [subdirectory] it names.
  */
-class PendingRecording(context: Context) {
-    private val dir = File(context.applicationContext.noBackupFilesDir, "recordings").apply { mkdirs() }
+class PendingRecording(context: Context, subdirectory: String? = null) {
+    private val dir = File(context.applicationContext.noBackupFilesDir, listOfNotNull("recordings", subdirectory).joinToString("/"))
+        .apply { mkdirs() }
 
     val file: File get() = File(dir, "pending.m4a")
 

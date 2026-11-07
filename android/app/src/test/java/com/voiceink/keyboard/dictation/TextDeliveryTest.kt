@@ -1,4 +1,4 @@
-package com.voiceink.keyboard.ime
+package com.voiceink.keyboard.dictation
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

@@ -21,6 +21,7 @@ import com.voiceink.keyboard.api.Pairing
 import com.voiceink.keyboard.api.PairingInput
 import com.voiceink.keyboard.api.PairingParser
 import com.voiceink.keyboard.api.VoiceInkClient
+import com.voiceink.keyboard.bubble.MicBubbleService
 import com.voiceink.keyboard.store.PairingStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
@@ -45,6 +46,8 @@ class MainActivity : Activity() {
     private lateinit var micStatus: TextView
     private lateinit var micButton: Button
     private lateinit var keyboardStatus: TextView
+    private lateinit var bubbleStatus: TextView
+    private lateinit var bubbleButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,6 +66,8 @@ class MainActivity : Activity() {
         micStatus = findViewById(R.id.mic_status)
         micButton = findViewById(R.id.mic_permission)
         keyboardStatus = findViewById(R.id.keyboard_status)
+        bubbleStatus = findViewById(R.id.bubble_status)
+        bubbleButton = findViewById(R.id.open_accessibility_settings)
 
         connectButton.setOnClickListener {
             pair(PairingParser.parseManual(addressField.text.toString(), portField.text.toString(), tokenField.text.toString()))
@@ -77,6 +82,7 @@ class MainActivity : Activity() {
         findViewById<Button>(R.id.open_keyboard_settings).setOnClickListener {
             startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
         }
+        bubbleButton.setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         findViewById<Button>(R.id.show_picker).setOnClickListener {
             getSystemService(InputMethodManager::class.java).showInputMethodPicker()
         }
@@ -139,6 +145,10 @@ class MainActivity : Activity() {
                 else -> R.string.keyboard_enabled
             },
         )
+
+        val bubble = isBubbleEnabled()
+        bubbleStatus.text = getString(if (bubble) R.string.bubble_enabled else R.string.bubble_not_enabled)
+        bubbleButton.visibility = if (bubble) View.GONE else View.VISIBLE
     }
 
     private fun scan() {
@@ -203,6 +213,12 @@ class MainActivity : Activity() {
 
     private fun isKeyboardEnabled(): Boolean =
         getSystemService(InputMethodManager::class.java).enabledInputMethodList.any { it.packageName == packageName }
+
+    private fun isBubbleEnabled(): Boolean = AccessibilitySetting.isEnabled(
+        Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES),
+        packageName,
+        MicBubbleService::class.java.name,
+    )
 
     companion object {
         const val EXTRA_REASON = "reason"

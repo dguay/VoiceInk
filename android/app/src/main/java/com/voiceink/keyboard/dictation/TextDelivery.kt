@@ -1,4 +1,4 @@
-package com.voiceink.keyboard.ime
+package com.voiceink.keyboard.dictation
 
 /**
  * Decides whether a transcription may be typed, so text only reaches the field it was dictated
