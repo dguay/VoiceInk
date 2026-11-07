@@ -1,4 +1,4 @@
-package com.voiceink.keyboard.ime
+package com.voiceink.keyboard.dictation
 
 import android.content.Context
 import android.media.MediaRecorder

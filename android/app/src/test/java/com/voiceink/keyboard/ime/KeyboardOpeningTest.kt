@@ -1,6 +1,7 @@
 package com.voiceink.keyboard.ime
 
 import com.voiceink.keyboard.api.ApiError
+import com.voiceink.keyboard.dictation.DictationState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -8,7 +9,7 @@ import org.junit.Test
 
 class KeyboardOpeningTest {
     private fun open(
-        current: KeyboardState = KeyboardState.Idle,
+        current: DictationState = DictationState.Idle,
         restarting: Boolean = false,
         textField: Boolean = true,
         paired: Boolean = true,
@@ -21,12 +22,12 @@ class KeyboardOpeningTest {
     }
 
     @Test fun openingAfterNoSpeechOrARecorderFailureStartsAFreshRecording() {
-        assertTrue(open(current = KeyboardState.NoSpeech).startRecording)
-        assertTrue(open(current = KeyboardState.RecorderFailed).startRecording)
+        assertTrue(open(current = DictationState.NoSpeech).startRecording)
+        assertTrue(open(current = DictationState.RecorderFailed).startRecording)
     }
 
     @Test fun keptRecordingWaitsForRetryOrDiscardWithItsError() {
-        val kept = KeyboardState.Kept(ApiError.Unreachable)
+        val kept = DictationState.Kept(ApiError.Unreachable)
 
         val decision = open(current = kept, hasKeptRecording = true)
 
@@ -37,26 +38,26 @@ class KeyboardOpeningTest {
     @Test fun keptRecordingFromAnEarlierSessionShowsRetry() {
         val decision = open(hasKeptRecording = true)
 
-        assertEquals(KeyboardState.Kept(null), decision.state)
+        assertEquals(DictationState.Kept(null), decision.state)
         assertFalse(decision.startRecording)
     }
 
     @Test fun unpairedPhoneAsksToPairInsteadOfRecording() {
         val decision = open(paired = false, hasMicrophone = false, hasKeptRecording = true)
 
-        assertEquals(KeyboardState.NotPaired, decision.state)
+        assertEquals(DictationState.NotPaired, decision.state)
         assertFalse(decision.startRecording)
     }
 
     @Test fun missingMicrophonePermissionAsksForItInsteadOfRecording() {
         val decision = open(hasMicrophone = false)
 
-        assertEquals(KeyboardState.NeedsMicrophone, decision.state)
+        assertEquals(DictationState.NeedsMicrophone, decision.state)
         assertFalse(decision.startRecording)
     }
 
     @Test fun recordingOrSendingInProgressIsLeftAloneWithoutASecondRecording() {
-        for (busy in listOf(KeyboardState.Recording, KeyboardState.Sending)) {
+        for (busy in listOf(DictationState.Recording, DictationState.Sending)) {
             for (restarting in listOf(true, false)) {
                 val decision = open(current = busy, restarting = restarting)
 
@@ -67,14 +68,14 @@ class KeyboardOpeningTest {
     }
 
     @Test fun restartingOnTheSameFieldKeepsTheRestingStateWithoutRecording() {
-        assertEquals(KeyboardOpening.Decision(KeyboardState.Idle, false), open(restarting = true))
+        assertEquals(KeyboardOpening.Decision(DictationState.Idle, false), open(restarting = true))
         assertEquals(
-            KeyboardOpening.Decision(KeyboardState.NoSpeech, false),
-            open(current = KeyboardState.NoSpeech, restarting = true),
+            KeyboardOpening.Decision(DictationState.NoSpeech, false),
+            open(current = DictationState.NoSpeech, restarting = true),
         )
     }
 
     @Test fun viewWithoutATextFieldDoesNotRecord() {
-        assertEquals(KeyboardOpening.Decision(KeyboardState.Idle, false), open(textField = false))
+        assertEquals(KeyboardOpening.Decision(DictationState.Idle, false), open(textField = false))
     }
 }

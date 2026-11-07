@@ -26,6 +26,7 @@
     <string name="action_allow_mic">Allow microphone</string>
     <string name="action_pair_again">Pair again</string>
     <string name="action_discard">Discard</string>
+    <string name="action_retry">Retry</string>
     <string name="cd_start">Start dictation</string>
     <string name="cd_stop">Stop and transcribe</string>
     <string name="cd_retry">Retry sending the recording</string>
@@ -76,4 +77,13 @@
     <string name="switch_help">While any keyboard is open, tap the keyboard button at the bottom right of the navigation bar, or long-press the space bar (SwiftKey, Samsung Keyboard and Gboard), and choose VoiceInk voice. After dictating it returns to your keyboard by itself; the keyboard icon on it goes back without dictating.\n\nSamsung: to show that button, turn on Settings → General management → Keyboard list and default → Keyboard button on navigation bar.</string>
     <string name="show_picker">Choose keyboard</string>
     <string name="try_hint">Try it here</string>
+
+    <!-- Mic bubble -->
+    <string name="bubble_service_label">VoiceInk mic bubble</string>
+    <string name="bubble_service_description">Shows a mic above your keyboard in any app, so you can dictate through VoiceInk on your Mac without switching keyboards. To do that, it watches only whether a keyboard is open and which text field it is typing into, stays hidden in password fields, and types the dictated text into that field. It reads nothing else and sends only your recording to your paired Mac.</string>
+    <string name="section_bubble">5. Enable the mic bubble (optional)</string>
+    <string name="bubble_help">Keep your usual keyboard and its own dictation: the mic bubble appears just above any open keyboard. Tap it to record, tap again to send, and the text lands in the field you were typing in. Android lists it as an accessibility service because it has to see when a keyboard opens and which field has focus. It never appears in password fields.</string>
+    <string name="bubble_enabled">The mic bubble is on. Open a keyboard, for example in the field below, to see it.</string>
+    <string name="bubble_not_enabled">Not turned on yet. In accessibility settings, choose VoiceInk mic bubble (under Downloaded or Installed apps), turn it on, then come back.</string>
+    <string name="open_accessibility_settings">Open accessibility settings</string>
 </resources>

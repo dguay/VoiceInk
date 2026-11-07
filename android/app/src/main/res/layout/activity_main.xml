@@ -159,6 +159,31 @@
             android:layout_marginTop="8dp"
             android:text="@string/show_picker" />
 
+        <!-- 5. Mic bubble -->
+        <TextView style="@style/SetupHeading"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/section_bubble" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/bubble_help" />
+
+        <TextView
+            android:id="@+id/bubble_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/open_accessibility_settings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/open_accessibility_settings" />
+
         <EditText
             android:id="@+id/try_field"
             android:layout_width="match_parent"
