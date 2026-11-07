@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Window and focus events tell the bubble when a keyboard opens or closes and which field it serves. -->
+<!-- Window and focus events tell the bubble when a keyboard opens or closes and which field it serves;
+     scroll and text events tell it when that field moved or grew, so it can move out of the way. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowsChanged|typeWindowStateChanged|typeViewFocused"
+    android:accessibilityEventTypes="typeWindowsChanged|typeWindowStateChanged|typeViewFocused|typeViewScrolled|typeViewTextChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"

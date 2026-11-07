@@ -33,6 +33,9 @@ class DictationFlow internal constructor(
     interface Host {
         fun onStateChanged(state: DictationState)
 
+        /** Brings the field sessions up to date just before a transcription is delivered. */
+        fun beforeDelivery() = Unit
+
         /** Types [text] at the cursor of the current field; false when the editor rejected it. */
         fun commit(text: String): Boolean
 
@@ -141,6 +144,7 @@ class DictationFlow internal constructor(
             is ApiResult.Failure -> show(DictationState.Kept(result.error))
             is ApiResult.Success -> {
                 pairingStore.lastHost = result.host
+                host.beforeDelivery()
                 when (delivery.deliver(ticket, result.value.text.trim(), host::commit, pending::discard)) {
                     TextDelivery.Outcome.INSERTED -> {
                         show(DictationState.Idle)

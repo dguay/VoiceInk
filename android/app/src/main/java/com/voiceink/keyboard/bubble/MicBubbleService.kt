@@ -77,6 +77,12 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
         bubble.show(keyboardTop = Rect().also(keyboard::getBoundsInScreen).top, field = focus.screenBox())
     }
 
+    /** Focus or keyboard events may still be settling; look now so the text cannot reach a field left meanwhile. */
+    override fun beforeDelivery() {
+        handler.removeCallbacks(refresh)
+        update()
+    }
+
     override fun onStateChanged(state: DictationState) {
         bubble?.render()
     }
