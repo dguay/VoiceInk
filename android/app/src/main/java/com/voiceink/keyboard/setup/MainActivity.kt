@@ -21,6 +21,7 @@ import com.voiceink.keyboard.api.Pairing
 import com.voiceink.keyboard.api.PairingInput
 import com.voiceink.keyboard.api.PairingParser
 import com.voiceink.keyboard.api.VoiceInkClient
+import com.voiceink.keyboard.bubble.BubbleSettings
 import com.voiceink.keyboard.bubble.MicBubbleService
 import com.voiceink.keyboard.store.PairingStore
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +35,7 @@ class MainActivity : Activity() {
     private val scope = MainScope()
     private val client = VoiceInkClient()
     private lateinit var store: PairingStore
+    private lateinit var bubbleSettings: BubbleSettings
 
     private lateinit var pairedSummary: TextView
     private lateinit var pairingResult: TextView
@@ -48,12 +50,15 @@ class MainActivity : Activity() {
     private lateinit var keyboardStatus: TextView
     private lateinit var bubbleStatus: TextView
     private lateinit var bubbleButton: Button
+    private lateinit var excludedSummary: TextView
+    private lateinit var resetBubbleButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         applySystemBarInsets(findViewById(R.id.scroll))
         store = PairingStore(this)
+        bubbleSettings = BubbleSettings(this)
 
         pairedSummary = findViewById(R.id.paired_summary)
         pairingResult = findViewById(R.id.pairing_result)
@@ -68,6 +73,8 @@ class MainActivity : Activity() {
         keyboardStatus = findViewById(R.id.keyboard_status)
         bubbleStatus = findViewById(R.id.bubble_status)
         bubbleButton = findViewById(R.id.open_accessibility_settings)
+        excludedSummary = findViewById(R.id.excluded_summary)
+        resetBubbleButton = findViewById(R.id.reset_bubble_position)
 
         connectButton.setOnClickListener {
             pair(PairingParser.parseManual(addressField.text.toString(), portField.text.toString(), tokenField.text.toString()))
@@ -83,6 +90,13 @@ class MainActivity : Activity() {
             startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
         }
         bubbleButton.setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        findViewById<Button>(R.id.choose_excluded_apps).setOnClickListener {
+            startActivity(Intent(this, BubbleExclusionsActivity::class.java))
+        }
+        resetBubbleButton.setOnClickListener {
+            bubbleSettings.resetPosition()
+            refresh()
+        }
         findViewById<Button>(R.id.show_picker).setOnClickListener {
             getSystemService(InputMethodManager::class.java).showInputMethodPicker()
         }
@@ -149,6 +163,13 @@ class MainActivity : Activity() {
         val bubble = isBubbleEnabled()
         bubbleStatus.text = getString(if (bubble) R.string.bubble_enabled else R.string.bubble_not_enabled)
         bubbleButton.visibility = if (bubble) View.GONE else View.VISIBLE
+        val excluded = bubbleSettings.excludedApps.size
+        excludedSummary.text = if (excluded == 0) {
+            getString(R.string.no_excluded_apps)
+        } else {
+            resources.getQuantityString(R.plurals.excluded_apps_count, excluded, excluded)
+        }
+        resetBubbleButton.visibility = if (bubbleSettings.hasCustomPosition) View.VISIBLE else View.GONE
     }
 
     private fun scan() {

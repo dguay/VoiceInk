@@ -7,6 +7,14 @@
     <uses-feature android:name="android.hardware.microphone" android:required="true" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
+    <!-- Lists the apps with a launcher icon, so the user can keep the mic bubble out of some. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -26,6 +34,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".setup.BubbleExclusionsActivity"
+            android:exported="false"
+            android:label="@string/exclusions_title" />
 
         <service
             android:name=".ime.VoiceKeyboardService"

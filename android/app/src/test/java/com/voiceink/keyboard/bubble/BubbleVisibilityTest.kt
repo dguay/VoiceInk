@@ -5,10 +5,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BubbleVisibilityTest {
-    private val textField = FocusedField(editable = true, password = false)
+    private val textField = FocusedField(editable = true, password = false, app = "com.example.chat")
 
-    private fun shows(keyboardShown: Boolean = true, ownKeyboard: Boolean = false, field: FocusedField? = textField) =
-        BubbleVisibility.shouldShow(keyboardShown, ownKeyboard, field)
+    private fun shows(
+        keyboardShown: Boolean = true,
+        ownKeyboard: Boolean = false,
+        field: FocusedField? = textField,
+        excludedApps: Set<String> = emptySet(),
+    ) = BubbleVisibility.shouldShow(keyboardShown, ownKeyboard, field, excludedApps)
 
     @Test fun appearsWhileAKeyboardIsOpenOnATextField() {
         assertTrue(shows())
@@ -29,5 +33,15 @@ class BubbleVisibilityTest {
 
     @Test fun staysHiddenWhileTheVoiceInkKeyboardIsTheOpenKeyboard() {
         assertFalse(shows(ownKeyboard = true))
+    }
+
+    @Test fun neverAppearsInAnExcludedApp() {
+        assertFalse(shows(excludedApps = setOf("com.example.chat")))
+    }
+
+    @Test fun removingAnAppFromTheExclusionsBringsTheBubbleBack() {
+        val excluded = setOf("com.example.chat", "com.example.game")
+
+        assertTrue(shows(excludedApps = excluded - "com.example.chat"))
     }
 }
