@@ -1,6 +1,8 @@
 package com.voiceink.keyboard.bubble
 
 import android.accessibilityservice.AccessibilityService
+import android.content.SharedPreferences
+import android.content.res.Configuration
 import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
@@ -28,6 +30,9 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
     private var scope: CoroutineScope? = null
     private var flow: DictationFlow? = null
     private var bubble: MicBubbleView? = null
+    private var settings: BubbleSettings? = null
+    // A new exclusion or a reset position applies at once, even with the bubble on screen.
+    private val settingsChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> handler.post(refresh) }
     private val sessions = FieldSessions<AccessibilityNodeInfo>(
         start = { flow?.startSession() },
         end = { flow?.endSession() },
@@ -37,8 +42,17 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
         super.onServiceConnected()
         val scope = MainScope().also { scope = it }
         val flow = DictationFlow(this, scope, PendingRecording(this, BUBBLE_RECORDINGS), this).also { flow = it }
-        bubble = MicBubbleView(this, flow)
+        val settings = BubbleSettings(this).also { settings = it }
+        settings.registerListener(settingsChanged)
+        bubble = MicBubbleView(this, flow, settings)
         update()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Rotation: re-place the bubble against the new screen and keyboard.
+        handler.removeCallbacks(refresh)
+        handler.postDelayed(refresh, SETTLE_MS)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -51,6 +65,7 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
 
     override fun onDestroy() {
         handler.removeCallbacks(refresh)
+        settings?.unregisterListener(settingsChanged)
         sessions.update(null)
         flow?.close()
         bubble?.hide()
@@ -66,7 +81,10 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
         val visible = BubbleVisibility.shouldShow(
             keyboardShown = keyboard != null,
             ownKeyboard = keyboard?.root?.packageName?.toString() == packageName,
-            field = focus?.let { FocusedField(editable = it.isEditable, password = it.isPassword) },
+            field = focus?.let {
+                FocusedField(editable = it.isEditable, password = it.isPassword, app = it.packageName?.toString())
+            },
+            excludedApps = settings?.excludedApps.orEmpty(),
         )
         val fieldChanged = sessions.update(if (visible) focus else null)
         // Never send audio into a field the user has left: keep it for Retry instead.

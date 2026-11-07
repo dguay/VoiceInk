@@ -184,6 +184,27 @@
             android:layout_marginTop="8dp"
             android:text="@string/open_accessibility_settings" />
 
+        <TextView
+            android:id="@+id/excluded_summary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" />
+
+        <Button
+            android:id="@+id/choose_excluded_apps"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/choose_excluded_apps" />
+
+        <Button
+            android:id="@+id/reset_bubble_position"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/reset_bubble_position"
+            android:visibility="gone" />
+
         <EditText
             android:id="@+id/try_field"
             android:layout_width="match_parent"

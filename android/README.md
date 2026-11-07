@@ -91,6 +91,14 @@ app also offers a floating mic bubble:
   password fields, when the keyboard closes, and while the VoiceInk voice keyboard itself is open.
   It docks just above the keyboard on the right, and moves to the left or above the field rather
   than cover the field you are typing in.
+- **Moving it**: drag the mic anywhere above the keyboard. The bubble remembers the spot relative
+  to the keyboard (its share of the width and its height above the keyboard), so it follows the
+  keyboard as it opens, closes, grows (emoji panel) or rotates, and it never goes off-screen or
+  under the keyboard. Once moved it stays where you put it, even over the field; setup step 5's
+  **Reset bubble position** returns it to the automatic dock.
+- **Apps without the bubble**: setup step 5 → **Choose apps without the bubble** lists the apps
+  with a launcher icon; check an app and the bubble never appears in its fields. Uncheck it to bring
+  the bubble back. Changes apply at once.
 - **Dictating**: tap the bubble to record, tap again to send. The text goes through the same Mac
   pipeline as the keyboard and is inserted at the cursor of the field the bubble was showing for.
   If you move to another field or close the keyboard first, the text is not typed anywhere; the
