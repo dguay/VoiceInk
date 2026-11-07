@@ -5,4 +5,6 @@
     <color name="keyboard_background">#FF1E2125</color>
     <color name="keyboard_text">#FFE8EAED</color>
     <color name="keyboard_secondary">#FFA6ADB6</color>
+    <color name="bubble_mic">#FF2DD4BF</color>
+    <color name="bubble_mic_icon_rest">#FF062B27</color>
 </resources>

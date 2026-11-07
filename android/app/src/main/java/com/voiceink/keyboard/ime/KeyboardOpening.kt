@@ -20,7 +20,7 @@ internal object KeyboardOpening {
         hasKeptRecording: Boolean,
     ): Decision {
         if (current == DictationState.Recording || current == DictationState.Sending) return Decision(current, false)
-        val resting = DictationState.resting(current, paired, hasMicrophone, hasKeptRecording)
+        val resting = DictationState.resting(current, paired, hasMicrophone, hasKeptRecording, sameField = restarting)
         val freshRecording = resting == DictationState.Idle || resting == DictationState.NoSpeech
         return Decision(resting, startRecording = freshRecording && !restarting && textField)
     }

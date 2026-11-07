@@ -19,13 +19,20 @@ sealed interface DictationState {
         /**
          * The state to show when an entry point appears on a field while nothing is in progress:
          * what setup still needs, then a kept recording waiting for Retry, then [current]'s
-         * "nothing heard" hint, else idle.
+         * "nothing heard" hint when it reappears on the [sameField] (a restart), else idle. The hint
+         * belongs to the attempt that heard nothing, so it never follows to another field.
          */
-        fun resting(current: DictationState, paired: Boolean, hasMicrophone: Boolean, hasKeptRecording: Boolean): DictationState = when {
+        fun resting(
+            current: DictationState,
+            paired: Boolean,
+            hasMicrophone: Boolean,
+            hasKeptRecording: Boolean,
+            sameField: Boolean,
+        ): DictationState = when {
             !paired -> NotPaired
             !hasMicrophone -> NeedsMicrophone
             hasKeptRecording -> current as? Kept ?: Kept(null)
-            current == NoSpeech -> NoSpeech
+            current == NoSpeech && sameField -> NoSpeech
             else -> Idle
         }
     }

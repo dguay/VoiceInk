@@ -68,9 +68,9 @@ class DictationFlow internal constructor(
         host.onStateChanged(newState)
     }
 
-    /** The resting state for a fresh appearance on a field, without starting anything. */
-    fun restingState(): DictationState =
-        DictationState.resting(state, isPaired, hasMicrophone, hasKeptRecording)
+    /** The resting state for an appearance on a field (a [sameField] restart, or a new one), without starting anything. */
+    fun restingState(sameField: Boolean): DictationState =
+        DictationState.resting(state, isPaired, hasMicrophone, hasKeptRecording, sameField)
 
     fun onMicTapped() {
         when (state) {

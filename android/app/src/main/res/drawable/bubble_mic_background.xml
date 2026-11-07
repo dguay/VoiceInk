@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The mic bubble's button: teal at rest, so it never reads as part of the app underneath. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_enabled="false">
+        <shape android:shape="oval"><solid android:color="@color/keyboard_secondary" /></shape>
+    </item>
+    <item android:state_activated="true">
+        <shape android:shape="oval"><solid android:color="@color/recording" /></shape>
+    </item>
+    <item>
+        <shape android:shape="oval"><solid android:color="@color/bubble_mic" /></shape>
+    </item>
+</selector>

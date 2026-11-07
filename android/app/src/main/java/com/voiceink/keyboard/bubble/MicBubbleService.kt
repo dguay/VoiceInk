@@ -91,7 +91,7 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
         if (fieldChanged) flow.interrupt()
         if (!visible || keyboard == null || focus == null) return bubble.hide()
 
-        if (fieldChanged && flow.state != DictationState.Sending) flow.show(flow.restingState())
+        if (fieldChanged && flow.state != DictationState.Sending) flow.show(flow.restingState(sameField = false))
         bubble.show(keyboardTop = Rect().also(keyboard::getBoundsInScreen).top, field = focus.screenBox())
     }
 

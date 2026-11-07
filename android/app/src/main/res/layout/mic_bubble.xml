@@ -64,21 +64,25 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content">
 
+        <!-- 48dp: the smallest comfortable touch target; the icon is scaled into the padding. -->
         <ImageButton
             android:id="@+id/bubble_mic"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
             android:layout_gravity="center"
             android:layout_margin="4dp"
-            android:background="@drawable/mic_button_background"
+            android:background="@drawable/bubble_mic_background"
             android:contentDescription="@string/cd_start"
             android:elevation="4dp"
+            android:padding="11dp"
+            android:tint="@color/bubble_mic_icon"
+            android:scaleType="fitCenter"
             android:src="@drawable/ic_mic" />
 
         <ProgressBar
             android:id="@+id/bubble_progress"
-            android:layout_width="64dp"
-            android:layout_height="64dp"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
             android:layout_gravity="center"
             android:elevation="5dp"
             android:indeterminate="true"
