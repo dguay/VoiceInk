@@ -99,4 +99,53 @@ class BubblePlacementTest {
 
         assertEquals(80, box.top)
     }
+
+    @Test fun dockCollapsedTucksFlushAgainstTheNearestHorizontalEdge() {
+        val area = portrait()
+        val handleW = 60
+        val handleH = 120
+
+        val onRight = BubblePlacement.dockCollapsed(area, Box(910, 1330, 1060, 1480), handleW, handleH, margin)
+        assertEquals(ScreenEdge.RIGHT, onRight.edge)
+        assertEquals(Box(1020, 1345, 1080, 1465), onRight.box)
+
+        val onLeft = BubblePlacement.dockCollapsed(area, Box(20, 1330, 170, 1480), handleW, handleH, margin)
+        assertEquals(ScreenEdge.LEFT, onLeft.edge)
+        assertEquals(Box(0, 1345, 60, 1465), onLeft.box)
+    }
+
+    @Test fun dockCollapsedBreaksExactHorizontalCenterTieTowardTheEndSide() {
+        val area = portrait()
+        val centered = Box(465, 900, 615, 1050)
+
+        val ltr = BubblePlacement.dockCollapsed(area, centered, handleWidth = 60, handleHeight = 120, margin = margin, rtl = false)
+        assertEquals(ScreenEdge.RIGHT, ltr.edge)
+        assertEquals(1080, ltr.box.right)
+
+        val rtl = BubblePlacement.dockCollapsed(area, centered, handleWidth = 60, handleHeight = 120, margin = margin, rtl = true)
+        assertEquals(ScreenEdge.LEFT, rtl.edge)
+        assertEquals(0, rtl.box.left)
+    }
+
+    @Test fun dockCollapsedRespectsUsableAreaInsetsAndClampsVertically() {
+        val insetArea = Box(left = 80, top = 100, right = 1000, bottom = 1400)
+
+        val nearLeftTop = BubblePlacement.dockCollapsed(insetArea, Box(100, 105, 250, 160), handleWidth = 60, handleHeight = 140, margin = margin)
+        assertEquals(ScreenEdge.LEFT, nearLeftTop.edge)
+        assertEquals(Box(80, 120, 140, 260), nearLeftTop.box)
+
+        val nearRightBottom = BubblePlacement.dockCollapsed(insetArea, Box(800, 1320, 950, 1390), handleWidth = 60, handleHeight = 140, margin = margin)
+        assertEquals(ScreenEdge.RIGHT, nearRightBottom.edge)
+        assertEquals(Box(940, 1240, 1000, 1380), nearRightBottom.box)
+    }
+
+    @Test fun dockCollapsedStaysBelowStatusBarWhenSpaceAboveKeyboardIsVeryShort() {
+        val shortArea = portrait(keyboardTop = 160)
+
+        val docked = BubblePlacement.dockCollapsed(shortArea, Box(910, 80, 1060, 230), handleWidth = 60, handleHeight = 140, margin = margin)
+
+        assertEquals(ScreenEdge.RIGHT, docked.edge)
+        assertEquals(80, docked.box.top)
+        assertEquals(1080, docked.box.right)
+    }
 }

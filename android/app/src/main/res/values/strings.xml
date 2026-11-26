@@ -16,6 +16,7 @@
     <string name="status_kept">Recording kept. Tap retry to send it.</string>
     <string name="status_field_changed">The field changed before the text arrived. Recording kept: tap retry to insert it here.</string>
     <string name="status_insert_rejected">This field didn\'t accept the text. Recording kept: tap retry.</string>
+    <string name="status_insert_rejected_copy">This field didn\'t accept the text. Copy it to paste manually, or tap retry.</string>
     <string name="error_unreachable">Mac unreachable. Is it awake and on your network or Tailscale? Tap retry.</string>
     <string name="error_unauthorized">Token rejected by the Mac. Pair again, then retry.</string>
     <string name="error_no_model">No model selected on the Mac. Choose one in VoiceInk, then retry.</string>
@@ -26,12 +27,16 @@
     <string name="action_allow_mic">Allow microphone</string>
     <string name="action_pair_again">Pair again</string>
     <string name="action_discard">Discard</string>
+    <string name="action_copy">Copy</string>
     <string name="action_retry">Retry</string>
+    <string name="clipboard_label">VoiceInk transcription</string>
+    <string name="copied_to_clipboard">Copied transcription</string>
     <string name="cd_start">Start dictation</string>
     <string name="cd_stop">Stop and transcribe</string>
     <string name="cd_retry">Retry sending the recording</string>
     <string name="cd_sending">Transcribing</string>
     <string name="cd_switch_back">Switch back to the previous keyboard</string>
+    <string name="cd_expand_bubble">Expand VoiceInk mic bubble</string>
 
     <!-- Setup -->
     <string name="setup_title">VoiceInk Keyboard</string>
@@ -103,6 +108,12 @@
     <string name="open_accessibility_settings">Open accessibility settings</string>
     <string name="reset_bubble_position">Reset bubble position</string>
     <string name="choose_excluded_apps">Choose apps without the bubble</string>
+    <string name="idle_collapse_label">Idle auto-collapse</string>
+    <string name="idle_collapse_help">Tuck the bubble against the nearest screen edge after it sits untouched. Tap the edge handle to expand it.</string>
+    <string name="idle_collapse_off">Off</string>
+    <string name="idle_collapse_5s">5 s</string>
+    <string name="idle_collapse_10s">10 s</string>
+    <string name="idle_collapse_30s">30 s</string>
     <string name="no_excluded_apps">The bubble appears in every app.</string>
     <plurals name="excluded_apps_count">
         <item quantity="one">Hidden in %1$d app.</item>

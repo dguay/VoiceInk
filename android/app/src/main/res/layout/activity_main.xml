@@ -233,6 +233,28 @@
             android:layout_marginTop="8dp"
             android:text="@string/choose_excluded_apps" />
 
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:labelFor="@id/idle_collapse_spinner"
+            android:text="@string/idle_collapse_label"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="@string/idle_collapse_help" />
+
+        <Spinner
+            android:id="@+id/idle_collapse_spinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:minHeight="48dp"
+            android:prompt="@string/idle_collapse_label" />
+
         <Button
             android:id="@+id/reset_bubble_position"
             style="?android:attr/borderlessButtonStyle"

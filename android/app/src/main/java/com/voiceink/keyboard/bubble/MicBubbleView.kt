@@ -5,6 +5,9 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -15,20 +18,24 @@ import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import com.voiceink.keyboard.R
+import com.voiceink.keyboard.dictation.CopyFallback
 import com.voiceink.keyboard.dictation.DictationFlow
 import com.voiceink.keyboard.dictation.DictationMessages
 import com.voiceink.keyboard.dictation.DictationState
 
 /**
  * The bubble's overlay window: a round mic button and, whenever there is something to say, a card
- * above it with the status and Retry / Discard or the action that unblocks dictation. It never
- * takes focus, so the keyboard and the field stay as they were. Dragging the mic moves the bubble
- * and remembers where it was dropped, relative to the keyboard.
+ * above it with the status and Retry / Copy / Discard or the action that unblocks dictation. When
+ * idle auto-collapse is enabled and the bubble sits untouched, it tucks against the nearest screen
+ * edge as a slim handle until tapped. It never takes focus, so the keyboard and the field stay as
+ * they were. Dragging the mic moves the bubble and remembers where it was dropped, relative to the
+ * keyboard.
  */
 internal class MicBubbleView(
     private val context: Context,
@@ -36,16 +43,23 @@ internal class MicBubbleView(
     private val settings: BubbleSettings,
 ) {
     private val windowManager = context.getSystemService(WindowManager::class.java)
+    private val handler = Handler(Looper.getMainLooper())
+    private val idleCollapse = BubbleIdleCollapse()
+    private val collapseTimer = Runnable { onCollapseTimer() }
 
     @SuppressLint("InflateParams") // An overlay window has no parent.
-    private val root: LinearLayout = LayoutInflater.from(ContextThemeWrapper(context, R.style.Theme_VoiceInk))
-        .inflate(R.layout.mic_bubble, null) as LinearLayout
+    private val root: FrameLayout = LayoutInflater.from(ContextThemeWrapper(context, R.style.Theme_VoiceInk))
+        .inflate(R.layout.mic_bubble, null) as FrameLayout
+    private val expandedContainer: LinearLayout = root.findViewById(R.id.bubble_expanded)
     private val card: View = root.findViewById(R.id.bubble_card)
     private val status: TextView = root.findViewById(R.id.bubble_status)
     private val discard: Button = root.findViewById(R.id.bubble_discard)
+    private val copy: Button = root.findViewById(R.id.bubble_copy)
     private val action: Button = root.findViewById(R.id.bubble_action)
     private val mic: ImageButton = root.findViewById(R.id.bubble_mic)
     private val progress: ProgressBar = root.findViewById(R.id.bubble_progress)
+    private val handle: FrameLayout = root.findViewById(R.id.bubble_handle)
+    private val handleTab: View = root.findViewById(R.id.bubble_handle_tab)
 
     private val params = WindowManager.LayoutParams(
         WindowManager.LayoutParams.WRAP_CONTENT,
@@ -79,17 +93,22 @@ internal class MicBubbleView(
         allowDragging()
         mic.setOnClickListener { flow.onMicTapped() }
         action.setOnClickListener { flow.onActionTapped() }
+        copy.setOnClickListener { flow.copyKeptText() }
         discard.setOnClickListener { flow.discard() }
+        handle.setOnClickListener { expandFromHandle() }
     }
 
     /** Shows the bubble docked above a keyboard whose top edge is at [keyboardTop], clear of [field]. */
     fun show(keyboardTop: Int, field: Box) {
         this.keyboardTop = keyboardTop
         this.field = field
+        idleCollapse.onShow(settings.idleCollapse, flow.state, SystemClock.uptimeMillis())
         render()
     }
 
     fun hide() {
+        handler.removeCallbacks(collapseTimer)
+        idleCollapse.onHide()
         field = null
         drag = null
         glide?.cancel()
@@ -103,6 +122,9 @@ internal class MicBubbleView(
     fun render() {
         val field = field ?: return
         val state = flow.state
+        val now = SystemClock.uptimeMillis()
+        idleCollapse.sync(settings.idleCollapse, state, now)
+        scheduleCollapse(now)
 
         progress.visibility = if (state == DictationState.Sending) View.VISIBLE else View.GONE
         mic.isEnabled = state != DictationState.Sending
@@ -116,9 +138,11 @@ internal class MicBubbleView(
         mic.setImageResource(icon)
         mic.contentDescription = context.getString(description)
 
+        val copyAvailable = CopyFallback.isAvailable(state)
         card.visibility = if (state == DictationState.Idle) View.GONE else View.VISIBLE
-        status.text = DictationMessages.status(context, state, flow.macName)
+        status.text = DictationMessages.status(context, state, flow.macName, copyAvailable = copyAvailable)
         discard.visibility = if (state is DictationState.Kept) View.VISIBLE else View.GONE
+        copy.visibility = if (copyAvailable) View.VISIBLE else View.GONE
         val label = DictationMessages.action(state) ?: if (state is DictationState.Kept) R.string.action_retry else null
         if (label != null) {
             action.setText(label)
@@ -127,29 +151,86 @@ internal class MicBubbleView(
             action.visibility = View.GONE
         }
 
-        place(field)
+        val collapsed = idleCollapse.collapsed
+        expandedContainer.visibility = if (collapsed) View.GONE else View.VISIBLE
+        handle.visibility = if (collapsed) View.VISIBLE else View.GONE
+
+        place(field, collapsed)
     }
 
-    private fun place(field: Box) {
+    private fun expandFromHandle() {
+        idleCollapse.onExpand(SystemClock.uptimeMillis())
+        render()
+    }
+
+    private fun onCollapseTimer() {
+        val now = SystemClock.uptimeMillis()
+        if (idleCollapse.onTimeout(now)) {
+            render()
+        } else {
+            scheduleCollapse(now)
+        }
+    }
+
+    private fun scheduleCollapse(now: Long) {
+        handler.removeCallbacks(collapseTimer)
+        val delay = idleCollapse.remainingDelayMs(now) ?: return
+        handler.postDelayed(collapseTimer, delay)
+    }
+
+    @SuppressLint("RtlHardcoded") // Collapsed handle aligns to the physical left/right screen edge.
+    private fun place(field: Box, collapsed: Boolean) {
         // The finger holds the bubble; it lands where it is dropped.
         if (drag?.moving == true) return
         val rtl = context.resources.configuration.layoutDirection == View.LAYOUT_DIRECTION_RTL
         val unspecified = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-        root.measure(unspecified, unspecified)
         val area = area()
-        val box = BubblePlacement.place(
+        val margin = margin()
+
+        expandedContainer.measure(unspecified, unspecified)
+        val expandedBox = BubblePlacement.place(
             area = area,
             position = settings.position,
             field = field,
-            width = root.measuredWidth,
-            height = root.measuredHeight,
-            margin = margin(),
+            width = expandedContainer.measuredWidth,
+            height = expandedContainer.measuredHeight,
+            margin = margin,
             rtl = rtl,
         )
-        // The card lines up with the mic on whichever side the bubble sits.
-        val onEndSide = (box.left + box.right) / 2 > (area.left + area.right) / 2 != rtl
-        root.gravity = if (onEndSide) Gravity.END else Gravity.START
-        move(box)
+
+        if (!collapsed) {
+            // The card lines up with the mic on whichever side the bubble sits.
+            val onEndSide = (expandedBox.left + expandedBox.right) / 2 > (area.left + area.right) / 2 != rtl
+            expandedContainer.gravity = if (onEndSide) Gravity.END else Gravity.START
+            move(expandedBox)
+            return
+        }
+
+        root.measure(unspecified, unspecified)
+        val docked = BubblePlacement.dockCollapsed(
+            area = area,
+            expanded = expandedBox,
+            handleWidth = root.measuredWidth,
+            handleHeight = root.measuredHeight,
+            margin = margin,
+            rtl = rtl,
+        )
+        val tabParams = handleTab.layoutParams as FrameLayout.LayoutParams
+        val desiredGravity = when (docked.edge) {
+            ScreenEdge.LEFT -> Gravity.LEFT or Gravity.CENTER_VERTICAL
+            ScreenEdge.RIGHT -> Gravity.RIGHT or Gravity.CENTER_VERTICAL
+        }
+        if (tabParams.gravity != desiredGravity) {
+            tabParams.gravity = desiredGravity
+            handleTab.layoutParams = tabParams
+        }
+        handleTab.setBackgroundResource(
+            when (docked.edge) {
+                ScreenEdge.LEFT -> R.drawable.bubble_handle_left_background
+                ScreenEdge.RIGHT -> R.drawable.bubble_handle_right_background
+            },
+        )
+        move(docked.box)
     }
 
     // Taps, including accessibility clicks, still reach the mic's own performClick.
@@ -159,7 +240,11 @@ internal class MicBubbleView(
     /** Taps fall through to the mic's click listener; a move past the touch slop drags the bubble instead. */
     private fun onMicTouch(view: View, event: MotionEvent): Boolean {
         when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> drag = Drag(event.rawX, event.rawY, params.x, params.y)
+            MotionEvent.ACTION_DOWN -> {
+                drag = Drag(event.rawX, event.rawY, params.x, params.y)
+                idleCollapse.onTouchStarted()
+                scheduleCollapse(SystemClock.uptimeMillis())
+            }
             MotionEvent.ACTION_MOVE -> {
                 val drag = drag ?: return false
                 val dx = event.rawX - drag.x
@@ -176,6 +261,9 @@ internal class MicBubbleView(
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 val drag = drag ?: return false
                 this.drag = null
+                val now = SystemClock.uptimeMillis()
+                idleCollapse.onTouchEnded(now)
+                scheduleCollapse(now)
                 if (!drag.moving) return false
                 val box = Box(params.x, params.y, params.x + root.width, params.y + root.height)
                 settings.position = BubblePlacement.positionOf(area(), box, margin())

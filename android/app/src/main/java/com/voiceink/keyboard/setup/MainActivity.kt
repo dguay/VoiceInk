@@ -12,8 +12,11 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.View
 import android.view.inputmethod.InputMethodManager
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.Spinner
 import android.widget.TextView
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
@@ -26,6 +29,7 @@ import com.voiceink.keyboard.api.PairingInput
 import com.voiceink.keyboard.api.PairingParser
 import com.voiceink.keyboard.api.VoiceInkClient
 import com.voiceink.keyboard.bubble.BubbleSettings
+import com.voiceink.keyboard.bubble.IdleCollapseTimeout
 import com.voiceink.keyboard.bubble.MicBubbleService
 import com.voiceink.keyboard.store.PairingStore
 import com.voiceink.keyboard.update.AppInstaller
@@ -63,7 +67,9 @@ class MainActivity : Activity() {
     private lateinit var bubbleStatus: TextView
     private lateinit var bubbleButton: Button
     private lateinit var excludedSummary: TextView
+    private lateinit var idleCollapseSpinner: Spinner
     private lateinit var resetBubbleButton: Button
+    private val idleCollapseOptions = IdleCollapseTimeout.entries
     // The bubble can be dragged over this screen; show Reset as soon as it is.
     private val bubbleSettingsChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> refresh() }
 
@@ -101,6 +107,7 @@ class MainActivity : Activity() {
         bubbleStatus = findViewById(R.id.bubble_status)
         bubbleButton = findViewById(R.id.open_accessibility_settings)
         excludedSummary = findViewById(R.id.excluded_summary)
+        idleCollapseSpinner = findViewById(R.id.idle_collapse_spinner)
         resetBubbleButton = findViewById(R.id.reset_bubble_position)
         installResults = InstallResultStore(this)
         updateSection = findViewById(R.id.update_section)
@@ -130,6 +137,7 @@ class MainActivity : Activity() {
         findViewById<Button>(R.id.choose_excluded_apps).setOnClickListener {
             startActivity(Intent(this, BubbleExclusionsActivity::class.java))
         }
+        setupIdleCollapseSpinner()
         resetBubbleButton.setOnClickListener {
             bubbleSettings.resetPosition()
             refresh()
@@ -221,7 +229,37 @@ class MainActivity : Activity() {
         } else {
             resources.getQuantityString(R.plurals.excluded_apps_count, excluded, excluded)
         }
+        val selectedCollapse = idleCollapseOptions.indexOf(bubbleSettings.idleCollapse).coerceAtLeast(0)
+        if (idleCollapseSpinner.selectedItemPosition != selectedCollapse) {
+            idleCollapseSpinner.setSelection(selectedCollapse, false)
+        }
         resetBubbleButton.visibility = if (bubbleSettings.hasCustomPosition) View.VISIBLE else View.GONE
+    }
+
+    private fun setupIdleCollapseSpinner() {
+        val labels = idleCollapseOptions.map { getString(idleCollapseLabel(it)) }
+        idleCollapseSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        val initial = idleCollapseOptions.indexOf(bubbleSettings.idleCollapse).coerceAtLeast(0)
+        idleCollapseSpinner.setSelection(initial, false)
+        idleCollapseSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val chosen = idleCollapseOptions.getOrNull(position) ?: return
+                if (bubbleSettings.idleCollapse != chosen) {
+                    bubbleSettings.idleCollapse = chosen
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+    }
+
+    private fun idleCollapseLabel(timeout: IdleCollapseTimeout): Int = when (timeout) {
+        IdleCollapseTimeout.OFF -> R.string.idle_collapse_off
+        IdleCollapseTimeout.SECONDS_5 -> R.string.idle_collapse_5s
+        IdleCollapseTimeout.SECONDS_10 -> R.string.idle_collapse_10s
+        IdleCollapseTimeout.SECONDS_30 -> R.string.idle_collapse_30s
     }
 
     // MARK: Update from the paired Mac
