@@ -9,18 +9,18 @@ import os
 struct InterruptedRecordingRecovery {
     let markerStore: ActiveRecordingMarkerStore
     let modelContext: ModelContext
-    var isProcessRunning: (Int32) -> Bool = InterruptedRecordingRecovery.isProcessRunning
+    var isRecordingOwnerRunning: (ActiveRecordingMarker) -> Bool
 
     private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "RecordingRecovery")
 
     init(
         markerStore: ActiveRecordingMarkerStore = .standard,
         modelContext: ModelContext,
-        isProcessRunning: @escaping (Int32) -> Bool = InterruptedRecordingRecovery.isProcessRunning
+        isRecordingOwnerRunning: @escaping (ActiveRecordingMarker) -> Bool = RecordingProcessIdentity.isRunning
     ) {
         self.markerStore = markerStore
         self.modelContext = modelContext
-        self.isProcessRunning = isProcessRunning
+        self.isRecordingOwnerRunning = isRecordingOwnerRunning
     }
 
     /// Recovers every recording whose process exited while it was recording.
@@ -37,7 +37,7 @@ struct InterruptedRecordingRecovery {
                 continue
             }
 
-            if marker.processID == ProcessInfo.processInfo.processIdentifier || isProcessRunning(marker.processID) {
+            if isRecordingOwnerRunning(marker) {
                 continue
             }
 
@@ -110,20 +110,62 @@ struct InterruptedRecordingRecovery {
 
     /// Removes a recovered recording's History entry and its audio file.
     static func discard(_ transcription: Transcription, in modelContext: ModelContext) throws {
-        if let audioFileURL = transcription.audioFileURL,
-            let url = URL(string: audioFileURL),
-            FileManager.default.fileExists(atPath: url.path)
-        {
-            try FileManager.default.removeItem(at: url)
-        }
+        let audioURL = transcription.audioFileURL.flatMap(URL.init(string:))
+        // Save first so a failed save never leaves an entry whose audio is gone.
         modelContext.delete(transcription)
         try modelContext.save()
+        if let audioURL, FileManager.default.fileExists(atPath: audioURL.path) {
+            try? FileManager.default.removeItem(at: audioURL)
+        }
         NotificationCenter.default.post(name: .transcriptionDeleted, object: nil)
     }
 
-    nonisolated static func isProcessRunning(_ processID: Int32) -> Bool {
-        guard processID > 0 else { return false }
-        return kill(processID, 0) == 0 || errno == EPERM
+}
+
+/// Identifies the process that owns a recording well enough to survive process ID reuse,
+/// which is common right after a forced restart.
+enum RecordingProcessIdentity {
+    static var currentBootSessionID: String? {
+        var size = 0
+        guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.bootsessionuuid", &buffer, &size, nil, 0) == 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    /// Start time of a running process in seconds since 1970, or `nil` when no such process runs.
+    static func startTime(of processID: Int32) -> TimeInterval? {
+        guard processID > 0 else { return nil }
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, processID]
+        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let start = info.kp_proc.p_starttime
+        return TimeInterval(start.tv_sec) + TimeInterval(start.tv_usec) / 1_000_000
+    }
+
+    /// True only while the very process that wrote `marker` is still running.
+    static func isRunning(_ marker: ActiveRecordingMarker) -> Bool {
+        isRunning(
+            marker,
+            bootSessionID: currentBootSessionID,
+            startTimeOfProcess: startTime(of:)
+        )
+    }
+
+    static func isRunning(
+        _ marker: ActiveRecordingMarker,
+        bootSessionID: String?,
+        startTimeOfProcess: (Int32) -> TimeInterval?
+    ) -> Bool {
+        // A different boot means every process of the old one is gone.
+        if let markerBoot = marker.bootSessionID, let bootSessionID, markerBoot != bootSessionID {
+            return false
+        }
+        guard let liveStart = startTimeOfProcess(marker.processID) else { return false }
+        // The same ID with another start time is an unrelated process that reused it.
+        guard let markerStart = marker.processStartTime else { return true }
+        return abs(liveStart - markerStart) < 0.001
     }
 }
 

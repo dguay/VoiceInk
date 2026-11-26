@@ -69,7 +69,8 @@ final class AudioCleanupManager {
                     }
                 )
 
-                let transcriptions = try modelContext.fetch(descriptor)
+                // A recovered recording keeps its audio until it is transcribed or discarded.
+                let transcriptions = try modelContext.fetch(descriptor).filter { !$0.isRecoveredRecording }
 
                 // Calculate stats (can be done on any thread)
                 var fileCount = 0
@@ -122,7 +123,8 @@ final class AudioCleanupManager {
                     }
                 )
 
-                let transcriptions = try modelContext.fetch(descriptor)
+                // A recovered recording keeps its audio until it is transcribed or discarded.
+                let transcriptions = try modelContext.fetch(descriptor).filter { !$0.isRecoveredRecording }
                 var deletedCount = 0
 
                 for transcription in transcriptions {

@@ -7,6 +7,9 @@ struct ActiveRecordingMarker: Codable, Equatable {
     let audioFilePath: String
     let startedAt: Date
     let processID: Int32
+    /// Distinguishes the owner from a later process that reuses `processID`.
+    var bootSessionID: String? = nil
+    var processStartTime: TimeInterval? = nil
 
     var audioURL: URL { URL(fileURLWithPath: audioFilePath) }
 }
@@ -53,7 +56,9 @@ final class ActiveRecordingMarkerStore: @unchecked Sendable {
         let marker = ActiveRecordingMarker(
             audioFilePath: audioURL.path,
             startedAt: startedAt,
-            processID: processID
+            processID: processID,
+            bootSessionID: RecordingProcessIdentity.currentBootSessionID,
+            processStartTime: RecordingProcessIdentity.startTime(of: processID)
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601

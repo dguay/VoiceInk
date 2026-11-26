@@ -136,14 +136,12 @@ struct ActiveRecordingMarkerTests {
 
         let entries = store.entries()
         #expect(entries.count == 1)
-        #expect(
-            entries.first?.marker
-                == ActiveRecordingMarker(
-                    audioFilePath: audioURL.path,
-                    startedAt: startedAt,
-                    processID: ProcessInfo.processInfo.processIdentifier
-                )
-        )
+        let marker = try #require(entries.first?.marker)
+        #expect(marker.audioFilePath == audioURL.path)
+        #expect(marker.startedAt == startedAt)
+        #expect(marker.processID == ProcessInfo.processInfo.processIdentifier)
+        // While this process records, the marker is recognised as live.
+        #expect(RecordingProcessIdentity.isRunning(marker))
 
         tracker.recordingDidStop()
         #expect(store.entries().isEmpty)
@@ -188,11 +186,35 @@ struct ActiveRecordingMarkerTests {
         let recovered = InterruptedRecordingRecovery(
             markerStore: store,
             modelContext: context,
-            isProcessRunning: { _ in false }
+            isRecordingOwnerRunning: { _ in false }
         ).recoverInterruptedRecordings()
 
         #expect(recovered.isEmpty)
         #expect(try allTranscriptions(context).isEmpty)
+    }
+}
+
+// MARK: - Recording owner identity
+
+struct RecordingProcessIdentityTests {
+    private let marker = ActiveRecordingMarker(
+        audioFilePath: "/tmp/take.wav",
+        startedAt: Date(),
+        processID: 4_242,
+        bootSessionID: "boot-A",
+        processStartTime: 1_800_000_000
+    )
+
+    @Test func theOwningProcessIsRunningOnlyWhileItsBootAndStartTimeMatch() {
+        #expect(RecordingProcessIdentity.isRunning(marker, bootSessionID: "boot-A") { _ in 1_800_000_000 })
+        #expect(!RecordingProcessIdentity.isRunning(marker, bootSessionID: "boot-A") { _ in nil })
+    }
+
+    @Test func aProcessThatReusedTheIDAfterAForcedRestartIsNotTheOwner() {
+        // After a reboot the same ID may belong to anything, even the new VoiceInk.
+        #expect(!RecordingProcessIdentity.isRunning(marker, bootSessionID: "boot-B") { _ in 1_800_000_000 })
+        // Within one boot, an ID reused by a later process has a different start time.
+        #expect(!RecordingProcessIdentity.isRunning(marker, bootSessionID: "boot-A") { _ in 1_800_000_500 })
     }
 }
 
@@ -280,8 +302,11 @@ struct InterruptedRecordingRecoveryTests {
         let audioURL: URL
         let startedAt = Date(timeIntervalSince1970: 1_800_000_000)
 
-        func recovery(isProcessRunning: @escaping (Int32) -> Bool = { _ in false }) -> InterruptedRecordingRecovery {
-            InterruptedRecordingRecovery(markerStore: store, modelContext: context, isProcessRunning: isProcessRunning)
+        func recovery(
+            isRecordingOwnerRunning: @escaping (ActiveRecordingMarker) -> Bool = { _ in false }
+        ) -> InterruptedRecordingRecovery {
+            InterruptedRecordingRecovery(
+                markerStore: store, modelContext: context, isRecordingOwnerRunning: isRecordingOwnerRunning)
         }
     }
 
@@ -323,7 +348,7 @@ struct InterruptedRecordingRecoveryTests {
         let fixture = try makeFixture(frames: 16_000)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
-        let recovered = fixture.recovery(isProcessRunning: { $0 == exitedProcessID }).recoverInterruptedRecordings()
+        let recovered = fixture.recovery(isRecordingOwnerRunning: { $0.processID == exitedProcessID }).recoverInterruptedRecordings()
 
         #expect(recovered.isEmpty)
         #expect(fixture.store.entries().count == 1)

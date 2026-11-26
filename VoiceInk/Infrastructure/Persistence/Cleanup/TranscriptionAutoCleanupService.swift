@@ -139,14 +139,13 @@ final class TranscriptionAutoCleanupService {
 @ModelActor
 private actor TranscriptionCleanupWorker {
     func sweepOldTranscriptions(before cutoffDate: Date) throws -> Int {
-        let recoveredStatus: String? = TranscriptionStatus.recovered.rawValue
         let descriptor = FetchDescriptor<Transcription>(
             predicate: #Predicate<Transcription> { transcription in
-                // A recovered recording waits for the user to transcribe or discard it.
-                transcription.timestamp < cutoffDate && transcription.transcriptionStatus != recoveredStatus
+                transcription.timestamp < cutoffDate
             }
         )
-        let transcriptions = try modelContext.fetch(descriptor)
+        // A recovered recording waits for the user to transcribe or discard it.
+        let transcriptions = try modelContext.fetch(descriptor).filter { !$0.isRecoveredRecording }
 
         for transcription in transcriptions {
             if let urlString = transcription.audioFileURL,
