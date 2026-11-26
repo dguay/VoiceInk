@@ -196,6 +196,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
         static let sparkleAutomaticChecks = "SUEnableAutomaticChecks"
         static let notifiedCandidateCommits = "VoiceInkForkUpdaterNotifiedCandidateCommits"
         static let activeFailureNotification = "VoiceInkForkUpdaterActiveFailureNotification"
+        static let notifiedAndroidAppNotice = "VoiceInkForkUpdaterNotifiedAndroidAppNotice"
     }
 
     private let defaults: UserDefaults
@@ -509,6 +510,7 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
             state.restartMessage = nil
             defaults.removeObject(forKey: DefaultsKey.activeFailureNotification)
             notifyCandidateIfNeeded(candidate)
+            notifyAndroidAppNoticeIfNeeded(candidate)
         case .preparationFailed(let failure):
             state.stagedUpdate = nil
             state.isPresentingStagedUpdate = false
@@ -600,6 +602,24 @@ final class UpdaterViewModel: ObservableObject, UpdaterModule {
                 self?.showStagedUpdate()
                 self?.windowPresenter.showMainWindow()
             }
+        )
+    }
+
+    /// The helper includes the notice only the first time it reports it, so it
+    /// is announced once; it never blocks the Mac update.
+    private func notifyAndroidAppNoticeIfNeeded(_ candidate: StagedForkCandidate) {
+        guard let notice = candidate.androidAppNotice, !notice.isEmpty else { return }
+        let identifier = "android-app-\(candidate.forkCommit)-\(candidate.preparedAt.timeIntervalSince1970)"
+        guard defaults.string(forKey: DefaultsKey.notifiedAndroidAppNotice) != identifier else { return }
+        defaults.set(identifier, forKey: DefaultsKey.notifiedAndroidAppNotice)
+        notificationDeliverer.deliver(
+            ForkUpdateUserNotification(
+                identifier: identifier,
+                kind: .androidAppNotice,
+                title: notice,
+                actionLabel: "Open Logs"
+            ),
+            action: { [weak self] in self?.openUpdateLogsFromNotification() }
         )
     }
 
