@@ -93,7 +93,8 @@ struct HistoryDetailActionBar: View {
             }
         }
         .buttonStyle(.plain)
-        .disabled(isWorking)
+        // A recovered recording has no transcript to enhance until it is transcribed.
+        .disabled(isWorking || transcription.isRecoveredRecording)
         .popover(isPresented: $isShowingPrompts, arrowEdge: .bottom) {
             promptPopover
         }
@@ -130,7 +131,9 @@ struct HistoryDetailActionBar: View {
     private var retryButton: some View {
         HistoryIconButton(
             systemName: "arrow.clockwise",
-            help: "Retranscribe with the selected mode",
+            help: transcription.isRecoveredRecording
+                ? "Transcribe with the selected mode"
+                : "Retranscribe with the selected mode",
             isLoading: isWorking
         ) {
             guard let selectedMode else {
@@ -258,7 +261,8 @@ struct HistoryDetailActionBar: View {
                 let result = try await service.retranscribeAudio(
                     from: audioURL,
                     using: configuration.model,
-                    mode: mode
+                    mode: mode,
+                    updating: transcription.isRecoveredRecording ? transcription : nil
                 )
                 await MainActor.run {
                     isWorking = false

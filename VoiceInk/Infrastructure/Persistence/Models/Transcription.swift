@@ -6,6 +6,8 @@ enum TranscriptionStatus: String, Codable {
     case completed
     case failed
     case canceled
+    /// Audio saved from a recording that was interrupted and not transcribed yet.
+    case recovered
 }
 
 /// Where the audio of a transcription came from. `nil` in the store means the Mac itself.
@@ -16,6 +18,8 @@ enum TranscriptionSource: String, Codable {
 @Model
 final class Transcription {
     static let canceledTranscriptionText = "The transcription was canceled."
+    static let recoveredTranscriptionText =
+        "Recovered recording. VoiceInk quit before this recording finished, so it has not been transcribed yet."
 
     var id: UUID = UUID()
     var text: String = ""
@@ -72,6 +76,10 @@ final class Transcription {
         self.modeEmoji = modeEmoji
         self.transcriptionStatus = transcriptionStatus.rawValue
         self.source = source?.rawValue
+    }
+
+    var isRecoveredRecording: Bool {
+        transcriptionStatus == TranscriptionStatus.recovered.rawValue
     }
 
     var transcriptionSource: TranscriptionSource? {

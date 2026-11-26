@@ -144,7 +144,8 @@ private actor TranscriptionCleanupWorker {
                 transcription.timestamp < cutoffDate
             }
         )
-        let transcriptions = try modelContext.fetch(descriptor)
+        // A recovered recording waits for the user to transcribe or discard it.
+        let transcriptions = try modelContext.fetch(descriptor).filter { !$0.isRecoveredRecording }
 
         for transcription in transcriptions {
             if let urlString = transcription.audioFileURL,

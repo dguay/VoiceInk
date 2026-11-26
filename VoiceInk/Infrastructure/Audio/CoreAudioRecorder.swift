@@ -35,6 +35,11 @@ final class CoreAudioRecorder: @unchecked Sendable {
     private var isAudioUnitInitialized = false
     private var currentDeviceID: AudioDeviceID = 0
     private var recordingURL: URL?
+    // Flushes written samples to disk while recording so a forced restart keeps them.
+    // Used only on audioProcessingQueue once recording starts.
+    private var checkpointFileDescriptor: Int32 = -1
+    private var lastCheckpointTime: UInt64 = 0
+    private let checkpointIntervalNanoseconds: UInt64 = 2_000_000_000
 
     // Device format (what the hardware provides)
     private var deviceFormat = AudioStreamBasicDescription()
@@ -656,6 +661,8 @@ final class CoreAudioRecorder: @unchecked Sendable {
         }
 
         audioFile = fileRef
+        checkpointFileDescriptor = open(url.path, O_RDONLY)
+        lastCheckpointTime = DispatchTime.now().uptimeNanoseconds
 
         // Set client format (what we'll write)
         status = ExtAudioFileSetProperty(
@@ -752,6 +759,10 @@ final class CoreAudioRecorder: @unchecked Sendable {
         if let file = audioFile {
             ExtAudioFileDispose(file)
             audioFile = nil
+        }
+        if checkpointFileDescriptor >= 0 {
+            close(checkpointFileDescriptor)
+            checkpointFileDescriptor = -1
         }
     }
 
@@ -1106,12 +1117,25 @@ final class CoreAudioRecorder: @unchecked Sendable {
         if writeStatus != noErr {
             logger.error("🎙️ ExtAudioFileWrite failed with status: \(writeStatus, privacy: .public)")
         }
+        checkpointRecordingIfDue()
 
         // Send the same PCM data to the streaming callback if set.
         if let audioChunk = onAudioChunk {
             let byteCount = Int(outputFrameCount) * MemoryLayout<Int16>.size
             let data = Data(bytes: outputBuffer, count: byteCount)
             audioChunk(data)
+        }
+    }
+
+    /// Samples reach the file on every write; this makes them durable across a
+    /// forced restart. The header is repaired by recovery, not here.
+    private func checkpointRecordingIfDue() {
+        guard checkpointFileDescriptor >= 0 else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now - lastCheckpointTime >= checkpointIntervalNanoseconds else { return }
+        lastCheckpointTime = now
+        if fsync(checkpointFileDescriptor) != 0 {
+            logger.warning("🎙️ Recording checkpoint fsync failed errno=\(errno, privacy: .public)")
         }
     }
 

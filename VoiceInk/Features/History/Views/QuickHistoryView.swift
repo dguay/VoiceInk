@@ -108,7 +108,11 @@ struct QuickHistoryView: View {
                 },
                 onTranscriptionUpdated: { viewModel.reload(selecting: $0) },
                 presentation: .quickPanel,
-                onPaste: { onPaste(transcription) }
+                onPaste: { onPaste(transcription) },
+                onDiscarded: {
+                    viewModel.isShowingDetail = false
+                    viewModel.reload()
+                }
             )
         }
     }

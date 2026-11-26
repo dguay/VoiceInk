@@ -24,6 +24,8 @@ class Recorder: NSObject, ObservableObject {
     private let smoothedValuesLock = NSLock()
     private var smoothedAverage: Float = 0
     private var smoothedPeak: Float = 0
+    /// Marks the in-progress recording on disk so a crash can be recovered on next launch.
+    private let activeRecordingSession: ActiveRecordingSessionTracker
 
     /// Audio chunk callback for streaming. Can be updated while recording;
     /// changes are forwarded to the live CoreAudioRecorder.
@@ -37,7 +39,8 @@ class Recorder: NSObject, ObservableObject {
         case audioSystemNotRunning
     }
 
-    override init() {
+    init(activeRecordingSession: ActiveRecordingSessionTracker = ActiveRecordingSessionTracker()) {
+        self.activeRecordingSession = activeRecordingSession
         super.init()
         lifecycleCancellable = LifecycleObserver.shared.publisher(
             for: [.audioDeviceChanged, .systemWillSleep, .systemDidWake]
@@ -91,6 +94,7 @@ class Recorder: NSObject, ObservableObject {
             }
 
             deviceManager.recordingDidStart(deviceID: deviceID)
+            activeRecordingSession.recordingDidStart(audioURL: url)
             showRecordingDeviceNotification(for: deviceID)
             resetAudioMeter()
         } catch {
@@ -122,6 +126,8 @@ class Recorder: NSObject, ObservableObject {
                 continuation.resume()
             }
         }
+        // The file is closed with a valid header, so it no longer needs recovery.
+        activeRecordingSession.recordingDidStop()
         guard self.playbackSessionID == playbackSessionID else { return }
         onAudioChunk = nil
 
