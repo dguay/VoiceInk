@@ -84,7 +84,33 @@ replace it with the release build. Do this once:
 3. Open VoiceInk Keyboard and redo the setup steps below: pair again, allow the microphone, turn
    on **VoiceInk voice**, and turn the mic bubble back on.
 
-After that, `adb install -r` with a release APK built on any of your Macs updates the app in place.
+After that, `adb install -r` with a release APK built on any of your Macs updates the app in place,
+or the phone updates itself from the Mac (see [Update from the Mac](#update-from-the-mac)).
+
+### Update from the Mac
+
+The phone can update the app from its paired Mac, without adb. The Mac offers the APK bundled in
+its own VoiceInk app, so the phone always gets the keyboard that belongs to the installed Mac
+build (and follows it if the Mac app is rolled back). `build-release.sh` writes
+`VoiceInkKeyboard.json` (`applicationId`, `versionCode`, `versionName`, the values Gradle built the
+APK with) next to `app-release.apk`. Copy both into
+`VoiceInk.app/Contents/Resources/AndroidKeyboard/` as `VoiceInkKeyboard.apk` and
+`VoiceInkKeyboard.json`. A Mac app without them offers nothing.
+
+- **Checking**: when the setup screen opens (and after pairing), the app checks the Mac's status
+  and asks `GET /v1/app-update`. Only a greater `versionCode` than the installed one is offered:
+  the screen then shows **Update available** with the Mac's version. The same or an older version,
+  a Mac without an APK or an unreachable Mac shows nothing, and dictation is never affected.
+- **Install permission**: the first time, Android must allow VoiceInk Keyboard to install apps.
+  The screen explains why and **Allow installing updates** opens the system setting (*Install
+  unknown apps*); turn on *Allow from this source* and come back. The update then continues.
+- **Installing**: **Download and install** downloads the APK into the app's private storage and
+  checks it against the size and SHA-256 the Mac advertised. A damaged or truncated download is
+  deleted and nothing is installed. A good one goes to the system package installer: confirm its
+  prompt. The download is removed after the install attempt.
+- **What is kept**: the update is an in-place upgrade signed with the same release key, so the
+  pairing, the settings, the keyboard and the mic bubble's accessibility service stay on. A debug
+  build cannot be updated by a release APK this way (do the one-time move above first).
 
 ## Install on your phone
 
@@ -207,4 +233,5 @@ field back to your usual keyboard right after typing and cannot see later edits.
 | `ime/VoiceKeyboardService.kt` | The keyboard (input method service). |
 | `bubble/` | The mic bubble: accessibility service, overlay window, its visibility, field and placement rules, and the correction watcher. |
 | `corrections/` | When a dictated field is done with, and which window of it is sent for Auto-Learn (pure, unit-tested rules). |
-| `setup/MainActivity.kt` | Pairing and keyboard setup screen. |
+| `setup/MainActivity.kt` | Pairing and keyboard setup screen, including **Update available**. |
+| `update/` | Updating from the Mac: which version to offer and the download check (pure, unit-tested), and the system package installer session. |

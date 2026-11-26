@@ -33,6 +33,9 @@ final class PhoneDictationController: ObservableObject {
     private var pipeline: AudioFileTranscriptionPipeline?
     private var engine: VoiceInkEngine?
     private var correctionIntake: PhoneDictationCorrectionIntake?
+    /// The Android keyboard APK bundled in this app, offered to the phone as an update. Shared by
+    /// every server instance so its hash is computed once.
+    private let appUpdate = PhoneDictationAppUpdateSource()
     private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "PhoneDictation")
 
     init(
@@ -126,7 +129,8 @@ final class PhoneDictationController: ObservableObject {
 
         server?.stop()
         let server = PhoneDictationServer(
-            tokenStore: tokenStore, handlers: withCorrections(makeHandlers()), queue: requestQueue)
+            tokenStore: tokenStore, handlers: withCorrections(makeHandlers()), queue: requestQueue,
+            appUpdate: appUpdate)
         server.onFailure = { [weak self, weak server] error in
             guard let self, let server, self.server === server else { return }
             self.serverState = .failed(error.localizedDescription)

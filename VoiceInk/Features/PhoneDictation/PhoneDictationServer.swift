@@ -50,6 +50,7 @@ final class PhoneDictationRouter: @unchecked Sendable {
     private let handlers: PhoneDictationHandlers
     private let maxBodyBytes: Int
     private let queue: PhoneDictationSerialQueue
+    private let appUpdate: PhoneDictationAppUpdateSource
     private let lock = NSLock()
     /// Bumped on every stop, so requests admitted before a stop never start afterwards.
     private var generation: UInt64 = 0
@@ -59,12 +60,14 @@ final class PhoneDictationRouter: @unchecked Sendable {
         tokenStore: PhoneDictationTokenStore,
         handlers: PhoneDictationHandlers,
         maxBodyBytes: Int,
-        queue: PhoneDictationSerialQueue = PhoneDictationSerialQueue()
+        queue: PhoneDictationSerialQueue = PhoneDictationSerialQueue(),
+        appUpdate: PhoneDictationAppUpdateSource = PhoneDictationAppUpdateSource()
     ) {
         self.tokenStore = tokenStore
         self.handlers = handlers
         self.maxBodyBytes = maxBodyBytes
         self.queue = queue
+        self.appUpdate = appUpdate
     }
 
     /// Drops requests that are queued but not yet transcribing.
@@ -82,7 +85,7 @@ final class PhoneDictationRouter: @unchecked Sendable {
 
     func decide(_ head: PhoneDictationHTTPRequestHead) -> HeadDecision {
         switch head.path {
-        case PhoneDictationAPI.statusPath:
+        case PhoneDictationAPI.statusPath, PhoneDictationAPI.appUpdatePath, PhoneDictationAPI.appUpdateAPKPath:
             guard head.method == "GET" else { return .respond(.error(.methodNotAllowed)) }
             guard tokenStore.isValid(head.bearerToken) else { return .respond(.error(.unauthorized)) }
             return .respondAfterBody(length: 0)
@@ -139,6 +142,13 @@ final class PhoneDictationRouter: @unchecked Sendable {
         if head.path == PhoneDictationAPI.correctionsPath {
             return await correction(body: body)
         }
+        // Not queued either: reading the bundled APK never waits for a transcription.
+        if head.path == PhoneDictationAPI.appUpdatePath {
+            return appUpdateMetadata()
+        }
+        if head.path == PhoneDictationAPI.appUpdateAPKPath {
+            return appUpdateAPK()
+        }
         guard head.path == PhoneDictationAPI.transcribePath, let fileExtension else {
             return await status()
         }
@@ -162,6 +172,20 @@ final class PhoneDictationRouter: @unchecked Sendable {
                     apiVersion: PhoneDictationAPI.version, status: "ready", model: model, mode: mode))
         case .noModelSelected:
             return .error(.noModelSelected)
+        }
+    }
+
+    private func appUpdateMetadata() -> PhoneDictationHTTPResponse {
+        switch appUpdate.metadata() {
+        case .success(let body): return .json(body)
+        case .failure: return .error(.appUpdateUnavailable)
+        }
+    }
+
+    private func appUpdateAPK() -> PhoneDictationHTTPResponse {
+        switch appUpdate.apk() {
+        case .success(let apk): return .file(apk.data, contentType: PhoneDictationAPI.apkContentType)
+        case .failure: return .error(.appUpdateUnavailable)
         }
     }
 
@@ -247,10 +271,12 @@ final class PhoneDictationServer: @unchecked Sendable {
         handlers: PhoneDictationHandlers,
         maxBodyBytes: Int = PhoneDictationAPI.maxBodyBytes,
         requestTimeout: TimeInterval = 300,
-        queue: PhoneDictationSerialQueue = PhoneDictationSerialQueue()
+        queue: PhoneDictationSerialQueue = PhoneDictationSerialQueue(),
+        appUpdate: PhoneDictationAppUpdateSource = PhoneDictationAppUpdateSource()
     ) {
         self.router = PhoneDictationRouter(
-            tokenStore: tokenStore, handlers: handlers, maxBodyBytes: maxBodyBytes, queue: queue)
+            tokenStore: tokenStore, handlers: handlers, maxBodyBytes: maxBodyBytes, queue: queue,
+            appUpdate: appUpdate)
         self.requestTimeout = requestTimeout
     }
 

@@ -6,6 +6,12 @@ enum PhoneDictationAPI {
     static let statusPath = "/v1/status"
     static let transcribePath = "/v1/transcribe"
     static let correctionsPath = "/v1/corrections"
+    /// The Android keyboard APK bundled in the Mac app: its version, size and SHA-256.
+    static let appUpdatePath = "/v1/app-update"
+    /// The bytes of that APK.
+    static let appUpdateAPKPath = "/v1/app-update/apk"
+    static let apkContentType = "application/vnd.android.package-archive"
+    static let jsonContentType = "application/json; charset=utf-8"
     /// Largest accepted request body.
     static let maxBodyBytes = 64 * 1024 * 1024
     /// Largest accepted request line plus headers.
@@ -70,6 +76,7 @@ enum PhoneDictationErrorCode: String, Codable, Equatable {
     case methodNotAllowed = "method_not_allowed"
     case unknownDictation = "unknown_dictation"
     case notPhoneDictation = "not_phone_dictation"
+    case appUpdateUnavailable = "app_update_unavailable"
 
     var httpStatus: Int {
         switch self {
@@ -84,6 +91,7 @@ enum PhoneDictationErrorCode: String, Codable, Equatable {
         case .methodNotAllowed: return 405
         case .unknownDictation: return 404
         case .notPhoneDictation: return 409
+        case .appUpdateUnavailable: return 404
         }
     }
 
@@ -100,6 +108,7 @@ enum PhoneDictationErrorCode: String, Codable, Equatable {
         case .methodNotAllowed: return "Method not allowed for this endpoint."
         case .unknownDictation: return "No dictation with this id is in History."
         case .notPhoneDictation: return "This dictation did not come from the phone."
+        case .appUpdateUnavailable: return "This Mac has no VoiceInk Keyboard app to offer."
         }
     }
 }
@@ -180,6 +189,18 @@ struct PhoneDictationHTTPRequestHead: Equatable {
 struct PhoneDictationHTTPResponse: Equatable {
     let status: Int
     let body: Data
+    let contentType: String
+
+    init(status: Int, body: Data, contentType: String = PhoneDictationAPI.jsonContentType) {
+        self.status = status
+        self.body = body
+        self.contentType = contentType
+    }
+
+    /// A binary `200`, such as the bundled APK.
+    static func file(_ data: Data, contentType: String) -> PhoneDictationHTTPResponse {
+        PhoneDictationHTTPResponse(status: 200, body: data, contentType: contentType)
+    }
 
     static func json<T: Encodable>(_ value: T, status: Int = 200) -> PhoneDictationHTTPResponse {
         let encoder = JSONEncoder()
@@ -198,7 +219,7 @@ struct PhoneDictationHTTPResponse: Equatable {
     /// The full HTTP/1.1 message; every response closes the connection.
     func serialized() -> Data {
         var head = "HTTP/1.1 \(status) \(Self.reasonPhrase(status))\r\n"
-        head += "Content-Type: application/json; charset=utf-8\r\n"
+        head += "Content-Type: \(contentType)\r\n"
         head += "Content-Length: \(body.count)\r\n"
         head += "Cache-Control: no-store\r\n"
         head += "Connection: close\r\n"
