@@ -1,8 +1,8 @@
 # Phone dictation API (v1)
 
 VoiceInk on the Mac can act as the dictation engine for a paired phone. The phone uploads a
-recording and receives the finished text: the selected mode's transcription model, dictionary,
-word replacements and AI cleanup, exactly as **Transcribe Audio** produces it. Every result is
+recording and receives the finished text: the transcription model, dictionary,
+word replacements and AI cleanup of the mode chosen for the phone (see [Mode resolution](#mode-resolution)), as **Transcribe Audio** produces it. Every result is
 also saved to the Mac's History, marked as coming from the phone.
 
 The server only runs while **Settings → Phone Dictation → Allow Phone Dictation** is on. It stops
@@ -58,9 +58,9 @@ Answers whether the token is valid and the Mac is ready to transcribe.
 | `apiVersion` | integer | Server API version. |
 | `status` | string | Always `"ready"` on `200`. |
 | `model` | string | Display name of the transcription model that will be used. |
-| `mode` | string or null | Name of the mode whose settings apply. |
+| `mode` | string or null | Name of the mode a transcription without `app` would use (see [Mode resolution](#mode-resolution)). |
 
-When no usable transcription model is selected for the current mode: `503` with
+When no usable transcription model is selected for that mode: `503` with
 `no_model_selected` (see [Errors](#errors)).
 
 ## `POST /v1/transcribe`
@@ -94,6 +94,43 @@ Request:
 Accepted `format` values: `wav`, `mp3`, `m4a`, `aiff`, `mp4`, `mov`, `aac`, `flac`, `caf`,
 `amr`, `ogg`, `oga`, `opus`, `3gp`. Any other `format` or type gets `415`.
 
+Optional query parameters describe where the text goes. Both are additive in v1: a request
+without them works as before.
+
+| Parameter | Values | Meaning |
+|---|---|---|
+| `app` | Android package name, e.g. `com.whatsapp` | The app being typed into. Picks the mode (see [Mode resolution](#mode-resolution)) and is shown in the Mac's History next to the "From phone" mark. |
+| `field` | `text`, `email`, `url`, `number`, `other` | The kind of field being typed into. |
+
+Validation:
+
+- `app` must look like an Android package name: at most 255 characters, dot-separated segments
+  of ASCII letters, digits and underscores, each starting with a letter (`android` and
+  `com.google.android.gm` are valid). Any other value (empty, too long, spaces, a leading digit,
+  an empty segment) is ignored: the request runs and is saved as if it had no `app`. It never
+  fails the request.
+- `field` is case-insensitive. An unknown value (including an empty one) is treated as `other`.
+  A missing `field` is treated like `text`.
+
+`email`, `url` and `number` fields get the transcription after the output filter, dictionary
+and word replacements, with no AI cleanup and no paragraph formatting, even when the mode turns
+them on, so nothing rewrites what was spelled out. `text`, `other` and a missing `field` get the
+mode's full processing.
+
+The Android client derives `field` from the field's `inputType`: email address variations are
+`email`, URI is `url`, number and phone classes are `number`, password and date/time fields are
+`other`, every other text variation is `text`.
+
+### Mode resolution
+
+The phone, not the Mac, decides which mode applies. The Mac's own active mode (picked for its
+frontmost app or website, or selected by hand) is never used for a phone request. The mode is:
+
+1. an enabled mode with an Android app rule matching `app` (Android app rules are planned; until
+   they exist this step never matches),
+2. otherwise the enabled **Default** mode,
+3. otherwise the first enabled mode.
+
 Requests are processed one at a time, in the order their uploads complete; a request that
 arrives while another is transcribing waits. Turning the option off drops waiting requests; a
 transcription already running finishes and is saved to History. Set a generous read timeout (transcription and AI cleanup can take a while
@@ -114,21 +151,73 @@ for long recordings).
 
 | Field | Type | Meaning |
 |---|---|---|
-| `text` | string | The final text: the AI-cleaned text when AI cleanup ran and succeeded, otherwise the transcription after dictionary and word replacements. |
+| `text` | string | The final text: the AI-cleaned text when AI cleanup ran and succeeded, otherwise the transcription after dictionary and word replacements (always so for `email`, `url` and `number` fields). |
 | `id` | string (UUID) | ID of the History entry on the Mac. |
 | `durationSeconds` | number | Length of the recording. |
 | `model` | string or null | Transcription model used. |
-| `mode` | string or null | Mode whose settings were applied. |
+| `mode` | string or null | Mode whose settings were applied, resolved as in [Mode resolution](#mode-resolution). |
 | `enhancementError` | string or null | Why AI cleanup failed, when it was attempted and failed; `text` is then the un-cleaned text. |
 
 Example:
 
 ```sh
-curl -sS -X POST "http://192.168.1.20:47821/v1/transcribe" \
+curl -sS -X POST "http://192.168.1.20:47821/v1/transcribe?app=com.google.android.gm&field=email" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: audio/mp4" \
   --data-binary @recording.m4a
 ```
+
+## `POST /v1/corrections`
+
+Lets Auto-Learn learn from a phone dictation corrected on the phone. The phone watches the field it
+typed a dictation into and, when the user leaves it, sends what the field looked like right after
+the dictation and when it was left. The Mac runs it through the same Auto-Learn pipeline as a
+dictation pasted and corrected on the Mac (same correction diff, pending queue, review and
+thresholds). While Auto-Learn is off the request is accepted and nothing is queued.
+
+Request:
+
+- `Content-Type: application/json`, `Content-Length` required (chunked uploads get `411`).
+- Maximum body size: 256 KiB (262 144 bytes). Larger requests get `413` before the body is read.
+- Not queued behind transcriptions; it is answered at once.
+
+```json
+{
+  "id": "0F8B3B0C-5E43-4C1B-9B7A-2A2E8F9D1C11",
+  "insertedText": "Dictate with Parakeat today",
+  "insertStart": 6,
+  "textAfterInsert": "Note: Dictate with Parakeat today",
+  "textWhenLeft": "Note: Dictate with Parakeet today"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string (UUID) | The History `id` returned by `POST /v1/transcribe`. It must be a dictation from the phone. |
+| `insertedText` | string | The dictated text as typed into the field (not empty, at most 12 000 UTF-16 code units). |
+| `textAfterInsert` | string | A window of the field text right after the dictation was typed. |
+| `textWhenLeft` | string | The same window of the field text when the user left the field. |
+| `insertStart` | integer | Where `insertedText` starts in `textAfterInsert`, in UTF-16 code units. `textAfterInsert` must contain `insertedText` there. |
+
+Each text is at most 32 000 UTF-16 code units. Send only a window around the dictation, never the
+whole field: the Android client sends at most 200 characters before and 200 after it, cut at the
+same place in both texts, and sends nothing when text outside the window changed.
+
+`200 OK`:
+
+```json
+{ "autoLearnEnabled": true, "status": "accepted" }
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | string | Always `"accepted"` on `200`. |
+| `autoLearnEnabled` | boolean | False when Auto-Learn is off on the Mac: the snapshot was dropped. |
+
+A snapshot repeated for the same `id` (a retry after a lost response) is accepted again but
+learned from only once. Other outcomes: `400 bad_request` for malformed JSON or fields that do not
+fit together, `404 unknown_dictation` when no History entry has that `id`, and
+`409 not_phone_dictation` when the entry was not dictated on the phone.
 
 ## Errors
 
@@ -142,14 +231,16 @@ Every error has the same body:
 
 | HTTP | `code` | When |
 |---|---|---|
-| 400 | `bad_request` | Malformed request, empty body or headers over 16 KiB. |
+| 400 | `bad_request` | Malformed request, empty body or headers over 16 KiB; for `/v1/corrections`, malformed JSON or inconsistent fields. |
 | 401 | `unauthorized` | Missing or wrong bearer token (including a token that was regenerated). Re-pair. |
 | 404 | `not_found` | Unknown path. |
+| 404 | `unknown_dictation` | `/v1/corrections`: no History entry has this `id`. |
 | 405 | `method_not_allowed` | Wrong method for the path. |
+| 409 | `not_phone_dictation` | `/v1/corrections`: the History entry was not dictated on the phone. |
 | 411 | `length_required` | `Content-Length` missing, or chunked transfer encoding. |
-| 413 | `payload_too_large` | Body over 64 MiB. |
+| 413 | `payload_too_large` | Body over 64 MiB (256 KiB for `/v1/corrections`). |
 | 415 | `unsupported_media_type` | Audio format not recognised from `format` or `Content-Type`. |
 | 500 | `transcription_failed` | The audio could not be decoded or transcribed; `message` gives the reason. |
-| 503 | `no_model_selected` | No usable transcription model is selected for the current mode on the Mac. |
+| 503 | `no_model_selected` | No usable transcription model is selected for the phone's mode on the Mac. |
 
 The server closes a connection that has not delivered a complete request within 5 minutes.

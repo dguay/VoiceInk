@@ -99,6 +99,43 @@ class VoiceInkClientTest {
         assertTrue(bytes.contentEquals(received))
     }
 
+    @Test fun transcribeSendsTheAppAndFieldKind() {
+        var query: String? = null
+        var path: String? = null
+        handler = {
+            path = it.requestURI.path
+            query = it.requestURI.rawQuery
+            respond(it, 200, """{"text":"me@example.com"}""")
+        }
+
+        val result = client.transcribe(pairing(), audio(), field = FieldContext("com.google.android.gm", FieldKind.EMAIL))
+
+        assertEquals("me@example.com", (result as ApiResult.Success).value.text)
+        assertEquals("/v1/transcribe", path)
+        assertEquals("app=com.google.android.gm&field=email", query)
+    }
+
+    @Test fun transcribeWithoutContextSendsNoQuery() {
+        var query: String? = "unset"
+        handler = {
+            query = it.requestURI.rawQuery
+            respond(it, 200, """{"text":"hello"}""")
+        }
+
+        client.transcribe(pairing(), audio())
+
+        assertNull(query)
+    }
+
+    @Test fun transcribePathOmitsAMissingAppAndEncodesValues() {
+        assertEquals("/v1/transcribe", VoiceInkClient.transcribePath(null))
+        assertEquals("/v1/transcribe?field=number", VoiceInkClient.transcribePath(FieldContext(null, FieldKind.NUMBER)))
+        assertEquals(
+            "/v1/transcribe?app=com.example%26x%3Dy&field=url",
+            VoiceInkClient.transcribePath(FieldContext("com.example&x=y", FieldKind.URL)),
+        )
+    }
+
     @Test fun transcribeKeepsEnhancementError() {
         handler = { respond(it, 200, """{"text":"raw text","enhancementError":"AI provider timed out","id":null,"durationSeconds":null,"model":null,"mode":null}""") }
 
@@ -204,6 +241,44 @@ class VoiceInkClientTest {
         acceptor.join(1_000)
         assertEquals(ApiResult.Failure(ApiError.Unreachable), result)
         assertEquals(1, accepted.get())
+    }
+
+    @Test fun correctionIsPostedAsJsonWithItsLength() {
+        var path: String? = null
+        var method: String? = null
+        var contentType: String? = null
+        var contentLength: String? = null
+        var received: String? = null
+        handler = {
+            path = it.requestURI.path
+            method = it.requestMethod
+            contentType = it.requestHeaders.getFirst("Content-Type")
+            contentLength = it.requestHeaders.getFirst("Content-Length")
+            received = it.requestBody.readBytes().toString(Charsets.UTF_8)
+            respond(it, 200, """{"autoLearnEnabled":true,"status":"accepted"}""")
+        }
+        val snapshot = CorrectionSnapshot("0F8B3B0C-5E43-4C1B-9B7A-2A2E8F9D1C11", "Parakeat", "Note: Parakeat", "Note: Parakeet", 6)
+
+        val result = client.submitCorrection(pairing(), snapshot)
+
+        assertEquals(ApiResult.Success(Unit, "127.0.0.1"), result)
+        assertEquals("/v1/corrections", path)
+        assertEquals("POST", method)
+        assertEquals("application/json", contentType)
+        assertEquals(received!!.toByteArray().size.toString(), contentLength)
+        val json = org.json.JSONObject(received!!)
+        assertEquals("0F8B3B0C-5E43-4C1B-9B7A-2A2E8F9D1C11", json.getString("id"))
+        assertEquals("Note: Parakeet", json.getString("textWhenLeft"))
+        assertEquals(6, json.getInt("insertStart"))
+    }
+
+    @Test fun correctionErrorsKeepTheirCode() {
+        handler = { respond(it, 404, """{"error":{"code":"unknown_dictation","message":"No dictation."}}""") }
+
+        assertEquals(
+            ApiResult.Failure(ApiError.Server(404, "unknown_dictation", "No dictation.")),
+            client.submitCorrection(pairing(), CorrectionSnapshot("x", "a", "a", "b", 0)),
+        )
     }
 
     private fun closedPort(): Int = ServerSocket(0).use { it.localPort }

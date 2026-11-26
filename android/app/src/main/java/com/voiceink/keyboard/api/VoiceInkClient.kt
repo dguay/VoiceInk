@@ -5,8 +5,10 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 /** `GET /v1/status` on success. */
 data class MacStatus(val apiVersion: Int, val model: String, val mode: String?)
@@ -69,10 +71,25 @@ class VoiceInkClient(
         audio: File,
         contentType: String = "audio/mp4",
         preferredHost: String? = null,
+        field: FieldContext? = null,
     ): ApiResult<Transcription> =
-        request(pairing, preferredHost, "/v1/transcribe", "POST", transcribeReadTimeoutMs, Body(audio, contentType), ::parseTranscription)
+        request(pairing, preferredHost, transcribePath(field), "POST", transcribeReadTimeoutMs, Body(audio, contentType), ::parseTranscription)
 
-    private class Body(val file: File, val contentType: String)
+    /**
+     * `POST /v1/corrections`: what became of a dictation in its field, so Auto-Learn on the Mac
+     * learns from the user's corrections. Success means the Mac accepted it (it ignores it while
+     * Auto-Learn is off).
+     */
+    fun submitCorrection(pairing: Pairing, snapshot: CorrectionSnapshot, preferredHost: String? = null): ApiResult<Unit> {
+        val json = snapshot.toJson().toByteArray(Charsets.UTF_8)
+        val body = Body("application/json", json.size.toLong()) { it.write(json) }
+        return request(pairing, preferredHost, "/v1/corrections", "POST", statusReadTimeoutMs, body, ::parseCorrection)
+    }
+
+    private class Body(val contentType: String, val length: Long, val write: (OutputStream) -> Unit) {
+        constructor(file: File, contentType: String) :
+            this(contentType, file.length(), { out -> file.inputStream().use { it.copyTo(out) } })
+    }
 
     private fun <T> request(
         pairing: Pairing,
@@ -97,7 +114,7 @@ class VoiceInkClient(
                         doOutput = true
                         setRequestProperty("Content-Type", body.contentType)
                         // Fixed length: sends Content-Length (no chunking) and rules out silent replays.
-                        setFixedLengthStreamingMode(body.file.length())
+                        setFixedLengthStreamingMode(body.length)
                     }
                     connect()
                 }
@@ -125,7 +142,7 @@ class VoiceInkClient(
         host: String,
     ): ApiResult<T> {
         if (body != null) {
-            connection.outputStream.use { out -> body.file.inputStream().use { it.copyTo(out) } }
+            connection.outputStream.use(body.write)
         }
         val status = connection.responseCode
         if (status == HttpURLConnection.HTTP_OK) {
@@ -170,6 +187,16 @@ class VoiceInkClient(
             }
         }
 
+        /** `/v1/transcribe` with the optional `app` and `field` query parameters for [field]. */
+        internal fun transcribePath(field: FieldContext?): String {
+            if (field == null) return "/v1/transcribe"
+            val query = listOfNotNull(
+                field.app?.let { "app=" + URLEncoder.encode(it, "UTF-8") },
+                "field=" + field.field.wire,
+            )
+            return "/v1/transcribe?" + query.joinToString("&")
+        }
+
         internal fun orderedHosts(hosts: List<String>, preferred: String?): List<String> =
             if (preferred != null && preferred in hosts) listOf(preferred) + (hosts - preferred) else hosts
 
@@ -193,6 +220,10 @@ class VoiceInkClient(
                 mode = json.optStringOrNull("mode"),
                 enhancementError = json.optStringOrNull("enhancementError"),
             )
+        }
+
+        private fun parseCorrection(json: JSONObject) {
+            if (json.optString("status") != "accepted") throw ContractException("Correction was not accepted")
         }
 
         private fun JSONObject.optStringOrNull(key: String): String? =

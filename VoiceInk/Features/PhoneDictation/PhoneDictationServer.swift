@@ -10,8 +10,31 @@ enum PhoneDictationReadiness: Equatable {
 /// What the server needs from the app. Both closures run on the main actor.
 struct PhoneDictationHandlers {
     var readiness: @MainActor () -> PhoneDictationReadiness
-    /// Transcribes one uploaded file through the shared pipeline. The file is deleted afterwards.
-    var transcribe: @MainActor (URL) async throws -> PhoneDictationTranscribeBody
+    /// Transcribes one uploaded file through the shared pipeline, with the phone's `app` and
+    /// `field`. The file is deleted afterwards.
+    var transcribe: @MainActor (URL, PhoneDictationRequestContext) async throws -> PhoneDictationTranscribeBody
+
+    init(
+        readiness: @escaping @MainActor () -> PhoneDictationReadiness,
+        transcribe: @escaping @MainActor (URL, PhoneDictationRequestContext) async throws
+            -> PhoneDictationTranscribeBody
+    ) {
+        self.readiness = readiness
+        self.transcribe = transcribe
+    }
+
+    /// For callers that do not need the request context.
+    init(
+        readiness: @escaping @MainActor () -> PhoneDictationReadiness,
+        transcribe: @escaping @MainActor (URL) async throws -> PhoneDictationTranscribeBody
+    ) {
+        self.init(readiness: readiness, transcribe: { url, _ in try await transcribe(url) })
+    }
+
+    /// Takes a correction snapshot for a History entry (`POST /v1/corrections`).
+    var submitCorrection: @MainActor (PhoneDictationCorrectionRequest) async -> PhoneDictationCorrectionOutcome = {
+        _ in .unknownDictation
+    }
 }
 
 /// Routes parsed requests. Authorization and size checks happen on the head alone, so a rejected
@@ -81,9 +104,28 @@ final class PhoneDictationRouter: @unchecked Sendable {
                 return .respond(.error(.unsupportedMediaType))
             }
             return .readBody(length: length, fileExtension: fileExtension)
+        case PhoneDictationAPI.correctionsPath:
+            return decideCorrection(head)
         default:
             return .respond(.error(.notFound))
         }
+    }
+
+    /// A correction is small JSON; its size is bounded on the head, before any body is read.
+    private func decideCorrection(_ head: PhoneDictationHTTPRequestHead) -> HeadDecision {
+        guard head.method == "POST" else { return .respond(.error(.methodNotAllowed)) }
+        guard tokenStore.isValid(head.bearerToken) else { return .respond(.error(.unauthorized)) }
+        if let transferEncoding = head.headers["transfer-encoding"], transferEncoding.lowercased() != "identity" {
+            return .respond(.error(.lengthRequired))
+        }
+        guard let length = head.contentLength else { return .respond(.error(.lengthRequired)) }
+        guard length <= PhoneDictationAPI.maxCorrectionBodyBytes else {
+            return .respond(.error(
+                .payloadTooLarge,
+                message: "The correction is larger than \(PhoneDictationAPI.maxCorrectionBodyBytes) bytes."))
+        }
+        guard length > 0 else { return .respond(.error(.badRequest, message: "The request has no body.")) }
+        return .readBody(length: length, fileExtension: "json")
     }
 
     /// Answers a request whose head `decide` accepted.
@@ -93,6 +135,10 @@ final class PhoneDictationRouter: @unchecked Sendable {
         // A token regenerated while the upload was in flight is already invalid.
         guard tokenStore.isValid(head.bearerToken) else { return .error(.unauthorized) }
 
+        // Not queued behind transcriptions: a correction is quick and must not wait minutes.
+        if head.path == PhoneDictationAPI.correctionsPath {
+            return await correction(body: body)
+        }
         guard head.path == PhoneDictationAPI.transcribePath, let fileExtension else {
             return await status()
         }
@@ -101,7 +147,9 @@ final class PhoneDictationRouter: @unchecked Sendable {
             guard currentGeneration == admitted else {
                 return .error(.transcriptionFailed, message: "Phone dictation was turned off.")
             }
-            return await transcribe(token: head.bearerToken, body: body, fileExtension: fileExtension)
+            return await transcribe(
+                token: head.bearerToken, body: body, fileExtension: fileExtension,
+                context: PhoneDictationRequestContext(query: head.query))
         }
     }
 
@@ -118,7 +166,19 @@ final class PhoneDictationRouter: @unchecked Sendable {
     }
 
     @MainActor
-    private func transcribe(token: String?, body: Data, fileExtension: String) async -> PhoneDictationHTTPResponse {
+    private func correction(body: Data) async -> PhoneDictationHTTPResponse {
+        switch PhoneDictationCorrectionRequest.decode(body) {
+        case .failure(let error):
+            return .error(.badRequest, message: error.message)
+        case .success(let request):
+            return await handlers.submitCorrection(request).response
+        }
+    }
+
+    @MainActor
+    private func transcribe(
+        token: String?, body: Data, fileExtension: String, context: PhoneDictationRequestContext
+    ) async -> PhoneDictationHTTPResponse {
         // Queued requests are re-checked when their turn comes.
         guard tokenStore.isValid(token) else { return .error(.unauthorized) }
         if case .noModelSelected = handlers.readiness() {
@@ -132,7 +192,7 @@ final class PhoneDictationRouter: @unchecked Sendable {
 
         do {
             try body.write(to: uploadURL, options: .atomic)
-            let result = try await handlers.transcribe(uploadURL)
+            let result = try await handlers.transcribe(uploadURL, context)
             return .json(result)
         } catch TranscriptionError.noModelSelected {
             return .error(.noModelSelected)
@@ -345,6 +405,9 @@ final class PhoneDictationConnection: @unchecked Sendable {
     private var buffer = Data()
     private var timeout: DispatchWorkItem?
     private var isClosed = false
+    /// When the connection started, to log how long the upload took to arrive.
+    private var startedAt = ContinuousClock.now
+    private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "PhoneDictation")
 
     private static let headTerminator = Data("\r\n\r\n".utf8)
     private static let readChunk = 1024 * 1024
@@ -368,6 +431,7 @@ final class PhoneDictationConnection: @unchecked Sendable {
         let timeout = DispatchWorkItem { [weak self] in self?.close() }
         self.timeout = timeout
         queue.asyncAfter(deadline: .now() + requestTimeout, execute: timeout)
+        startedAt = ContinuousClock.now
         connection.start(queue: queue)
         receiveHead()
     }
@@ -427,6 +491,11 @@ final class PhoneDictationConnection: @unchecked Sendable {
     private func receiveBody(head: PhoneDictationHTTPRequestHead, length: Int, fileExtension: String) {
         if buffer.count >= length {
             let body = buffer.prefix(length)
+            // Size and time only, never the audio.
+            let receiveSeconds = startedAt.duration(to: .now).timeInterval
+            logger.notice(
+                "Phone dictation upload received: \(length, privacy: .public) bytes in \(receiveSeconds, format: .fixed(precision: 3), privacy: .public)s"
+            )
             buffer = Data()
             dispatch(head: head, body: Data(body), fileExtension: fileExtension)
             return

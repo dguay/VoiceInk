@@ -342,6 +342,24 @@ actor AutoLearnService {
         await suggestionsDidChange([])
     }
 
+    /// Learns from a field observed outside this Mac (a phone dictation corrected on the phone),
+    /// through the same diff, pending queue and review as a paste observed here. Returns false,
+    /// without queueing anything, when Auto-Learn is off or busy repairing its data.
+    @discardableResult
+    func learnFromExternalSnapshot(_ snapshot: AutoLearnFieldSnapshot) async -> Bool {
+        guard isEnabled, !isRepairingData else { return false }
+        do {
+            try await prepareForReview()
+        } catch {
+            AutoLearnSettings.recordFailure(error, defaults: defaults)
+            log(error, message: "Failed to prepare Auto Learn for a phone correction")
+            return false
+        }
+        guard isEnabled, !isRepairingData else { return false }
+        await persistSnapshot(snapshot)
+        return true
+    }
+
     func focusMayHaveChanged(token: AutoLearnPasteToken) {
         guard isEnabled, activeToken == token else { return }
         focusFinalizationTask?.cancel()

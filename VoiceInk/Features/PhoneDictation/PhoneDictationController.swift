@@ -32,6 +32,7 @@ final class PhoneDictationController: ObservableObject {
     private var startGeneration: UInt64 = 0
     private var pipeline: AudioFileTranscriptionPipeline?
     private var engine: VoiceInkEngine?
+    private var correctionIntake: PhoneDictationCorrectionIntake?
     private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "PhoneDictation")
 
     init(
@@ -53,7 +54,11 @@ final class PhoneDictationController: ObservableObject {
 
     func configure(modelContext: ModelContext, engine: VoiceInkEngine) {
         self.engine = engine
-        self.pipeline = AudioFileTranscriptionPipeline(modelContext: modelContext, engine: engine)
+        // Phone requests keep their own warm transcriber, separate from the Mac dictation's
+        // (see WarmAudioFileTranscriber), so only the first request pays the model load.
+        self.pipeline = AudioFileTranscriptionPipeline(
+            modelContext: modelContext, engine: engine, keepsTranscriberWarm: true)
+        self.correctionIntake = PhoneDictationCorrectionIntake(modelContext: modelContext)
         if isEnabled {
             startServer()
         }
@@ -121,7 +126,7 @@ final class PhoneDictationController: ObservableObject {
 
         server?.stop()
         let server = PhoneDictationServer(
-            tokenStore: tokenStore, handlers: makeHandlers(), queue: requestQueue)
+            tokenStore: tokenStore, handlers: withCorrections(makeHandlers()), queue: requestQueue)
         server.onFailure = { [weak self, weak server] error in
             guard let self, let server, self.server === server else { return }
             self.serverState = .failed(error.localizedDescription)
@@ -155,6 +160,10 @@ final class PhoneDictationController: ObservableObject {
         server?.stop()
         server = nil
         serverState = .stopped
+        // Free the warm model while the server is stopped; a running request keeps it until done.
+        if let pipeline {
+            Task { @MainActor in await pipeline.releaseWarmTranscriber() }
+        }
     }
 
     private func makeHandlers() -> PhoneDictationHandlers {
@@ -163,22 +172,46 @@ final class PhoneDictationController: ObservableObject {
                 guard let configuration = self?.currentConfiguration() else { return .noModelSelected }
                 return .ready(model: configuration.model.displayName, mode: configuration.mode.name)
             },
-            transcribe: { [weak self] audioURL in
+            transcribe: { [weak self] audioURL, context in
                 guard let self, let pipeline = self.pipeline,
-                    let mode = ModeManager.shared.currentEffectiveConfiguration
+                    let mode = Self.phoneMode(forApp: context.app)
                 else {
                     throw TranscriptionError.noModelSelected
                 }
                 FileTranscriptionActivity.shared.begin()
                 defer { FileTranscriptionActivity.shared.end() }
-                let result = try await pipeline.transcribe(audioURL: audioURL, mode: mode, source: .phone)
+                let result = try await pipeline.transcribe(
+                    audioURL: audioURL, mode: mode, source: .phone,
+                    options: Self.transcriptionOptions(for: context))
                 return Self.responseBody(for: result)
             }
         )
     }
 
+    /// Corrections made on the phone feed Auto-Learn (`POST /v1/corrections`).
+    private func withCorrections(_ handlers: PhoneDictationHandlers) -> PhoneDictationHandlers {
+        var handlers = handlers
+        handlers.submitCorrection = { [weak self] request in
+            guard let intake = self?.correctionIntake else { return .unknownDictation }
+            return await intake.submit(request)
+        }
+        return handlers
+    }
+
+    /// The phone's mode, never the Mac's active one. See `PhoneModeResolver`.
+    private static func phoneMode(forApp app: String?) -> ModeConfig? {
+        PhoneModeResolver.mode(forApp: app, configurations: ModeManager.shared.configurations)
+    }
+
+    nonisolated static func transcriptionOptions(for context: PhoneDictationRequestContext) -> AudioFileTranscriptionOptions {
+        AudioFileTranscriptionOptions(
+            sourceApp: context.app,
+            skipsAIEnhancementAndFormatting: context.skipsAIEnhancementAndFormatting)
+    }
+
+    /// The configuration a phone request without app information would use.
     private func currentConfiguration() -> TranscriptionRuntimeConfiguration? {
-        guard let engine, let mode = ModeManager.shared.currentEffectiveConfiguration else { return nil }
+        guard let engine, let mode = Self.phoneMode(forApp: nil) else { return nil }
         return ModeRuntimeResolver.transcriptionConfiguration(
             mode: mode, transcriptionModelManager: engine.transcriptionModelManager)
     }
