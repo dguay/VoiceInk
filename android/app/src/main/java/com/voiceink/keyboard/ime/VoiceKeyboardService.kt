@@ -11,6 +11,7 @@ import android.widget.ImageButton
 import android.widget.ProgressBar
 import android.widget.TextView
 import com.voiceink.keyboard.R
+import com.voiceink.keyboard.api.AppLabel
 import com.voiceink.keyboard.api.FieldContext
 import com.voiceink.keyboard.api.Pairing
 import com.voiceink.keyboard.corrections.CorrectionHandoff
@@ -103,7 +104,9 @@ class VoiceKeyboardService : InputMethodService(), DictationFlow.Host {
     }
 
     override fun fieldContext(): FieldContext? =
-        currentInputEditorInfo?.let { FieldContext.of(it.packageName, it.inputType) }
+        currentInputEditorInfo?.let {
+            FieldContext.of(it.packageName, it.inputType, appName = AppLabel.of(packageManager, it.packageName))
+        }
 
     /** Types [text] at the cursor, separated from a preceding word by a space. */
     override fun commit(text: String): Boolean {

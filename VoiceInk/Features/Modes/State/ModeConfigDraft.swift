@@ -6,6 +6,7 @@ struct ModeConfigDraft {
     var icon: ModeIcon
     var appConfigs: [AppConfig]
     var websiteConfigs: [URLConfig]
+    var androidAppConfigs: [AndroidAppConfig]
     var triggerGroups: [ModeTriggerGroup]
     var triggerWords: [String]
     var isAIEnhancementEnabled: Bool
@@ -37,6 +38,7 @@ struct ModeConfigDraft {
             icon = .defaultIcon
             appConfigs = []
             websiteConfigs = []
+            androidAppConfigs = []
             triggerGroups = []
             triggerWords = []
             isAIEnhancementEnabled = false
@@ -64,6 +66,7 @@ struct ModeConfigDraft {
             icon = latestConfig.icon
             appConfigs = latestConfig.appConfigs ?? []
             websiteConfigs = latestConfig.urlConfigs ?? []
+            androidAppConfigs = latestConfig.androidAppConfigs ?? []
             triggerGroups = latestConfig.triggerGroups ?? []
             triggerWords = latestConfig.triggerWords
             isAIEnhancementEnabled = latestConfig.isAIEnhancementEnabled
@@ -175,6 +178,7 @@ struct ModeConfigDraft {
                 icon: icon,
                 appConfigs: appConfigs.isEmpty ? nil : appConfigs,
                 urlConfigs: websiteConfigs.isEmpty ? nil : websiteConfigs,
+                androidAppConfigs: androidAppConfigs.isEmpty ? nil : androidAppConfigs,
                 triggerGroups: triggerGroups.isEmpty ? nil : triggerGroups,
                 triggerWords: triggerWords,
                 isAIEnhancementEnabled: isAIEnhancementEnabled,
@@ -200,6 +204,7 @@ struct ModeConfigDraft {
             updatedConfig.icon = icon
             updatedConfig.appConfigs = appConfigs.isEmpty ? nil : appConfigs
             updatedConfig.urlConfigs = websiteConfigs.isEmpty ? nil : websiteConfigs
+            updatedConfig.androidAppConfigs = androidAppConfigs.isEmpty ? nil : androidAppConfigs
             updatedConfig.triggerGroups = triggerGroups.isEmpty ? nil : triggerGroups
             updatedConfig.triggerWords = ModeConfig.normalizedTriggerWords(triggerWords)
             updatedConfig.isAIEnhancementEnabled = isAIEnhancementEnabled

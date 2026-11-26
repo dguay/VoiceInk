@@ -31,13 +31,24 @@ enum class FieldKind(val wire: String) {
     }
 }
 
-/** Where a dictation goes: the app's package name and the kind of field. */
-data class FieldContext(val app: String?, val field: FieldKind) {
+/**
+ * Where a dictation goes: the app's package name, the kind of field and, when the phone can read
+ * it, the app's readable name ([appName], only sent together with [app]).
+ */
+data class FieldContext(val app: String?, val field: FieldKind, val appName: String? = null) {
     companion object {
-        fun of(packageName: CharSequence?, inputType: Int, isPassword: Boolean = false): FieldContext =
-            FieldContext(
-                app = packageName?.toString()?.takeIf { it.isNotBlank() },
+        fun of(
+            packageName: CharSequence?,
+            inputType: Int,
+            isPassword: Boolean = false,
+            appName: CharSequence? = null,
+        ): FieldContext {
+            val app = packageName?.toString()?.takeIf { it.isNotBlank() }
+            return FieldContext(
+                app = app,
                 field = FieldKind.fromInputType(inputType, isPassword),
+                appName = app?.let { AppLabel.clean(appName, it) },
             )
+        }
     }
 }

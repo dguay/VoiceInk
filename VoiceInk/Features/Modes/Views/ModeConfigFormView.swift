@@ -139,6 +139,7 @@ struct ModeConfigFormView: View {
                 modeId: draft.id,
                 cleanURL: modeManager.cleanURL
             )
+            ModeAndroidAppsSection(androidAppConfigs: $draft.androidAppConfigs, modeId: draft.id)
             transcriptionSection
             aiEnhancementSection
             advancedSection

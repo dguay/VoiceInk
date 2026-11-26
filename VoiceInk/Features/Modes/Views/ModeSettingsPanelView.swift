@@ -141,6 +141,9 @@ private struct ModeReorderRow: View {
                 HStack(spacing: 8) {
                     ModeReorderMeta(icon: "app.fill", value: countText(config.allAppConfigs.count, plural: "Apps"))
                     ModeReorderMeta(icon: "globe", value: countText(config.allURLConfigs.count, plural: "Websites"))
+                    if let androidAppCount = config.androidAppConfigs?.count, androidAppCount > 0 {
+                        ModeReorderMeta(icon: "smartphone", value: String(localized: "\(androidAppCount) Android apps"))
+                    }
                 }
             }
 
