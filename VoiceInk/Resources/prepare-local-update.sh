@@ -713,18 +713,46 @@ android_version_name=""
 android_java_home=""
 android_sdk=""
 
+# JDKs that /usr/libexec/java_home does not list: the runtime bundled with
+# Android Studio and Homebrew's keg-only OpenJDK formulas. Colon-separated.
+android_jdk_candidates="${VOICEINK_ANDROID_JDK_CANDIDATES-/Applications/Android Studio.app/Contents/jbr/Contents/Home:$HOME/Applications/Android Studio.app/Contents/jbr/Contents/Home:/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home:/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home:/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home:/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home:/usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home:/usr/local/opt/openjdk/libexec/openjdk.jdk/Contents/Home}"
+
+# Whether a JDK home holds Java 17 or later, read from its release file so no
+# Java binary has to run.
+android_jdk_is_supported() {
+    local home="$1"
+    local version
+    [[ -x "$home/bin/java" && -f "$home/release" ]] || return 1
+    version="$(sed -n 's/^JAVA_VERSION="\([0-9]*\).*/\1/p' "$home/release" | head -n 1)"
+    [[ "$version" =~ ^[0-9]+$ ]] && (( version >= 17 ))
+}
+
 # JDK 17 or later, found without a login shell environment. Never runs
 # /usr/bin/java, whose stub offers to install Java.
 find_android_java_home() {
     local candidate=""
+    local candidates=()
     if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]]; then
         android_java_home="$JAVA_HOME"
         return 0
     fi
-    [[ -x "$android_java_home_tool" ]] || return 1
-    candidate="$("$android_java_home_tool" -v 17+ 2>/dev/null)" || return 1
-    [[ -n "$candidate" && -x "$candidate/bin/java" ]] || return 1
-    android_java_home="$candidate"
+    if [[ -x "$android_java_home_tool" ]]; then
+        candidate="$("$android_java_home_tool" -v 17+ 2>/dev/null)" || candidate=""
+        if [[ -n "$candidate" && -x "$candidate/bin/java" ]]; then
+            android_java_home="$candidate"
+            return 0
+        fi
+    fi
+    [[ -n "$android_jdk_candidates" ]] || return 1
+    IFS=: read -r -a candidates <<< "$android_jdk_candidates"
+    for candidate in "${candidates[@]}"; do
+        [[ -n "$candidate" ]] || continue
+        if android_jdk_is_supported "$candidate"; then
+            android_java_home="$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 find_android_sdk() {

@@ -1209,6 +1209,13 @@ android_count="$(git -C "$android_seed" rev-list --count --first-parent HEAD)"
 mkdir -p "$android_jdk/bin" "$android_sdk/platforms" "$android_installed_keyboard"
 printf '#!/bin/sh\nexit 0\n' > "$android_jdk/bin/java"
 chmod +x "$android_jdk/bin/java"
+printf 'JAVA_VERSION="17.0.2"\n' > "$android_jdk/release"
+# An older JDK the fallback search must skip.
+android_old_jdk="$fixture_root/android-old-jdk"
+mkdir -p "$android_old_jdk/bin"
+printf '#!/bin/sh\nexit 0\n' > "$android_old_jdk/bin/java"
+chmod +x "$android_old_jdk/bin/java"
+printf 'JAVA_VERSION="11.0.20"\n' > "$android_old_jdk/release"
 /usr/bin/plutil -create xml1 "$android_installed_app/Contents/Info.plist"
 printf 'previous-apk\n' > "$android_installed_keyboard/VoiceInkKeyboard.apk"
 printf '{"applicationId":"com.voiceink.keyboard","versionCode":1,"versionName":"0.1.1-previous0000"}\n' \
@@ -1241,6 +1248,7 @@ run_android_prepare() {
         ANDROID_SDK_ROOT="$fixture_root/no-sdk-here" \
         FAKE_JAVA_HOME="$android_jdk" \
         VOICEINK_JAVA_HOME_TOOL="$fake_bin/java_home" \
+        VOICEINK_ANDROID_JDK_CANDIDATES= \
         VOICEINK_ANDROID_DEFAULT_SDK_PATH="$android_sdk" \
         VOICEINK_INSTALLED_BUNDLE_PATH="$android_installed_app" \
         VOICEINK_REPOSITORY_PATH="$android_clone" \
@@ -1298,6 +1306,18 @@ build_line="$(grep '^build|' "$android_stub_log" | tail -n 1)"
     && "$build_line" != *"$android_clone/"* ]] \
     || android_fail "the Android build did not run in the candidate worktree with the found toolchain: $build_line"
 [[ ! -s "$android_install_log" ]] || android_fail "a toolchain install was attempted: $(cat "$android_install_log")"
+
+# A JDK that java_home does not list (Android Studio's runtime, Homebrew's
+# keg-only OpenJDK) is found in the known locations; one older than 17 is skipped.
+: > "$android_stub_log"
+run_android_prepare FAKE_JAVA_HOME= \
+    VOICEINK_ANDROID_JDK_CANDIDATES="$fixture_root/no-jdk-here:$android_old_jdk:$android_jdk" \
+    || android_fail "a JDK outside java_home failed preparation: $(cat "$android_output")"
+expect_android_prepared "JDK outside java_home"
+build_line="$(grep '^build|' "$android_stub_log" | tail -n 1)"
+[[ "$build_line" == "build|"*"/android|$android_jdk|$android_sdk|unset" ]] \
+    || android_fail "the Android build did not use the JDK found outside java_home: $build_line"
+[[ -z "$(android_notice)" ]] || android_fail "a JDK outside java_home was reported missing"
 
 # A stable signing identity seals the APK in by the fingerprint preflight
 # resolved and matched against the installed app, so the identity is unchanged.

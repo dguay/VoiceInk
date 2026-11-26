@@ -106,7 +106,7 @@ so the Mac app keeps its privacy permissions. Install and rollback move the whol
 a previous Mac version also restores the APK it bundled.
 
 - **Toolchain or key missing**: the updater looks for a JDK 17+ (`JAVA_HOME`, then
-  `/usr/libexec/java_home`), the Android SDK (`ANDROID_HOME`, `ANDROID_SDK_ROOT`, then
+  `/usr/libexec/java_home`, then Android Studio's bundled runtime and Homebrew's OpenJDK), the Android SDK (`ANDROID_HOME`, `ANDROID_SDK_ROOT`, then
   `~/Library/Android/sdk`) and the release key (`release-key.sh check`). If one is missing, it skips
   the APK, keeps the APK of the installed version in the candidate, and shows one notice saying what
   to install or import. It never installs a toolchain or prompts. The notice is not repeated on later
