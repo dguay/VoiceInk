@@ -123,6 +123,16 @@ struct TranscriptionInfoPanel: View {
                         label: "Source",
                         value: String(localized: "Phone")
                     )
+
+                    if let sourceApp = transcription.sourceApp {
+                        TranscriptionMetadataRow(
+                            icon: "app.badge",
+                            label: "Android App",
+                            value: AndroidAppName.displayName(for: sourceApp) == sourceApp
+                                ? sourceApp
+                                : "\(AndroidAppName.displayName(for: sourceApp)) (\(sourceApp))"
+                        )
+                    }
                 }
             }
         }

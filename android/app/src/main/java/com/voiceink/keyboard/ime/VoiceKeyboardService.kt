@@ -10,6 +10,7 @@ import android.widget.ImageButton
 import android.widget.ProgressBar
 import android.widget.TextView
 import com.voiceink.keyboard.R
+import com.voiceink.keyboard.api.FieldContext
 import com.voiceink.keyboard.api.Pairing
 import com.voiceink.keyboard.dictation.DictationFlow
 import com.voiceink.keyboard.dictation.DictationMessages
@@ -94,6 +95,9 @@ class VoiceKeyboardService : InputMethodService(), DictationFlow.Host {
         statusView?.text = getString(R.string.status_inserted, pairing.name)
         switchBack()
     }
+
+    override fun fieldContext(): FieldContext? =
+        currentInputEditorInfo?.let { FieldContext.of(it.packageName, it.inputType) }
 
     /** Types [text] at the cursor, separated from a preceding word by a space. */
     override fun commit(text: String): Boolean {

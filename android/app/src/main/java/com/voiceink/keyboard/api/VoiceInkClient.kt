@@ -7,6 +7,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 /** `GET /v1/status` on success. */
 data class MacStatus(val apiVersion: Int, val model: String, val mode: String?)
@@ -69,8 +70,9 @@ class VoiceInkClient(
         audio: File,
         contentType: String = "audio/mp4",
         preferredHost: String? = null,
+        field: FieldContext? = null,
     ): ApiResult<Transcription> =
-        request(pairing, preferredHost, "/v1/transcribe", "POST", transcribeReadTimeoutMs, Body(audio, contentType), ::parseTranscription)
+        request(pairing, preferredHost, transcribePath(field), "POST", transcribeReadTimeoutMs, Body(audio, contentType), ::parseTranscription)
 
     private class Body(val file: File, val contentType: String)
 
@@ -168,6 +170,16 @@ class VoiceInkClient(
                 }
                 else -> ApiError.Server(httpStatus, code, message)
             }
+        }
+
+        /** `/v1/transcribe` with the optional `app` and `field` query parameters for [field]. */
+        internal fun transcribePath(field: FieldContext?): String {
+            if (field == null) return "/v1/transcribe"
+            val query = listOfNotNull(
+                field.app?.let { "app=" + URLEncoder.encode(it, "UTF-8") },
+                "field=" + field.field.wire,
+            )
+            return "/v1/transcribe?" + query.joinToString("&")
         }
 
         internal fun orderedHosts(hosts: List<String>, preferred: String?): List<String> =
