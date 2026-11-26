@@ -53,7 +53,10 @@ final class PhoneDictationController: ObservableObject {
 
     func configure(modelContext: ModelContext, engine: VoiceInkEngine) {
         self.engine = engine
-        self.pipeline = AudioFileTranscriptionPipeline(modelContext: modelContext, engine: engine)
+        // Phone requests keep their own warm transcriber, separate from the Mac dictation's
+        // (see WarmAudioFileTranscriber), so only the first request pays the model load.
+        self.pipeline = AudioFileTranscriptionPipeline(
+            modelContext: modelContext, engine: engine, keepsTranscriberWarm: true)
         if isEnabled {
             startServer()
         }
@@ -155,6 +158,10 @@ final class PhoneDictationController: ObservableObject {
         server?.stop()
         server = nil
         serverState = .stopped
+        // Free the warm model while the server is stopped; a running request keeps it until done.
+        if let pipeline {
+            Task { @MainActor in await pipeline.releaseWarmTranscriber() }
+        }
     }
 
     private func makeHandlers() -> PhoneDictationHandlers {

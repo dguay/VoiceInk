@@ -1,14 +1,21 @@
 import AVFoundation
 import Foundation
 import SwiftData
+import os
 
 /// Transcribes one audio file with a mode's model and returns the raw text.
 @MainActor
 protocol AudioFileTranscriber: AnyObject {
+    /// Loads `model` ahead of `transcribe`, so the load is timed on its own. Optional.
+    func prepare(model: any TranscriptionModel) async throws
     func transcribe(
         audioURL: URL, model: any TranscriptionModel, context: TranscriptionRequestContext
     ) async throws -> String
     func cleanup() async
+}
+
+extension AudioFileTranscriber {
+    func prepare(model: any TranscriptionModel) async throws {}
 }
 
 extension TranscriptionServiceRegistry: AudioFileTranscriber {}
@@ -25,6 +32,8 @@ struct AudioFileTranscriptionResult {
     let finalText: String
     /// Why AI enhancement failed, when it was attempted and failed.
     let enhancementFailure: String?
+    /// How long each step took.
+    var timings = AudioFileTranscriptionTimings()
 }
 
 @MainActor
@@ -52,8 +61,15 @@ final class AudioFileTranscriptionPipeline {
     private let modelContext: ModelContext
     private let dependencies: Dependencies
     private let audioProcessor = AudioProcessor()
+    /// Set for phone dictation only; see `WarmAudioFileTranscriber` for why it is a separate instance.
+    private let warmTranscriber: WarmAudioFileTranscriber?
+    private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "AudioFileTranscriptionPipeline")
+    private static let phoneLogger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "PhoneDictation")
 
-    convenience init(modelContext: ModelContext, engine: VoiceInkEngine) {
+    /// - Parameter keepsTranscriberWarm: keep one transcriber, and its loaded model, between runs
+    ///   (phone dictation). When false, every file gets a fresh transcriber that is cleaned up
+    ///   afterwards (Audio Import).
+    convenience init(modelContext: ModelContext, engine: VoiceInkEngine, keepsTranscriberWarm: Bool = false) {
         self.init(
             modelContext: modelContext,
             dependencies: Dependencies(
@@ -73,13 +89,22 @@ final class AudioFileTranscriptionPipeline {
                 },
                 enhancementService: engine.enhancementService,
                 recordingsDirectory: Self.defaultRecordingsDirectory
-            )
+            ),
+            keepsTranscriberWarm: keepsTranscriberWarm
         )
     }
 
-    init(modelContext: ModelContext, dependencies: Dependencies) {
+    init(modelContext: ModelContext, dependencies: Dependencies, keepsTranscriberWarm: Bool = false) {
         self.modelContext = modelContext
         self.dependencies = dependencies
+        self.warmTranscriber =
+            keepsTranscriberWarm ? WarmAudioFileTranscriber(makeTranscriber: dependencies.makeTranscriber) : nil
+    }
+
+    /// Frees the warm transcriber and its model, if any. A run that is using it keeps it until it
+    /// finishes; the next run loads the model again.
+    func releaseWarmTranscriber() async {
+        await warmTranscriber?.release()
     }
 
     /// Whether `mode` currently resolves to a usable transcription model.
@@ -98,10 +123,32 @@ final class AudioFileTranscriptionPipeline {
         source: TranscriptionSource? = nil,
         onPhase: (Phase) -> Void = { _ in }
     ) async throws -> AudioFileTranscriptionResult {
+        let startedAt = ContinuousClock.now
+        if let warmTranscriber {
+            // Phone dictation: reuse the warm transcriber, which stays loaded after the run.
+            var lease: WarmAudioFileTranscriber.Lease?
+            do {
+                let transcription = try await run(
+                    audioURL: audioURL, mode: mode, source: source, startedAt: startedAt,
+                    acquireTranscriber: { model in
+                        let checkedOut = await warmTranscriber.checkOut(for: model)
+                        lease = checkedOut
+                        return (checkedOut.transcriber, checkedOut.isReused)
+                    },
+                    onPhase: onPhase)
+                if let lease { await warmTranscriber.checkIn(lease) }
+                return transcription
+            } catch {
+                if let lease { await warmTranscriber.checkIn(lease) }
+                throw error
+            }
+        }
+
         let transcriber = dependencies.makeTranscriber()
         do {
             let transcription = try await run(
-                audioURL: audioURL, mode: mode, source: source, transcriber: transcriber, onPhase: onPhase)
+                audioURL: audioURL, mode: mode, source: source, startedAt: startedAt,
+                acquireTranscriber: { _ in (transcriber, false) }, onPhase: onPhase)
             await transcriber.cleanup()
             return transcription
         } catch {
@@ -110,22 +157,27 @@ final class AudioFileTranscriptionPipeline {
         }
     }
 
+    /// `acquireTranscriber` returns the transcriber for the resolved model and whether it was
+    /// reused from an earlier run; it is called once the audio is converted.
     private func run(
         audioURL: URL,
         mode: ModeConfig,
         source: TranscriptionSource?,
-        transcriber: any AudioFileTranscriber,
+        startedAt: ContinuousClock.Instant,
+        acquireTranscriber: (any TranscriptionModel) async -> (any AudioFileTranscriber, Bool),
         onPhase: (Phase) -> Void
     ) async throws -> AudioFileTranscriptionResult {
         guard let transcriptionConfiguration = dependencies.resolveConfiguration(mode) else {
             throw TranscriptionError.noModelSelected
         }
         let currentModel = transcriptionConfiguration.model
+        var timings = AudioFileTranscriptionTimings()
 
         onPhase(.loading)
         try Task.checkCancellation()
 
         onPhase(.processingAudio)
+        let conversionStart = ContinuousClock.now
         let samples = try await audioProcessor.processAudioToSamples(audioURL)
         try Task.checkCancellation()
 
@@ -138,17 +190,34 @@ final class AudioFileTranscriptionPipeline {
 
         try FileManager.default.createDirectory(at: recordingsDirectory, withIntermediateDirectories: true)
         try audioProcessor.saveSamplesAsWav(samples: samples, to: permanentURL)
+        timings.audioConversion = conversionStart.duration(to: .now).timeInterval
         try Task.checkCancellation()
 
         onPhase(.transcribing)
+        let loadStart = ContinuousClock.now
+        let (transcriber, isReused) = await acquireTranscriber(currentModel)
+        timings.reusedWarmTranscriber = isReused
+        do {
+            try await transcriber.prepare(model: currentModel)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // `transcribe` loads lazily and reports the failure as it always did.
+            logger.notice("Model preload failed, transcribing anyway: \(error, privacy: .public)")
+        }
+        timings.modelLoad = loadStart.duration(to: .now).timeInterval
+        try Task.checkCancellation()
+
         let vocabulary = CustomVocabularyService.shared.loadSavedVocabulary(from: modelContext)
-        let transcriptionStart = Date()
+        let transcriptionStart = ContinuousClock.now
         var text = try await transcriber.transcribe(
             audioURL: permanentURL,
             model: currentModel,
             context: transcriptionConfiguration.requestContext.withVocabulary(vocabulary)
         )
-        let transcriptionDuration = Date().timeIntervalSince(transcriptionStart)
+        timings.transcription = transcriptionStart.duration(to: .now).timeInterval
+        // History keeps counting the model load, as it did when the load happened inside transcribe.
+        let transcriptionDuration = timings.modelLoad + timings.transcription
         text = TranscriptionOutputFilter.filter(text, language: transcriptionConfiguration.language)
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         text = try await vocabulary.correctTranscription(text)
@@ -185,6 +254,8 @@ final class AudioFileTranscriptionPipeline {
             enhancementService.isConfigured(for: enhancementConfiguration)
         {
             onPhase(.enhancing)
+            let enhancementStart = ContinuousClock.now
+            defer { timings.enhancement = enhancementStart.duration(to: .now).timeInterval }
             do {
                 let enhancementResult = try await enhancementService.enhance(
                     text,
@@ -248,10 +319,23 @@ final class AudioFileTranscriptionPipeline {
         NotificationCenter.default.post(name: .transcriptionCreated, object: transcription)
         NotificationCenter.default.post(name: .transcriptionCompleted, object: transcription)
 
+        timings.total = startedAt.duration(to: .now).timeInterval
+        logTimings(timings, source: source)
+
         return AudioFileTranscriptionResult(
             transcription: transcription,
             finalText: finalText,
-            enhancementFailure: enhancementFailure
+            enhancementFailure: enhancementFailure,
+            timings: timings
         )
+    }
+
+    /// Logs step durations only: never the transcript, the dictated text or the audio.
+    private func logTimings(_ timings: AudioFileTranscriptionTimings, source: TranscriptionSource?) {
+        if source == .phone {
+            Self.phoneLogger.notice("Phone dictation timings: \(timings.logDescription, privacy: .public)")
+        } else {
+            logger.debug("Audio file timings: \(timings.logDescription, privacy: .public)")
+        }
     }
 }
