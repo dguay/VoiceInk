@@ -249,6 +249,18 @@ struct VoiceInkApp: App {
         let statsMigrationTask = SessionMetricMigrationService.shared.runStatsMigrationIfNeeded(
             modelContainer: resolvedContainer)
         let mainContext = resolvedContainer.mainContext
+        // Recover before the orphan-audio sweep below can treat an interrupted recording as unreferenced.
+        let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        let recoveredRecordings = isTestHost
+            ? []
+            : InterruptedRecordingRecovery(modelContext: mainContext).recoverInterruptedRecordings()
+        if !recoveredRecordings.isEmpty {
+            Task { @MainActor in
+                // Let the app finish launching so the notice has a screen to appear on.
+                try? await Task.sleep(for: .seconds(1.5))
+                RecoveredRecordingNotice.show(count: recoveredRecordings.count)
+            }
+        }
         Task { @MainActor in
             await statsMigrationTask?.value
             TranscriptionAutoCleanupService.shared.startMonitoring(modelContext: mainContext)

@@ -112,6 +112,14 @@ struct HistoryView: View {
                         guard detailTranscription?.id == transcription.id else { return }
                         isShowingInfo = false
                         detailTranscription = updated
+                    },
+                    onDiscarded: {
+                        selectedTranscriptions.remove(transcription)
+                        closeDetail()
+                        Task {
+                            resetPagination()
+                            await loadInitialContent()
+                        }
                     }
                 )
                 .transition(.opacity)

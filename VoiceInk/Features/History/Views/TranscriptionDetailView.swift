@@ -12,6 +12,11 @@ struct TranscriptionDetailView: View {
     let onTranscriptionUpdated: (Transcription) -> Void
     var presentation: HistoryDetailPresentation = .mainWindow
     var onPaste: (() -> Void)? = nil
+    /// Called after a recovered recording and its audio are discarded.
+    var onDiscarded: (() -> Void)? = nil
+
+    @Environment(\.modelContext) private var modelContext
+    @State private var isConfirmingDiscard = false
 
     private var audioURL: URL? { transcription.availableHistoryAudioURL }
     private var playbackURL: URL? { presentation == .mainWindow ? audioURL : nil }
@@ -75,6 +80,18 @@ struct TranscriptionDetailView: View {
         let enhancementText = transcription.historyEnhancementDetailText
 
         return VStack(alignment: .leading, spacing: 12) {
+            if transcription.isRecoveredRecording {
+                RecoveredRecordingBanner(onDiscard: { isConfirmingDiscard = true })
+                    .confirmationDialog(
+                        "Discard this recovered recording?",
+                        isPresented: $isConfirmingDiscard
+                    ) {
+                        Button("Discard Recording", role: .destructive, action: discardRecoveredRecording)
+                    } message: {
+                        Text("The audio file is deleted. This cannot be undone.")
+                    }
+            }
+
             if let enhancementText {
                 HistoryTranscriptionTextCard(
                     text: enhancementText,
@@ -88,6 +105,19 @@ struct TranscriptionDetailView: View {
                 text: transcription.text,
                 title: enhancementText == nil ? nil : "Original",
                 rendersMarkdown: rendersMarkdown
+            )
+        }
+    }
+
+    private func discardRecoveredRecording() {
+        do {
+            try InterruptedRecordingRecovery.discard(transcription, in: modelContext)
+            onDiscarded?()
+        } catch {
+            modelContext.rollback()
+            NotificationManager.shared.showNotification(
+                title: String(localized: "Could not discard the recovered recording"),
+                type: .error
             )
         }
     }
@@ -109,6 +139,45 @@ struct TranscriptionDetailView: View {
             )
         }
         .frame(height: footerHeight)
+    }
+}
+
+private struct RecoveredRecordingBanner: View {
+    let onDiscard: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.arrow.circlepath")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Color.orange)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Interrupted recording recovered")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AppTheme.Text.primary)
+                Text("VoiceInk quit while this was recording. The audio was saved. Pick a mode below to transcribe it, or discard it.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(AppTheme.Text.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            Button("Discard", role: .destructive, action: onDiscard)
+                .controlSize(.small)
+                .help("Delete this recording and its audio")
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppTheme.Radius.card, style: .continuous)
+                .fill(Color.orange.opacity(0.10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppTheme.Radius.card, style: .continuous)
+                        .strokeBorder(Color.orange.opacity(0.35), lineWidth: 1)
+                )
+        )
+        .accessibilityElement(children: .combine)
     }
 }
 

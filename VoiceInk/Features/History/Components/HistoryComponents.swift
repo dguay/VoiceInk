@@ -177,6 +177,16 @@ struct HistoryTranscriptionRow: View {
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
+                if transcription.isRecoveredRecording {
+                    Label("Recovered", systemImage: "exclamationmark.arrow.circlepath")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.orange)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .help("Recovered from an interrupted recording, not transcribed yet")
+                }
+
                 if transcription.transcriptionSource == .phone {
                     Label("From phone", systemImage: "iphone")
                         .labelStyle(.titleAndIcon)

@@ -205,6 +205,7 @@ struct DashboardContent: View {
 
         if transcription.transcriptionStatus == TranscriptionStatus.failed.rawValue
             || transcription.transcriptionStatus == TranscriptionStatus.canceled.rawValue
+            || transcription.transcriptionStatus == TranscriptionStatus.recovered.rawValue
         {
             return false
         }
