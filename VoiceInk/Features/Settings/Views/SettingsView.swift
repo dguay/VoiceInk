@@ -21,6 +21,7 @@ struct SettingsView: View {
     @AppStorage("restoreClipboardAfterPaste") private var restoreClipboardAfterPaste = true
     @AppStorage("clipboardRestoreDelay") private var clipboardRestoreDelay = 2.0
     @AppStorage(SmartPunctuation.settingsKey) private var smartPunctuationEnabled = false
+    @AppStorage(PasteFocusGuardSettings.key) private var pasteFocusGuardEnabled = true
     @AppStorage(PasteMethod.userDefaultsKey) private var pasteMethodRawValue = PasteMethod.standard.rawValue
     @AppStorage(AppAppearancePreference.userDefaultsKey) private var appAppearancePreference = AppAppearancePreference
         .system
@@ -189,6 +190,13 @@ struct SettingsView: View {
                     HStack(spacing: 4) {
                         Text("Smart Punctuation")
                         InfoTip(LocalizedStringKey("Adjust capitalization, punctuation, and spacing to fit the surrounding text when pasting. If context is unavailable, your text is pasted unchanged."))
+                    }
+                }
+
+                Toggle(isOn: $pasteFocusGuardEnabled) {
+                    HStack(spacing: 4) {
+                        Text("Safe Paste")
+                        InfoTip(LocalizedStringKey("Paste only into the app, window, and field that had focus when you stopped recording. If focus moved, or a password field is focused, VoiceInk shows the text in a card with Paste and Copy instead. Turn off to always paste right away."))
                     }
                 }
 

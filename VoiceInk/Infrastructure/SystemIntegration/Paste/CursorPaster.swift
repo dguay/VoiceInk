@@ -12,6 +12,8 @@ class CursorPaster {
         case commandPosted
         case commandNotPosted
         case commandPartiallyPosted
+        /// `beforeCommand` declined the paste, so nothing was posted.
+        case heldBack
 
         var didPostPasteCommand: Bool {
             self == .commandPosted
@@ -42,12 +44,17 @@ class CursorPaster {
 
     @MainActor
     @discardableResult
-    static func startPasteAtCursor(_ text: String, sendKey: FinishAndSendKey = .none) -> Task<PasteOutcome, Never> {
+    static func startPasteAtCursor(
+        _ text: String,
+        sendKey: FinishAndSendKey = .none,
+        beforeCommand: (@MainActor () async -> Bool)? = nil
+    ) -> Task<PasteOutcome, Never> {
         let requestedAt = ProcessInfo.processInfo.systemUptime
         let previousPasteTask = pasteQueueTask
         let sessionTask = Task { @MainActor in
             await previousPasteTask?.value
-            return await performPasteSession(text, sendKey: sendKey, requestedAt: requestedAt)
+            return await performPasteSession(
+                text, sendKey: sendKey, beforeCommand: beforeCommand, requestedAt: requestedAt)
         }
 
         pasteQueueTask = Task { @MainActor in
@@ -62,7 +69,12 @@ class CursorPaster {
     }
 
     @MainActor
-    private static func performPasteSession(_ text: String, sendKey: FinishAndSendKey, requestedAt: TimeInterval) async -> (
+    private static func performPasteSession(
+        _ text: String,
+        sendKey: FinishAndSendKey,
+        beforeCommand: (@MainActor () async -> Bool)?,
+        requestedAt: TimeInterval
+    ) async -> (
         outcome: PasteOutcome, clipboardRestoreTask: Task<Void, Never>?
     ) {
         let startedAt = ProcessInfo.processInfo.systemUptime
@@ -114,6 +126,17 @@ class CursorPaster {
         } else {
             savedContents = []
             if method == .remoteTyping && !smartPunctuation { await wait(prePasteDelay) }
+        }
+
+        // Last check right before the command, once the pre-paste delay let focus settle.
+        if let beforeCommand, !(await beforeCommand()) {
+            logger.notice("Paste held back id=\(sessionID, privacy: .public)")
+            var restoreTask: Task<Void, Never>?
+            if shouldRestoreClipboard, let pasteboard {
+                restoreTask = scheduleClipboardRestore(
+                    savedContents, expectedText: textToDeliver, sessionID: sessionID, on: pasteboard)
+            }
+            return (PasteOutcome(result: .heldBack, autoLearnGeneration: nil), restoreTask)
         }
 
         let application = NSWorkspace.shared.frontmostApplication
