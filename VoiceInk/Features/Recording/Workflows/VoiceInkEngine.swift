@@ -190,6 +190,8 @@ class VoiceInkEngine: NSObject, ObservableObject {
             // Stopping the hardware suspends. Keep all inputs tied to this recording
             // before cancellation or a new recording can replace the shared state.
             let audioURL = recordedFile
+            // Capture where the result should land before transcription or AI cleanup runs.
+            let focusTarget = activeRecordingUseCase.isAssistantFollowUp ? nil : pipeline.captureDeliveryTarget()
             let contextStore = activeRecordingContextStore
             let contextCaptureTasks = activeRecordingContextTasks
             let session = currentSession
@@ -228,7 +230,8 @@ class VoiceInkEngine: NSObject, ObservableObject {
                         session: session,
                         contextStore: contextStore,
                         contextCaptureTasks: contextCaptureTasks,
-                        sendAfterPaste: sendAfterPaste
+                        sendAfterPaste: sendAfterPaste,
+                        focusTarget: focusTarget
                     )
                 } else {
                     await finishActiveRecorderCancellation()
@@ -587,7 +590,8 @@ class VoiceInkEngine: NSObject, ObservableObject {
         session: TranscriptionSession?,
         contextStore: RecordingContextSnapshotStore?,
         contextCaptureTasks: [Task<Void, Never>],
-        sendAfterPaste: Bool
+        sendAfterPaste: Bool,
+        focusTarget: Task<PasteFocusTarget?, Never>?
     ) async {
         defer { contextCaptureTasks.forEach { $0.cancel() } }
         guard let transcriptionConfiguration else {
@@ -646,6 +650,7 @@ class VoiceInkEngine: NSObject, ObservableObject {
                 ModeRuntimeResolver.outputConfiguration()
             },
             sendAfterPaste: sendAfterPaste,
+            focusTarget: focusTarget,
             onStateChange: { [weak self] state in
                 guard let self, self.activePipelineTranscriptionID == transcriptionID else { return }
                 self.recordingState = state

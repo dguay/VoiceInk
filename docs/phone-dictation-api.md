@@ -41,7 +41,8 @@ Call `GET /v1/status` after scanning to confirm the pairing.
 - Every request needs `Authorization: Bearer TOKEN`. A missing or wrong token gets `401`
   before the request body is read; no transcription runs.
 - One request per connection; every response has `Connection: close`.
-- Responses are `application/json; charset=utf-8`.
+- Responses are `application/json; charset=utf-8`, except the APK download
+  (`GET /v1/app-update/apk`).
 
 ## `GET /v1/status`
 
@@ -225,6 +226,43 @@ learned from only once. Other outcomes: `400 bad_request` for malformed JSON or 
 fit together, `404 unknown_dictation` when no History entry has that `id`, and
 `409 not_phone_dictation` when the entry was not dictated on the phone.
 
+## `GET /v1/app-update`
+
+Lets the phone update the VoiceInk Keyboard app from the paired Mac, without adb. The Mac offers
+the APK bundled in its own app (`VoiceInk.app/Contents/Resources/AndroidKeyboard/`, holding
+`VoiceInkKeyboard.apk` and its metadata `VoiceInkKeyboard.json`), so the APK always belongs to
+the installed Mac build. Needs the pairing token like every endpoint (`401 unauthorized`
+otherwise). Not queued behind transcriptions.
+
+`200 OK`:
+
+```json
+{
+  "sha256": "9f2c…",
+  "size": 6291456,
+  "versionCode": 1131,
+  "versionName": "0.1.1131-0123456789ab"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `versionCode` | integer | Android `versionCode` of the bundled APK. Offer it only when it is greater than the installed one. |
+| `versionName` | string | Android `versionName`, for display. |
+| `size` | integer | Size of the APK in bytes. |
+| `sha256` | string | SHA-256 of the APK, 64 lower-case hex characters. |
+
+The Mac computes `size` and `sha256` from the APK file itself. When no APK is bundled, or its
+metadata is missing, invalid or for another app than `com.voiceink.keyboard`:
+`404 app_update_unavailable`, and nothing is served.
+
+## `GET /v1/app-update/apk`
+
+The bytes of that APK: `200 OK` with `Content-Type: application/vnd.android.package-archive` and
+`Content-Length`. Same authentication and the same `404 app_update_unavailable` as
+`GET /v1/app-update`. Before installing, check that the download has the advertised `size` and
+`sha256`; reject it otherwise (the Android app deletes it and installs nothing).
+
 ## Errors
 
 Every error has the same body:
@@ -241,6 +279,7 @@ Every error has the same body:
 | 401 | `unauthorized` | Missing or wrong bearer token (including a token that was regenerated). Re-pair. |
 | 404 | `not_found` | Unknown path. |
 | 404 | `unknown_dictation` | `/v1/corrections`: no History entry has this `id`. |
+| 404 | `app_update_unavailable` | `/v1/app-update` and `/v1/app-update/apk`: this Mac has no valid VoiceInk Keyboard APK bundled. |
 | 405 | `method_not_allowed` | Wrong method for the path. |
 | 409 | `not_phone_dictation` | `/v1/corrections`: the History entry was not dictated on the phone. |
 | 411 | `length_required` | `Content-Length` missing, or chunked transfer encoding. |

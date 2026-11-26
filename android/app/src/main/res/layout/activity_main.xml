@@ -28,6 +28,42 @@
             android:layout_marginTop="4dp"
             android:text="@string/setup_intro" />
 
+        <!-- Update from the paired Mac, shown only when it offers a newer version. -->
+        <LinearLayout
+            android:id="@+id/update_section"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView style="@style/SetupHeading"
+                android:id="@+id/update_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/update_available_title" />
+
+            <TextView
+                android:id="@+id/update_version"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/update_detail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:accessibilityLiveRegion="polite"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/update_button"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/update_install" />
+        </LinearLayout>
+
         <!-- 1. Pairing -->
         <TextView style="@style/SetupHeading"
             android:layout_width="wrap_content"

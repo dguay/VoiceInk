@@ -84,7 +84,54 @@ replace it with the release build. Do this once:
 3. Open VoiceInk Keyboard and redo the setup steps below: pair again, allow the microphone, turn
    on **VoiceInk voice**, and turn the mic bubble back on.
 
-After that, `adb install -r` with a release APK built on any of your Macs updates the app in place.
+After that, `adb install -r` with a release APK built on any of your Macs updates the app in place,
+or the phone updates itself from the Mac (see [Update from the Mac](#update-from-the-mac)).
+
+### Update from the Mac
+
+The phone can update the app from its paired Mac, without adb. The Mac offers the APK bundled in
+its own VoiceInk app, so the phone always gets the keyboard that belongs to the installed Mac
+build (and follows it if the Mac app is rolled back). `build-release.sh` writes
+`VoiceInkKeyboard.json` (`applicationId`, `versionCode`, `versionName`, the values Gradle built the
+APK with) next to `app-release.apk`. Copy both into
+`VoiceInk.app/Contents/Resources/AndroidKeyboard/` as `VoiceInkKeyboard.apk` and
+`VoiceInkKeyboard.json`. A Mac app without them offers nothing.
+
+**Bundled by the fork updater**: when the Mac's fork updater prepares a new VoiceInk candidate
+(`VoiceInk/Resources/prepare-local-update.sh`), it runs `build-release.sh` from the candidate's own
+checkout after the Mac tests and build pass, so the APK comes from the same commit as the Mac app
+(`versionName` ends with that commit's first 12 characters). It places the APK and its metadata in
+the candidate's `AndroidKeyboard/` folder and re-signs the candidate with the same signing identity,
+so the Mac app keeps its privacy permissions. Install and rollback move the whole app, so restoring
+a previous Mac version also restores the APK it bundled.
+
+- **Toolchain or key missing**: the updater looks for a JDK 17+ (`JAVA_HOME`, then
+  `/usr/libexec/java_home`, then Android Studio's bundled runtime and Homebrew's OpenJDK), the Android SDK (`ANDROID_HOME`, `ANDROID_SDK_ROOT`, then
+  `~/Library/Android/sdk`) and the release key (`release-key.sh check`). If one is missing, it skips
+  the APK, keeps the APK of the installed version in the candidate, and shows one notice saying what
+  to install or import. It never installs a toolchain or prompts. The notice is not repeated on later
+  checks; it comes back when what is missing changes, or when something goes missing again after a
+  successful APK build.
+- **Build failure**: a Gradle error, a missing APK, metadata that does not match the candidate,
+  or a build still running after 15 minutes never blocks the Mac update. The candidate is prepared
+  as usual with the installed version's APK, and the updater shows a notice once for that candidate.
+  The Gradle output is kept in `android-build.log` in the update logs folder (**Open Logs** on the
+  notice, or **Open Update Logs** in Settings).
+
+- **Checking**: when the setup screen opens (and after pairing), the app checks the Mac's status
+  and asks `GET /v1/app-update`. Only a greater `versionCode` than the installed one is offered:
+  the screen then shows **Update available** with the Mac's version. The same or an older version,
+  a Mac without an APK or an unreachable Mac shows nothing, and dictation is never affected.
+- **Install permission**: the first time, Android must allow VoiceInk Keyboard to install apps.
+  The screen explains why and **Allow installing updates** opens the system setting (*Install
+  unknown apps*); turn on *Allow from this source* and come back. The update then continues.
+- **Installing**: **Download and install** downloads the APK into the app's private storage and
+  checks it against the size and SHA-256 the Mac advertised. A damaged or truncated download is
+  deleted and nothing is installed. A good one goes to the system package installer: confirm its
+  prompt. The download is removed after the install attempt.
+- **What is kept**: the update is an in-place upgrade signed with the same release key, so the
+  pairing, the settings, the keyboard and the mic bubble's accessibility service stay on. A debug
+  build cannot be updated by a release APK this way (do the one-time move above first).
 
 ## Install on your phone
 
@@ -207,4 +254,5 @@ field back to your usual keyboard right after typing and cannot see later edits.
 | `ime/VoiceKeyboardService.kt` | The keyboard (input method service). |
 | `bubble/` | The mic bubble: accessibility service, overlay window, its visibility, field and placement rules, and the correction watcher. |
 | `corrections/` | When a dictated field is done with, and which window of it is sent for Auto-Learn (pure, unit-tested rules). |
-| `setup/MainActivity.kt` | Pairing and keyboard setup screen. |
+| `setup/MainActivity.kt` | Pairing and keyboard setup screen, including **Update available**. |
+| `update/` | Updating from the Mac: which version to offer and the download check (pure, unit-tested), and the system package installer session. |

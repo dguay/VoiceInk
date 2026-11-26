@@ -32,6 +32,13 @@ write_keystore_file "$keystore_base64" "$keystore_file"
 write_private_file "$password_file" "$password"
 unset keystore_base64 password
 
+release_directory="$android_directory/app/build/outputs/apk/release"
+apk="$release_directory/app-release.apk"
+# What the Mac serves with the APK so the phone can update itself (see android/README.md).
+metadata="$release_directory/VoiceInkKeyboard.json"
+# Never leave the metadata of an earlier build next to a new APK.
+rm -f "$metadata"
+
 printf 'Building the signed Android release APK with the Keychain key (%s)...\n' "$release_key_service"
 (
     cd "$android_directory"
@@ -42,7 +49,9 @@ printf 'Building the signed Android release APK with the Keychain key (%s)...\n'
         ./gradlew --no-daemon --no-configuration-cache assembleRelease "$@"
 )
 
-apk="$android_directory/app/build/outputs/apk/release/app-release.apk"
 [[ -f "$apk" ]] || fail "Gradle finished but $apk is missing."
+"$script_directory/apk-metadata.sh" "$release_directory/output-metadata.json" "$metadata"
 printf 'Signed release APK: %s\n' "$apk"
+printf 'APK metadata: %s\n' "$metadata"
+printf 'To offer it to the phone from a Mac, copy both into VoiceInk.app/Contents/Resources/AndroidKeyboard/ as VoiceInkKeyboard.apk and VoiceInkKeyboard.json.\n'
 printf 'Install over the previous release build with: adb install -r %s\n' "$apk"

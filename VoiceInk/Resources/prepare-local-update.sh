@@ -208,6 +208,9 @@ candidate_ref=""
 candidate_stage=""
 candidate_staged=false
 caffeinate_pid=""
+# The Android build runs in its own process group so a timeout can stop Gradle
+# and its JVMs; cleanup stops that group when preparation is cancelled.
+android_build_pid=""
 
 # Keep the Mac from idle-sleeping in the middle of a long build. The assertion
 # ends with this helper even when it is killed.
@@ -314,7 +317,17 @@ prune_orphaned_candidates() {
     done
 }
 
+stop_android_build() {
+    [[ -n "$android_build_pid" ]] || return 0
+    kill -TERM -- "-$android_build_pid" >/dev/null 2>&1 || true
+    sleep 1
+    kill -KILL -- "-$android_build_pid" >/dev/null 2>&1 || true
+    wait "$android_build_pid" >/dev/null 2>&1 || true
+    android_build_pid=""
+}
+
 cleanup() {
+    stop_android_build
     if [[ "$worktree_added" == true ]]; then
         remove_candidate_worktree
     fi
@@ -674,6 +687,296 @@ begin_stage build
 ) || fail "VoiceInk could not build this candidate."
 record_stage_success build
 
+# The Android keyboard APK the Mac serves to the paired phone lives inside the
+# Mac bundle (see PhoneDictationAppUpdate.swift), so the bundle's install,
+# backup and rollback carry it. Preparation builds it from the candidate
+# worktree, the same fork commit as the Mac app. Nothing in this step can fail
+# the Mac update: on any Android problem the installed app's APK (when it has
+# one) is carried into the candidate unchanged, and a notice is recorded in the
+# manifest. A notice is reported once: the key of the last reported notice is
+# kept next to the failure state, and a successful APK build clears it.
+android_keyboard_directory="Contents/Resources/AndroidKeyboard"
+android_apk_name="VoiceInkKeyboard.apk"
+android_metadata_name="VoiceInkKeyboard.json"
+android_state_path="${VOICEINK_UPDATE_ANDROID_STATE_PATH:-$stage_root/android-apk-state.plist}"
+# Kept in the folder Open Logs shows; the log archive only manages .jsonl files.
+android_log_path="${VOICEINK_UPDATE_ANDROID_LOG_PATH:-$stage_root/Logs/android-build.log}"
+android_build_timeout="${VOICEINK_ANDROID_BUILD_TIMEOUT_SECONDS:-900}"
+[[ "$android_build_timeout" =~ ^[1-9][0-9]*$ ]] || android_build_timeout=900
+android_java_home_tool="${VOICEINK_JAVA_HOME_TOOL:-/usr/libexec/java_home}"
+android_default_sdk="${VOICEINK_ANDROID_DEFAULT_SDK_PATH:-$HOME/Library/Android/sdk}"
+android_outcome=""
+android_notice=""
+android_notice_key=""
+android_notice_to_report=""
+android_version_name=""
+android_java_home=""
+android_sdk=""
+
+# JDKs that /usr/libexec/java_home does not list: the runtime bundled with
+# Android Studio and Homebrew's keg-only OpenJDK formulas. Colon-separated.
+android_jdk_candidates="${VOICEINK_ANDROID_JDK_CANDIDATES-/Applications/Android Studio.app/Contents/jbr/Contents/Home:$HOME/Applications/Android Studio.app/Contents/jbr/Contents/Home:/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home:/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home:/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home:/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home:/usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home:/usr/local/opt/openjdk/libexec/openjdk.jdk/Contents/Home}"
+
+# Whether a JDK home holds Java 17 or later, read from its release file so no
+# Java binary has to run.
+android_jdk_is_supported() {
+    local home="$1"
+    local version
+    [[ -x "$home/bin/java" && -f "$home/release" ]] || return 1
+    version="$(sed -n 's/^JAVA_VERSION="\([0-9]*\).*/\1/p' "$home/release" | head -n 1)"
+    [[ "$version" =~ ^[0-9]+$ ]] && (( version >= 17 ))
+}
+
+# JDK 17 or later, found without a login shell environment. Never runs
+# /usr/bin/java, whose stub offers to install Java.
+find_android_java_home() {
+    local candidate=""
+    local candidates=()
+    if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]]; then
+        android_java_home="$JAVA_HOME"
+        return 0
+    fi
+    if [[ -x "$android_java_home_tool" ]]; then
+        candidate="$("$android_java_home_tool" -v 17+ 2>/dev/null)" || candidate=""
+        if [[ -n "$candidate" && -x "$candidate/bin/java" ]]; then
+            android_java_home="$candidate"
+            return 0
+        fi
+    fi
+    [[ -n "$android_jdk_candidates" ]] || return 1
+    IFS=: read -r -a candidates <<< "$android_jdk_candidates"
+    for candidate in "${candidates[@]}"; do
+        [[ -n "$candidate" ]] || continue
+        if android_jdk_is_supported "$candidate"; then
+            android_java_home="$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_android_sdk() {
+    local candidate
+    for candidate in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$android_default_sdk"; do
+        [[ -n "$candidate" && -d "$candidate/platforms" ]] || continue
+        android_sdk="$candidate"
+        return 0
+    done
+    return 1
+}
+
+# Runs build-release.sh from the candidate worktree in its own process group,
+# bounded by the Android timeout so a stuck Gradle cannot hold the Mac update.
+# Its output goes to a log in the work directory: Gradle never sees the key
+# itself (build-release.sh passes it through owner-only files).
+run_android_build() {
+    local log="$1"
+    local waited=0
+    local status=0
+    set -m
+    (
+        trap - ERR
+        cd "$candidate_worktree/android"
+        exec /usr/bin/env -u ANDROID_SDK_ROOT \
+            JAVA_HOME="$android_java_home" \
+            ANDROID_HOME="$android_sdk" \
+            /bin/bash "$candidate_worktree/android/scripts/build-release.sh"
+    ) > "$log" 2>&1 < /dev/null &
+    android_build_pid=$!
+    set +m
+    while kill -0 "$android_build_pid" >/dev/null 2>&1; do
+        if (( waited >= android_build_timeout )); then
+            stop_android_build
+            printf 'The Android build was still running after %s seconds.\n' "$android_build_timeout" >> "$log"
+            return 124
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$android_build_pid" || status=$?
+    android_build_pid=""
+    return "$status"
+}
+
+read_android_metadata_field() {
+    /usr/bin/plutil -extract "$1" raw -o - "$2" 2>/dev/null
+}
+
+# Builds the APK into $work_root/android-keyboard. Prints why it failed.
+build_android_keyboard() {
+    local release_directory="$candidate_worktree/android/app/build/outputs/apk/release"
+    local destination="$work_root/android-keyboard"
+    local log="$work_root/android-build.log"
+    local expected_code
+    local application_id
+    local version_code
+    local version_name
+    local status=0
+
+    run_android_build "$log" || status=$?
+    if (( status != 0 )); then
+        printf 'Android build output (last lines):\n'
+        tail -n 20 "$log" | sed 's/^/  /'
+        if (( status == 124 )); then
+            if (( android_build_timeout >= 120 )); then
+                printf 'the Android build did not finish within %s minutes' "$((android_build_timeout / 60))" >&2
+            else
+                printf 'the Android build did not finish within %s seconds' "$android_build_timeout" >&2
+            fi
+        else
+            printf 'the Android build failed (exit %s)' "$status" >&2
+        fi
+        return 1
+    fi
+    [[ -s "$release_directory/app-release.apk" ]] || {
+        printf 'the Android build did not produce app-release.apk' >&2
+        return 1
+    }
+    [[ -f "$release_directory/$android_metadata_name" ]] || {
+        printf 'the Android build did not write %s' "$android_metadata_name" >&2
+        return 1
+    }
+    expected_code="$(git -C "$candidate_worktree" rev-list --count --first-parent HEAD 2>/dev/null)" || {
+        printf 'the candidate commit count could not be read' >&2
+        return 1
+    }
+    application_id="$(read_android_metadata_field applicationId "$release_directory/$android_metadata_name")" || application_id=""
+    version_code="$(read_android_metadata_field versionCode "$release_directory/$android_metadata_name")" || version_code=""
+    version_name="$(read_android_metadata_field versionName "$release_directory/$android_metadata_name")" || version_name=""
+    if [[ ! "$application_id" =~ ^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$ \
+        || "$version_code" != "$expected_code" \
+        || "$version_name" != *"-${fork_commit:0:12}" ]]
+    then
+        printf 'the APK metadata does not match the candidate (versionCode %s, versionName %s, expected versionCode %s and a versionName ending in %s)' \
+            "${version_code:-missing}" "${version_name:-missing}" "$expected_code" "${fork_commit:0:12}" >&2
+        return 1
+    fi
+    mkdir -p "$destination"
+    cp "$release_directory/app-release.apk" "$destination/$android_apk_name"
+    cp "$release_directory/$android_metadata_name" "$destination/$android_metadata_name"
+    android_version_name="$version_name"
+}
+
+# Describes what the candidate offers the phone instead of a new APK.
+android_fallback_description() {
+    if [[ "$android_outcome" == carried ]]; then
+        printf 'The update keeps the Android keyboard APK of the installed version (%s), so the phone keeps getting that one.' \
+            "${android_version_name:-unknown version}"
+    else
+        printf 'The update has no Android keyboard APK, so the phone is not offered an app update.'
+    fi
+}
+
+# Copies the APK and its metadata into the staged bundle and seals them with the
+# signature the preparation already resolved. Re-signing only the outer bundle
+# with preserved metadata keeps the identifier, entitlements, designated
+# requirement, flags and hardened runtime, so the Mac app keeps its identity.
+include_android_keyboard() {
+    local source_directory="$1"
+    local target="$staged_bundle/$android_keyboard_directory"
+    rm -rf "$target"
+    mkdir -p "$target" \
+        && cp "$source_directory/$android_apk_name" "$target/$android_apk_name" \
+        && cp "$source_directory/$android_metadata_name" "$target/$android_metadata_name" \
+        && chmod 644 "$target/$android_apk_name" "$target/$android_metadata_name" \
+        && codesign --force --sign "${signing_fingerprint:-$signing_identity}" \
+            --preserve-metadata=identifier,entitlements,requirements,flags,runtime \
+            "$staged_bundle" \
+        && codesign --verify --deep --strict "$staged_bundle"
+}
+
+prepare_android_keyboard() {
+    local installed_keyboard="${VOICEINK_INSTALLED_BUNDLE_PATH:-}/$android_keyboard_directory"
+    local source_directory=""
+    local missing=()
+    local missing_keys=()
+    local failure_reason=""
+    local missing_index
+    local reason_file="$work_root/android-failure-reason"
+
+    if [[ ! -f "$candidate_worktree/android/scripts/build-release.sh" ]]; then
+        printf 'This revision has no Android app; skipping the APK build.\n'
+    else
+        if ! find_android_java_home; then
+            missing+=("a JDK 17 or later (for example from Android Studio or 'brew install --cask temurin')")
+            missing_keys+=(jdk)
+        fi
+        if ! find_android_sdk; then
+            missing+=("the Android SDK (install it with Android Studio; VoiceInk looked in ANDROID_HOME, ANDROID_SDK_ROOT and ~/Library/Android/sdk)")
+            missing_keys+=(sdk)
+        fi
+        if ! /bin/bash "$candidate_worktree/android/scripts/release-key.sh" check >/dev/null 2>&1; then
+            missing+=("the Android release signing key in the login Keychain (import it with 'android/scripts/release-key.sh import FILE', see android/README.md)")
+            missing_keys+=(key)
+        fi
+
+        if (( ${#missing[@]} > 0 )); then
+            android_notice_key="missing:$(IFS=,; printf '%s' "${missing_keys[*]}")"
+            failure_reason="${missing[0]}"
+            for ((missing_index = 1; missing_index < ${#missing[@]}; missing_index++)); do
+                failure_reason="$failure_reason, and ${missing[$missing_index]}"
+            done
+            android_notice="VoiceInk did not build the Android keyboard APK for this update because this Mac is missing $failure_reason. VoiceInk never installs these itself."
+            printf 'Skipping the Android APK build: missing %s.\n' "${missing_keys[*]}"
+        else
+            printf 'Building the Android keyboard APK (JDK %s, SDK %s)...\n' "$android_java_home" "$android_sdk"
+            if build_android_keyboard 2> "$reason_file"; then
+                android_outcome=built
+                source_directory="$work_root/android-keyboard"
+                rm -f "$android_log_path"
+                printf 'Built Android keyboard APK %s.\n' "$android_version_name"
+            else
+                failure_reason="$(tail -n 1 "$reason_file" 2>/dev/null || true)"
+                android_notice_key="build-failed:$fork_commit"
+                android_notice="VoiceInk prepared the update, but could not build the Android keyboard APK: ${failure_reason:-the Android build failed}. The build output is in android-build.log in the update logs."
+                mkdir -p "$(dirname "$android_log_path")" \
+                    && tail -n 400 "$work_root/android-build.log" > "$android_log_path" 2>/dev/null
+                printf 'Android APK build failed: %s.\n' "${failure_reason:-unknown error}"
+            fi
+        fi
+    fi
+
+    if [[ -z "$source_directory" && -n "${VOICEINK_INSTALLED_BUNDLE_PATH:-}" \
+        && -s "$installed_keyboard/$android_apk_name" && -f "$installed_keyboard/$android_metadata_name" ]]
+    then
+        android_outcome=carried
+        source_directory="$installed_keyboard"
+        android_version_name="$(read_android_metadata_field versionName "$installed_keyboard/$android_metadata_name" || true)"
+    fi
+
+    if [[ -n "$source_directory" ]] && ! include_android_keyboard "$source_directory"; then
+        # Fall back to the bundle exactly as xcodebuild signed it.
+        rm -rf "$staged_bundle"
+        /usr/bin/ditto "$candidate_bundle" "$staged_bundle"
+        android_outcome=""
+        android_notice_key="include-failed:$fork_commit"
+        android_notice="VoiceInk prepared the update, but could not add the Android keyboard APK to the app and re-sign it."
+        printf 'Could not include the Android keyboard APK in the staged bundle.\n'
+    fi
+
+    if [[ -n "$android_notice" ]]; then
+        android_notice="$android_notice $(android_fallback_description)"
+        if [[ "$(/usr/bin/plutil -extract lastNoticeKey raw "$android_state_path" 2>/dev/null || true)" != "$android_notice_key" ]]; then
+            android_notice_to_report="$android_notice"
+            printf 'Android APK notice: %s\n' "$android_notice"
+        fi
+    fi
+}
+
+# Persists what was reported once the candidate is staged, so an earlier
+# failure of the Mac staging never swallows the notice.
+record_android_notice_state() {
+    local state_temporary="$android_state_path.tmp.$$"
+    if [[ -n "$android_notice_key" ]]; then
+        mkdir -p "$(dirname "$android_state_path")"
+        /usr/bin/plutil -create xml1 "$state_temporary" \
+            && /usr/bin/plutil -insert lastNoticeKey -string "$android_notice_key" "$state_temporary" \
+            && mv "$state_temporary" "$android_state_path"
+    elif [[ "$android_outcome" == built ]]; then
+        rm -f "$android_state_path"
+    fi
+}
+
 begin_stage staging
 candidate_bundle="$derived_data_root/Release/Build/Products/Release/VoiceInk.app"
 [[ -d "$candidate_bundle" ]] || fail "The local build did not produce VoiceInk.app."
@@ -693,8 +996,12 @@ candidate_stage="$stage_root/candidates/$fork_commit-$(date +%s)-$$"
 staged_bundle="$candidate_stage/VoiceInk.app"
 mkdir -p "$candidate_stage"
 /usr/bin/ditto "$candidate_bundle" "$staged_bundle"
+# Never fails: Android problems become a notice (see prepare_android_keyboard).
+prepare_android_keyboard || true
 codesign --verify --deep --strict "$staged_bundle" \
     || fail "The staged candidate bundle failed signature validation."
+[[ "$(/usr/bin/plutil -extract VoiceInkForkCommit raw "$staged_bundle/Contents/Info.plist")" == "$fork_commit" ]] \
+    || fail "The staged candidate bundle has the wrong fork provenance."
 
 # Describe the candidate for the Update Ready UI: upstream commits the installed
 # app does not contain yet (or that the fork base lacks when the installed
@@ -745,6 +1052,9 @@ manifest_temporary="$manifest_path.tmp.$$"
 /usr/bin/plutil -insert bundlePath -string "$staged_bundle" "$manifest_temporary"
 /usr/bin/plutil -insert preparedAt -date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$manifest_temporary"
 write_change_summary "$manifest_temporary"
+if [[ -n "$android_notice_to_report" ]]; then
+    /usr/bin/plutil -insert androidAppNotice -string "$android_notice_to_report" "$manifest_temporary"
+fi
 candidate_ref="refs/voiceink-updater/candidates/$fork_commit-$(date +%s)-$$"
 /usr/bin/plutil -insert candidateRef -string "$candidate_ref" "$manifest_temporary"
 git -C "$repository_path" update-ref "$candidate_ref" "$fork_commit"
@@ -754,6 +1064,7 @@ cleanup_candidate_artifacts \
     "$previous_candidate_sha" \
     "$previous_candidate_ref" \
     "$previous_candidate_bundle"
+record_android_notice_state || true
 record_stage_success staging
 write_preparation_result candidatePrepared
 

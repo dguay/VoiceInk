@@ -36,6 +36,21 @@
     <!-- Setup -->
     <string name="setup_title">VoiceInk Keyboard</string>
     <string name="setup_intro">Dictate into any app through VoiceInk on your Mac, then return to your usual keyboard.</string>
+    <!-- Update from the paired Mac -->
+    <string name="update_available_title">Update available</string>
+    <string name="update_available_version">Version %1$s is ready on %2$s. You have %3$s.</string>
+    <string name="update_install">Download and install</string>
+    <string name="update_permission_needed">To install this update, Android needs your permission for VoiceInk Keyboard to install apps. It installs only updates of itself, from your paired Mac. Turn on Allow from this source, then come back.</string>
+    <string name="update_allow_installs">Allow installing updates</string>
+    <string name="update_downloading">Downloading the update from %1$s…</string>
+    <string name="update_confirm">Confirm the update in the system prompt. Your pairing and settings are kept.</string>
+    <string name="update_corrupted">The download was damaged: it does not match the update your Mac offers. It was deleted and nothing was installed. Try again.</string>
+    <string name="update_download_failed">The update could not be downloaded. Check that your Mac is reachable, then try again.</string>
+    <string name="update_gone">Your Mac no longer offers this update.</string>
+    <string name="update_canceled">The update was canceled. Nothing was installed.</string>
+    <string name="update_failed">The update was not installed (%1$s).</string>
+    <string name="update_failed_unknown">The update was not installed.</string>
+
     <string name="section_pair">1. Pair with your Mac</string>
     <string name="pair_help">On the Mac, open VoiceInk → Settings → Phone Dictation and turn on Allow Phone Dictation. Scan its code, or type an address and the token shown there (Copy).</string>
     <string name="scan_qr">Scan QR code</string>

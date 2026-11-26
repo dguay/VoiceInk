@@ -3,6 +3,8 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Updates the app from the APK bundled in the paired Mac's VoiceInk (setup screen). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <uses-feature android:name="android.hardware.microphone" android:required="true" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -39,6 +41,10 @@
             android:name=".setup.BubbleExclusionsActivity"
             android:exported="false"
             android:label="@string/exclusions_title" />
+
+        <receiver
+            android:name=".update.InstallResultReceiver"
+            android:exported="false" />
 
         <service
             android:name=".ime.VoiceKeyboardService"

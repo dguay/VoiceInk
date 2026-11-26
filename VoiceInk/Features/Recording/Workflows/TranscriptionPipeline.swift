@@ -38,6 +38,12 @@ class TranscriptionPipeline {
         self.enhancementService = enhancementService
     }
 
+    /// Starts capturing where the result should be pasted. Call when recording finishes,
+    /// before transcription or AI cleanup, and pass the result to `run(focusTarget:)`.
+    func captureDeliveryTarget() -> Task<PasteFocusTarget?, Never>? {
+        delivery.captureFocusTarget()
+    }
+
     /// Run the full pipeline for a given transcription record.
     /// - Parameters:
     ///   - transcription: The pending Transcription SwiftData object to populate and save.
@@ -62,6 +68,7 @@ class TranscriptionPipeline {
         cancelContextCapture: () -> Void = {},
         outputConfiguration: @escaping () -> OutputRuntimeConfiguration,
         sendAfterPaste: Bool = false,
+        focusTarget: Task<PasteFocusTarget?, Never>? = nil,
         onStateChange: @escaping (RecordingState) -> Void,
         shouldCancel: () -> Bool,
         onCancel: @escaping () async -> Void,
@@ -318,7 +325,8 @@ class TranscriptionPipeline {
                 responseConfig: responseConfig,
                 responseError: responseError,
                 isAssistantFollowUp: assistant.isFollowUp,
-                sendAfterPaste: sendAfterPaste
+                sendAfterPaste: sendAfterPaste,
+                focusTarget: focusTarget
             ),
             actions: TranscriptionDelivery.Actions(
                 setState: onStateChange,

@@ -4,6 +4,7 @@ import Foundation
 struct ForkUpdateUserNotification: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case candidateReady
+        case androidAppNotice
         case persistentFailure
         case permissionRegression
         case rollbackSucceeded
@@ -32,7 +33,7 @@ final class AppForkUpdateNotificationDeliverer: ForkUpdateNotificationDelivering
             type = .info
         case .rollbackSucceeded:
             type = .success
-        case .permissionRegression:
+        case .permissionRegression, .androidAppNotice:
             type = .warning
         case .persistentFailure, .rollbackFailed:
             type = .error

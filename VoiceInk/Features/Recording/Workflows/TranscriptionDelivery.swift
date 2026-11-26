@@ -14,6 +14,19 @@ final class TranscriptionDelivery {
         let responseError: String?
         let isAssistantFollowUp: Bool
         let sendAfterPaste: Bool
+        /// Delivery target captured when recording finished. Nil when the focus guard is off.
+        var focusTarget: Task<PasteFocusTarget?, Never>? = nil
+    }
+
+    private let focusSafePaster: FocusSafePaster
+
+    init(focusSafePaster: FocusSafePaster? = nil) {
+        self.focusSafePaster = focusSafePaster ?? FocusSafePaster()
+    }
+
+    /// Starts capturing the paste target. Call when recording finishes.
+    func captureFocusTarget() -> Task<PasteFocusTarget?, Never>? {
+        focusSafePaster.captureTarget()
     }
 
     struct Actions {
@@ -49,7 +62,7 @@ final class TranscriptionDelivery {
 
         if let text = request.text {
             let sendKey = request.sendAfterPaste ? FinishAndSendSettings.selectedKey : request.output.autoSendKey
-            await paste(text, sendKey: sendKey, actions: actions)
+            await paste(text, sendKey: sendKey, focusTarget: request.focusTarget, actions: actions)
         } else {
             await actions.dismiss()
         }
@@ -164,13 +177,28 @@ final class TranscriptionDelivery {
         String(format: "%.3f", duration)
     }
 
-    private func paste(_ text: String, sendKey: FinishAndSendKey, actions: Actions) async {
+    private func paste(
+        _ text: String,
+        sendKey: FinishAndSendKey,
+        focusTarget: Task<PasteFocusTarget?, Never>?,
+        actions: Actions
+    ) async {
         let textToPaste = deliverableText(from: text)
         let appendSpace = UserDefaults.standard.bool(forKey: "AppendTrailingSpace")
         let pastedText = textToPaste + (appendSpace ? " " : "")
         actions.setState(.idle)
         SoundManager.shared.playStopSound()
         await actions.dismiss()
+
+        if focusSafePaster.guardEnabled {
+            // The capture started when recording finished, so it is normally done already.
+            let captured = await focusTarget?.value
+            let paster = focusSafePaster
+            Task { @MainActor in
+                await paster.deliver(pastedText, sendKey: sendKey, captured: captured)
+            }
+            return
+        }
 
         let pasteTask = CursorPaster.startPasteAtCursor(pastedText, sendKey: sendKey)
 

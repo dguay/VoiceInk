@@ -15,6 +15,10 @@ struct StagedForkCandidate: Codable, Equatable {
     let bundleURL: URL
     let preparedAt: Date
     let changeSummary: StagedForkChangeSummary?
+    /// Why the candidate bundles no new Android keyboard APK (toolchain or key
+    /// missing, or the build failed), present only the first time the helper
+    /// reports it. The Mac update is unaffected.
+    let androidAppNotice: String?
 
     private enum CodingKeys: String, CodingKey {
         case forkCommit
@@ -22,6 +26,7 @@ struct StagedForkCandidate: Codable, Equatable {
         case bundlePath
         case preparedAt
         case changeSummary
+        case androidAppNotice
     }
 
     init(
@@ -29,13 +34,15 @@ struct StagedForkCandidate: Codable, Equatable {
         upstreamCommit: String,
         bundleURL: URL,
         preparedAt: Date,
-        changeSummary: StagedForkChangeSummary? = nil
+        changeSummary: StagedForkChangeSummary? = nil,
+        androidAppNotice: String? = nil
     ) {
         self.forkCommit = forkCommit
         self.upstreamCommit = upstreamCommit
         self.bundleURL = bundleURL
         self.preparedAt = preparedAt
         self.changeSummary = changeSummary
+        self.androidAppNotice = androidAppNotice
     }
 
     init(from decoder: any Decoder) throws {
@@ -50,6 +57,7 @@ struct StagedForkCandidate: Codable, Equatable {
             StagedForkChangeSummary.self,
             forKey: .changeSummary
         )
+        androidAppNotice = try container.decodeIfPresent(String.self, forKey: .androidAppNotice)
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -59,6 +67,7 @@ struct StagedForkCandidate: Codable, Equatable {
         try container.encode(bundleURL.path, forKey: .bundlePath)
         try container.encode(preparedAt, forKey: .preparedAt)
         try container.encodeIfPresent(changeSummary, forKey: .changeSummary)
+        try container.encodeIfPresent(androidAppNotice, forKey: .androidAppNotice)
     }
 }
 
@@ -1497,7 +1506,7 @@ final class ForkUpdateTransaction: ForkUpdateTransacting {
                 forkCommit: candidate.forkCommit,
                 upstreamCommit: candidate.upstreamCommit,
                 retry: nil,
-                message: nil
+                message: candidate.androidAppNotice
             )
         )
         return .staged(candidate)
