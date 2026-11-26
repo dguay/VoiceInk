@@ -68,4 +68,17 @@ class FieldContextTest {
         assertNull(FieldContext.of("  ", InputType.TYPE_CLASS_TEXT).app)
         assertNull(FieldContext.of(null, InputType.TYPE_CLASS_TEXT).app)
     }
+
+    @Test fun contextKeepsAUsableAppName() {
+        assertEquals(
+            FieldContext("com.whatsapp", FieldKind.TEXT, "WhatsApp"),
+            FieldContext.of("com.whatsapp", InputType.TYPE_CLASS_TEXT, appName = "  WhatsApp "),
+        )
+        assertNull(FieldContext.of("com.whatsapp", InputType.TYPE_CLASS_TEXT).appName)
+        assertNull(FieldContext.of("com.whatsapp", InputType.TYPE_CLASS_TEXT, appName = "   ").appName)
+        assertNull(FieldContext.of("com.whatsapp", InputType.TYPE_CLASS_TEXT, appName = "com.whatsapp").appName)
+        assertNull(FieldContext.of("com.whatsapp", InputType.TYPE_CLASS_TEXT, appName = "a".repeat(101)).appName)
+        assertNull(FieldContext.of("com.whatsapp", InputType.TYPE_CLASS_TEXT, appName = "Two\nLines").appName)
+        assertNull(FieldContext.of(null, InputType.TYPE_CLASS_TEXT, appName = "WhatsApp").appName)
+    }
 }

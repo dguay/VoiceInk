@@ -46,6 +46,8 @@ struct ModeConfig: Codable, Identifiable, Equatable {
     var icon: ModeIcon
     var appConfigs: [AppConfig]?
     var urlConfigs: [URLConfig]?
+    /// Android apps whose phone dictations use this mode. `nil` in settings saved before they existed.
+    var androidAppConfigs: [AndroidAppConfig]?
     var triggerGroups: [ModeTriggerGroup]?
     var triggerWords: [String] = []
     var isAIEnhancementEnabled: Bool
@@ -66,7 +68,7 @@ struct ModeConfig: Codable, Identifiable, Equatable {
     var isDefault: Bool = false
 
     enum CodingKeys: String, CodingKey {
-        case id, name, icon, appConfigs, urlConfigs, triggerGroups, triggerWords, isAIEnhancementEnabled,
+        case id, name, icon, appConfigs, urlConfigs, androidAppConfigs, triggerGroups, triggerWords, isAIEnhancementEnabled,
             selectedPrompt, isRealtimeTranscriptionEnabled, selectedLanguage, isTextFormattingEnabled,
             useClipboardContext, useSelectedTextContext, useScreenCapture, selectedAIProvider, selectedAIModel,
             outputMode, autoSendKey, isAutoSendEnabled, customCommand, isEnabled, isDefault
@@ -77,7 +79,8 @@ struct ModeConfig: Codable, Identifiable, Equatable {
 
     init(
         id: UUID = UUID(), name: String, icon: ModeIcon = .defaultIcon, appConfigs: [AppConfig]? = nil,
-        urlConfigs: [URLConfig]? = nil, triggerGroups: [ModeTriggerGroup]? = nil, triggerWords: [String] = [],
+        urlConfigs: [URLConfig]? = nil, androidAppConfigs: [AndroidAppConfig]? = nil,
+        triggerGroups: [ModeTriggerGroup]? = nil, triggerWords: [String] = [],
         isAIEnhancementEnabled: Bool, selectedPrompt: String? = nil,
         selectedTranscriptionModelName: String? = nil, isRealtimeTranscriptionEnabled: Bool = true,
         selectedLanguage: String? = nil, useClipboardContext: Bool = false, useSelectedTextContext: Bool = true,
@@ -92,6 +95,7 @@ struct ModeConfig: Codable, Identifiable, Equatable {
         self.icon = icon
         self.appConfigs = appConfigs
         self.urlConfigs = urlConfigs
+        self.androidAppConfigs = androidAppConfigs
         self.triggerGroups = triggerGroups
         self.triggerWords = Self.normalizedTriggerWords(triggerWords)
         self.isAIEnhancementEnabled = isAIEnhancementEnabled
@@ -138,6 +142,7 @@ struct ModeConfig: Codable, Identifiable, Equatable {
         }
         appConfigs = try container.decodeIfPresent([AppConfig].self, forKey: .appConfigs)
         urlConfigs = try container.decodeIfPresent([URLConfig].self, forKey: .urlConfigs)
+        androidAppConfigs = try container.decodeIfPresent([AndroidAppConfig].self, forKey: .androidAppConfigs)
         triggerGroups = try container.decodeIfPresent([ModeTriggerGroup].self, forKey: .triggerGroups)
         triggerWords = Self.normalizedTriggerWords(
             try container.decodeIfPresent([String].self, forKey: .triggerWords) ?? [])
@@ -193,6 +198,7 @@ struct ModeConfig: Codable, Identifiable, Equatable {
         try container.encode(icon, forKey: .icon)
         try container.encodeIfPresent(appConfigs, forKey: .appConfigs)
         try container.encodeIfPresent(urlConfigs, forKey: .urlConfigs)
+        try container.encodeIfPresent(androidAppConfigs, forKey: .androidAppConfigs)
         try container.encodeIfPresent(triggerGroups, forKey: .triggerGroups)
         if !triggerWords.isEmpty { try container.encode(triggerWords, forKey: .triggerWords) }
         try container.encode(isAIEnhancementEnabled, forKey: .isAIEnhancementEnabled)
@@ -245,6 +251,33 @@ struct URLConfig: Codable, Identifiable, Equatable {
 
     static func == (lhs: URLConfig, rhs: URLConfig) -> Bool {
         lhs.id == rhs.id
+    }
+}
+
+/// An Android app rule: phone dictations into `packageName` use the mode that has the rule.
+struct AndroidAppConfig: Codable, Identifiable, Equatable {
+    let id: UUID
+    /// The Android package name, validated like the `app` parameter of `POST /v1/transcribe`.
+    var packageName: String
+    /// The readable name the phone sent, if any.
+    var appName: String?
+
+    init(id: UUID = UUID(), packageName: String, appName: String? = nil) {
+        self.id = id
+        self.packageName = packageName
+        self.appName = appName
+    }
+
+    /// The phone's name for the app, else a well-known name, else the package name.
+    var displayName: String {
+        appName ?? AndroidAppName.displayName(for: packageName)
+    }
+}
+
+extension ModeConfig {
+    /// Whether one of this mode's Android app rules names `packageName`.
+    func hasAndroidAppRule(for packageName: String) -> Bool {
+        (androidAppConfigs ?? []).contains { $0.packageName == packageName }
     }
 }
 
@@ -324,6 +357,7 @@ class ModeManager: ObservableObject {
         // The new mode keeps the settings, but claims no automatic triggers.
         duplicate.appConfigs = nil
         duplicate.urlConfigs = nil
+        duplicate.androidAppConfigs = nil
         duplicate.triggerGroups = nil
         duplicate.triggerWords = []
 
@@ -413,13 +447,14 @@ class ModeManager: ObservableObject {
     /// Captures rule order as well as disabled rules, which matching deliberately skips.
     func logTriggerRules(diagnosticID: String) {
         triggerLogger.notice(
-            "Mode rules id=\(diagnosticID, privacy: .public) count=\(self.configurations.count, privacy: .public) precedence=explicit-mode,website,app,default first-match-wins=true"
+            "Mode rules id=\(diagnosticID, privacy: .public) count=\(self.configurations.count, privacy: .public) precedence=explicit-mode,website,app,default phonePrecedence=android-app,default first-match-wins=true"
         )
         for (index, config) in configurations.enumerated() {
             let apps = config.allAppConfigs.map { $0.bundleIdentifier }.joined(separator: ",")
             let websites = config.allURLConfigs.map { $0.url }.joined(separator: ",")
+            let androidApps = (config.androidAppConfigs ?? []).map(\.packageName).joined(separator: ",")
             triggerLogger.notice(
-                "Mode rule id=\(diagnosticID, privacy: .public) order=\(index, privacy: .public) mode=\(config.id.uuidString, privacy: .public) name=\(config.name, privacy: .private) enabled=\(config.isEnabled, privacy: .public) default=\(config.isDefault, privacy: .public) apps=\(apps, privacy: .public) websites=\(websites, privacy: .private)"
+                "Mode rule id=\(diagnosticID, privacy: .public) order=\(index, privacy: .public) mode=\(config.id.uuidString, privacy: .public) name=\(config.name, privacy: .private) enabled=\(config.isEnabled, privacy: .public) default=\(config.isDefault, privacy: .public) apps=\(apps, privacy: .public) websites=\(websites, privacy: .private) androidApps=\(androidApps, privacy: .public)"
             )
         }
     }
@@ -560,6 +595,27 @@ class ModeManager: ObservableObject {
             value = String(value.dropFirst(4))
         }
         return value
+    }
+
+    /// The mode for a phone dictation into the Android app `app` (see `PhoneModeResolver`). With a
+    /// `diagnosticID`, logs the rules and the outcome: package names and mode IDs, never dictated text.
+    func phoneConfiguration(forApp app: String?, diagnosticID: String? = nil) -> ModeConfig? {
+        let resolved = PhoneModeResolver.mode(forApp: app, configurations: configurations)
+        if let diagnosticID {
+            logTriggerRules(diagnosticID: diagnosticID)
+            let source: String
+            if let resolved, let app, resolved.isEnabled, resolved.hasAndroidAppRule(for: app) {
+                source = "android-app-rule"
+            } else if resolved?.isDefault == true {
+                source = "default-mode"
+            } else {
+                source = resolved == nil ? "no-enabled-mode" : "first-enabled-mode"
+            }
+            triggerLogger.notice(
+                "Phone mode id=\(diagnosticID, privacy: .public) app=\(app ?? "none", privacy: .public) source=\(source, privacy: .public) mode=\(resolved?.id.uuidString ?? "none", privacy: .public)"
+            )
+        }
+        return resolved
     }
 
     func getConfigurationForApp(_ bundleId: String, diagnosticID: String? = nil) -> ModeConfig? {

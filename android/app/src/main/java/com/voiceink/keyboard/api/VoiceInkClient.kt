@@ -187,15 +187,19 @@ class VoiceInkClient(
             }
         }
 
-        /** `/v1/transcribe` with the optional `app` and `field` query parameters for [field]. */
+        /** `/v1/transcribe` with the optional `app`, `appName` and `field` query parameters for [field]. */
         internal fun transcribePath(field: FieldContext?): String {
             if (field == null) return "/v1/transcribe"
             val query = listOfNotNull(
-                field.app?.let { "app=" + URLEncoder.encode(it, "UTF-8") },
+                field.app?.let { "app=" + encodeQueryValue(it) },
+                field.appName?.takeIf { field.app != null }?.let { "appName=" + encodeQueryValue(it) },
                 "field=" + field.field.wire,
             )
             return "/v1/transcribe?" + query.joinToString("&")
         }
+
+        /** Percent-encodes a query value, with spaces as `%20` (the Mac does not read `+` as a space). */
+        private fun encodeQueryValue(value: String): String = URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 
         internal fun orderedHosts(hosts: List<String>, preferred: String?): List<String> =
             if (preferred != null && preferred in hosts) listOf(preferred) + (hosts - preferred) else hosts

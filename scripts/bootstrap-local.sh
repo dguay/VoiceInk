@@ -125,6 +125,14 @@ else
     printf 'Codex authentication: ready.\n'
 fi
 
+# Report only: the Mac build does not need the Android release key.
+android_release_key_script="$repository_root/android/scripts/release-key.sh"
+if [[ ! -f "$android_release_key_script" ]]; then
+    printf 'Android release key: not checked (%s is missing).\n' "$android_release_key_script"
+elif ! bash "$android_release_key_script" check; then
+    printf 'Warning: Android release builds need the release key; continuing.\n' >&2
+fi
+
 (
     cd "$repository_root"
     git fetch upstream main

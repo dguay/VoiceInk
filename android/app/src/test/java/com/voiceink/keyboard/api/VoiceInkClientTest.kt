@@ -136,6 +136,20 @@ class VoiceInkClientTest {
         )
     }
 
+    @Test fun transcribePathSendsTheAppNameWithSpacesAsPercent20() {
+        assertEquals(
+            "/v1/transcribe?app=com.google.android.apps.docs.editors.docs&appName=Google%20Docs%20%26%20Co&field=text",
+            VoiceInkClient.transcribePath(
+                FieldContext("com.google.android.apps.docs.editors.docs", FieldKind.TEXT, "Google Docs & Co"),
+            ),
+        )
+        // A name without an app is never sent.
+        assertEquals(
+            "/v1/transcribe?field=text",
+            VoiceInkClient.transcribePath(FieldContext(null, FieldKind.TEXT, "Orphan")),
+        )
+    }
+
     @Test fun transcribeKeepsEnhancementError() {
         handler = { respond(it, 200, """{"text":"raw text","enhancementError":"AI provider timed out","id":null,"durationSeconds":null,"model":null,"mode":null}""") }
 

@@ -61,8 +61,12 @@ struct PhoneModeResolverTests {
         #expect(PhoneModeResolver.mode(forApp: nil, configurations: []) == nil)
     }
 
-    @Test func androidAppRulesDoNotExistYet() {
-        #expect(PhoneModeResolver.noAndroidAppRules(development, "com.slack") == false)
+    @Test func theDefaultMatcherReadsTheModesAndroidAppRules() {
+        var slack = development
+        slack.androidAppConfigs = [AndroidAppConfig(packageName: "com.slack")]
+        #expect(PhoneModeResolver.androidAppRules(slack, "com.slack"))
+        #expect(PhoneModeResolver.androidAppRules(slack, "com.whatsapp") == false)
+        #expect(PhoneModeResolver.androidAppRules(development, "com.slack") == false)
     }
 }
 

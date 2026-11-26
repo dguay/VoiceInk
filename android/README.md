@@ -34,6 +34,58 @@ cd android
 ./gradlew lintDebug
 ```
 
+The version comes from Git (`scripts/version.sh`): `versionCode` is the number of first-parent
+commits of `HEAD`, so every later fork commit gets a greater code, and `versionName` is
+`0.1.<versionCode>-<commit SHA>` (shown in *App info*). The build fails with a clear message
+outside a Git clone or in a shallow clone (`git fetch --unshallow` fixes the latter).
+
+### Signed release build
+
+Install the release build on your phone, not the debug one. Every Mac signs debug builds with its
+own debug key, so a debug APK from another Mac cannot install over the app. The release build uses
+one signing key shared by all your Macs, so builds from any of them install over each other with
+`adb install -r` and keep the pairing and the keyboard and bubble settings.
+
+```sh
+android/scripts/build-release.sh   # from the repository root; android/app/build/outputs/apk/release/app-release.apk
+```
+
+The script reads the key from the login Keychain and writes it to an owner-only temporary folder.
+The folder is deleted when the build ends. The key and its password are never printed or passed on
+a command line, and they are never stored in the repository or in Gradle files. If the key is
+missing, the script stops before building and says how to create or import it.
+`./gradlew assembleRelease` run directly stops the same way. `scripts/bootstrap-local.sh` reports
+whether the key is present. To check a build: `apksigner verify --print-certs
+android/app/build/outputs/apk/release/app-release.apk` (from the SDK's `build-tools`).
+
+**Release signing key** (`android/scripts/release-key.sh`): an EC P-256 key in a PKCS12 keystore,
+kept as two generic passwords in the login Keychain (service `voiceink-android-release`, accounts
+`keystore` and `password`). Keep it: if it is lost, the next build cannot install over the app
+until the app is uninstalled.
+
+- **First Mac, once**: `android/scripts/release-key.sh create`. It refuses to run if a key is
+  already in the Keychain.
+- **Another Mac (owner step)**: on a Mac that has the key, run
+  `android/scripts/release-key.sh export ~/Desktop/voiceink-android-key.txt`. It writes an
+  owner-only file holding the key and its password, and refuses to write into a Git working
+  tree. Copy the file to the other Mac directly (AirDrop or a USB drive, not a cloud folder or
+  chat), run `android/scripts/release-key.sh import ~/Desktop/voiceink-android-key.txt` there,
+  then delete the file on both Macs. Import checks that the keystore opens before storing it.
+- **Check**: `android/scripts/release-key.sh check` (exit status 0 when present).
+
+### One-time move from the debug build
+
+A debug build that is already installed was signed with a Mac's debug key, and Android refuses to
+replace it with the release build. Do this once:
+
+1. `adb uninstall com.voiceink.keyboard`. This removes the pairing (its key never leaves the
+   phone and is not backed up) and turns off the keyboard and the mic bubble's service.
+2. `adb install android/app/build/outputs/apk/release/app-release.apk`.
+3. Open VoiceInk Keyboard and redo the setup steps below: pair again, allow the microphone, turn
+   on **VoiceInk voice**, and turn the mic bubble back on.
+
+After that, `adb install -r` with a release APK built on any of your Macs updates the app in place.
+
 ## Install on your phone
 
 1. **Enable USB debugging** on the phone: Settings → About phone → tap *Build number* seven
@@ -43,8 +95,12 @@ cd android
 
    ```sh
    adb devices                       # the phone must be listed as "device"
-   adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+   adb install -r android/app/build/outputs/apk/release/app-release.apk
    ```
+
+   Build it first with `android/scripts/build-release.sh` (see
+   [Signed release build](#signed-release-build)). If a debug build is installed, do the
+   [one-time move](#one-time-move-from-the-debug-build) first.
 
    Wireless alternative (Android 11+): Developer options → *Wireless debugging* → *Pair device
    with pairing code*, then `adb pair IP:PORT` and `adb connect IP:PORT`.

@@ -173,8 +173,12 @@ final class PhoneDictationController: ObservableObject {
                 return .ready(model: configuration.model.displayName, mode: configuration.mode.name)
             },
             transcribe: { [weak self] audioURL, context in
+                if let app = context.app {
+                    RecentAndroidAppsStore.shared.record(packageName: app, appName: context.appName)
+                }
+                let diagnosticID = String(UUID().uuidString.prefix(8))
                 guard let self, let pipeline = self.pipeline,
-                    let mode = Self.phoneMode(forApp: context.app)
+                    let mode = Self.phoneMode(forApp: context.app, diagnosticID: diagnosticID)
                 else {
                     throw TranscriptionError.noModelSelected
                 }
@@ -199,8 +203,8 @@ final class PhoneDictationController: ObservableObject {
     }
 
     /// The phone's mode, never the Mac's active one. See `PhoneModeResolver`.
-    private static func phoneMode(forApp app: String?) -> ModeConfig? {
-        PhoneModeResolver.mode(forApp: app, configurations: ModeManager.shared.configurations)
+    private static func phoneMode(forApp app: String?, diagnosticID: String? = nil) -> ModeConfig? {
+        ModeManager.shared.phoneConfiguration(forApp: app, diagnosticID: diagnosticID)
     }
 
     nonisolated static func transcriptionOptions(for context: PhoneDictationRequestContext) -> AudioFileTranscriptionOptions {
