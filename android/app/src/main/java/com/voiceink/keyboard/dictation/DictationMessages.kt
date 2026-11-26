@@ -6,7 +6,7 @@ import com.voiceink.keyboard.api.ApiError
 
 /** The status line and extra action every dictation entry point shows for a [DictationState]. */
 internal object DictationMessages {
-    fun status(context: Context, state: DictationState, macName: String): String = when (state) {
+    fun status(context: Context, state: DictationState, macName: String, copyAvailable: Boolean = false): String = when (state) {
         DictationState.Idle -> context.getString(R.string.status_idle)
         DictationState.Recording -> context.getString(R.string.status_recording)
         DictationState.Sending -> context.getString(R.string.status_sending, macName)
@@ -18,7 +18,9 @@ internal object DictationMessages {
             null -> when (state.reason) {
                 KeptReason.INTERRUPTED -> context.getString(R.string.status_kept)
                 KeptReason.FIELD_CHANGED -> context.getString(R.string.status_field_changed)
-                KeptReason.REJECTED -> context.getString(R.string.status_insert_rejected)
+                KeptReason.REJECTED -> context.getString(
+                    if (copyAvailable) R.string.status_insert_rejected_copy else R.string.status_insert_rejected,
+                )
             }
             ApiError.Unreachable -> context.getString(R.string.error_unreachable)
             ApiError.Unauthorized -> context.getString(R.string.error_unauthorized)

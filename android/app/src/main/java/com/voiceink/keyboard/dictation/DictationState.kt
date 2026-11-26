@@ -9,8 +9,16 @@ sealed interface DictationState {
     data object Sending : DictationState
     data object NoSpeech : DictationState
 
-    /** A kept recording waits for a retry; [error] is null when no request failed. */
-    data class Kept(val error: ApiError?, val reason: KeptReason = KeptReason.INTERRUPTED) : DictationState
+    /**
+     * A kept recording waits for a retry; [error] is null when no request failed. When the editor
+     * rejected text insertion ([KeptReason.REJECTED]), [text] holds the transcription so the user
+     * can copy it to the clipboard in one tap.
+     */
+    data class Kept(
+        val error: ApiError?,
+        val reason: KeptReason = KeptReason.INTERRUPTED,
+        val text: String? = null,
+    ) : DictationState
     data object NotPaired : DictationState
     data object NeedsMicrophone : DictationState
     data object RecorderFailed : DictationState

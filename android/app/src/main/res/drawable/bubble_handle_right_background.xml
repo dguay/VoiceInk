@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Collapsed mic bubble handle tucked flush against the right screen edge, with a centered grip bar. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/bubble_mic" />
+            <corners
+                android:topLeftRadius="10dp"
+                android:bottomLeftRadius="10dp"
+                android:topRightRadius="0dp"
+                android:bottomRightRadius="0dp" />
+        </shape>
+    </item>
+    <item
+        android:width="3dp"
+        android:height="18dp"
+        android:gravity="center">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/bubble_mic_icon_rest" />
+            <corners android:radius="2dp" />
+        </shape>
+    </item>
+</layer-list>

@@ -1,5 +1,29 @@
 package com.voiceink.keyboard.bubble
 
+import com.voiceink.keyboard.dictation.DictationState
+
+/** How long the mic bubble sits untouched before tucking against the nearest screen edge. */
+enum class IdleCollapseTimeout(val seconds: Int) {
+    OFF(0),
+    SECONDS_5(5),
+    SECONDS_10(10),
+    SECONDS_30(30);
+
+    val delayMs: Long get() = seconds * 1000L
+    val enabled: Boolean get() = seconds > 0
+
+    companion object {
+        fun fromSeconds(seconds: Int): IdleCollapseTimeout =
+            entries.firstOrNull { it.seconds == seconds } ?: OFF
+    }
+}
+
+/** Which physical side of the screen a collapsed handle tucks against. */
+internal enum class ScreenEdge { LEFT, RIGHT }
+
+/** Where the collapsed edge handle goes and which screen edge it is tucked against. */
+internal data class CollapsedPlacement(val edge: ScreenEdge, val box: Box)
+
 /** The input-focused field, as the bubble sees it, and the package of the [app] it belongs to. */
 internal data class FocusedField(val editable: Boolean, val password: Boolean, val app: String? = null)
 
@@ -95,6 +119,43 @@ internal object BubblePlacement {
         return BubblePosition(across, (area.bottom - box.bottom).coerceAtLeast(margin))
     }
 
+    /** Which edge of [area] is closer to [box], breaking exact center ties toward the layout end side. */
+    fun nearestEdge(area: Box, box: Box, rtl: Boolean = false): ScreenEdge {
+        val distLeft = box.left - area.left
+        val distRight = area.right - box.right
+        return when {
+            distLeft < distRight -> ScreenEdge.LEFT
+            distRight < distLeft -> ScreenEdge.RIGHT
+            rtl -> ScreenEdge.LEFT
+            else -> ScreenEdge.RIGHT
+        }
+    }
+
+    /**
+     * Tucks a [handleWidth] × [handleHeight] edge handle flush against the nearest horizontal edge
+     * of [area] for [expanded], vertically centered on [expanded] and clamped within [margin] of
+     * [area]'s top and bottom edges.
+     */
+    fun dockCollapsed(
+        area: Box,
+        expanded: Box,
+        handleWidth: Int,
+        handleHeight: Int,
+        margin: Int,
+        rtl: Boolean = false,
+    ): CollapsedPlacement {
+        val edge = nearestEdge(area, expanded, rtl)
+        val left = when (edge) {
+            ScreenEdge.LEFT -> area.left
+            ScreenEdge.RIGHT -> (area.right - handleWidth).coerceAtLeast(area.left)
+        }
+        val centerY = (expanded.top + expanded.bottom) / 2
+        val top = (centerY - handleHeight / 2)
+            .coerceAtMost(area.bottom - margin - handleHeight)
+            .coerceAtLeast(area.top + margin)
+        return CollapsedPlacement(edge, Box(left, top, left + handleWidth, top + handleHeight))
+    }
+
     private fun clamp(area: Box, box: Box, margin: Int) =
         clamp(area, box.left, box.top, box.right - box.left, box.bottom - box.top, margin)
 
@@ -141,4 +202,107 @@ internal class Steadiness<T : Any>(private val quietMs: Long = 250, private val 
         last = null
         waitingSince = null
     }
+}
+
+/**
+ * Tracks when an idle mic bubble should tuck against the nearest screen edge and when it must stay
+ * expanded. Never collapses when [IdleCollapseTimeout.OFF], while hidden, while touched/dragged, or
+ * in any non-[DictationState.Idle] state (recording, sending, kept recording, or error/setup card).
+ * Repeated screen updates while typing do not reset the timer or uncollapse an edge handle; direct
+ * touches reset the timer, and hiding (closing the keyboard) restores the expanded starting state.
+ */
+internal class BubbleIdleCollapse {
+    var collapsed: Boolean = false
+        private set
+
+    private var visible = false
+    private var touching = false
+    private var timeout = IdleCollapseTimeout.OFF
+    private var state: DictationState = DictationState.Idle
+    private var deadlineMs: Long? = null
+
+    /** Bubble appeared (or updated while already visible) at [now]. */
+    fun onShow(timeout: IdleCollapseTimeout, state: DictationState, now: Long) {
+        if (!visible) {
+            visible = true
+            collapsed = false
+            touching = false
+            this.timeout = timeout
+            this.state = state
+            deadlineMs = if (canCollapse()) now + timeout.delayMs else null
+            return
+        }
+        sync(timeout, state, now)
+    }
+
+    /** Bubble hid (keyboard closed, password field, or excluded app): restore normal starting state. */
+    fun onHide() {
+        visible = false
+        collapsed = false
+        touching = false
+        deadlineMs = null
+    }
+
+    /** Applies the latest [timeout] setting and dictation [state] at [now]. */
+    fun sync(timeout: IdleCollapseTimeout, state: DictationState, now: Long) {
+        if (!visible) {
+            this.timeout = timeout
+            this.state = state
+            deadlineMs = null
+            return
+        }
+        val prevTimeout = this.timeout
+        val wasEligible = canCollapse()
+        this.timeout = timeout
+        this.state = state
+        val nowEligible = canCollapse()
+
+        if (!nowEligible) {
+            collapsed = false
+            deadlineMs = null
+        } else if (collapsed) {
+            deadlineMs = null
+        } else if (!wasEligible || timeout != prevTimeout) {
+            deadlineMs = now + timeout.delayMs
+        }
+    }
+
+    /** Finger touched the bubble (tap or drag start): suppress collapse until released. */
+    fun onTouchStarted() {
+        touching = true
+        deadlineMs = null
+    }
+
+    /** Finger left the bubble (tap or drag end): restart the idle timer from [now]. */
+    fun onTouchEnded(now: Long) {
+        touching = false
+        if (canCollapse() && !collapsed) {
+            deadlineMs = now + timeout.delayMs
+        }
+    }
+
+    /** User tapped the collapsed edge handle: expand back to the mic button and restart the timer. */
+    fun onExpand(now: Long) {
+        collapsed = false
+        deadlineMs = if (canCollapse()) now + timeout.delayMs else null
+    }
+
+    /** Fires when the scheduled timer elapses at [now]; returns true when the bubble collapsed. */
+    fun onTimeout(now: Long): Boolean {
+        val deadline = deadlineMs ?: return false
+        if (!canCollapse() || collapsed || now < deadline) return false
+        collapsed = true
+        deadlineMs = null
+        return true
+    }
+
+    /** Milliseconds until collapse should fire from [now], or null when no timer should be scheduled. */
+    fun remainingDelayMs(now: Long): Long? {
+        if (!canCollapse() || collapsed) return null
+        val deadline = deadlineMs ?: return null
+        return (deadline - now).coerceAtLeast(0L)
+    }
+
+    private fun canCollapse(): Boolean =
+        visible && timeout.enabled && state == DictationState.Idle && !touching
 }

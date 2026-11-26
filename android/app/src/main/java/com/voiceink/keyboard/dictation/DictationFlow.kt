@@ -1,9 +1,13 @@
 package com.voiceink.keyboard.dictation
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
+import android.widget.Toast
 import com.voiceink.keyboard.R
 import com.voiceink.keyboard.api.ApiError
 import com.voiceink.keyboard.api.ApiResult
@@ -107,6 +111,14 @@ class DictationFlow internal constructor(
         show(DictationState.Idle)
     }
 
+    /** Copies the rejected transcription to the Android clipboard and clears the pending error state. */
+    fun copyKeptText(): Boolean {
+        val next = CopyFallback.copy(state, ::copyToClipboard, pending::discard)
+        if (next === state) return false
+        show(next)
+        return true
+    }
+
     fun startRecording() {
         if (!isPaired) return show(DictationState.NotPaired)
         if (!hasMicrophone) return show(DictationState.NeedsMicrophone)
@@ -157,18 +169,25 @@ class DictationFlow internal constructor(
                 pairingStore.lastHost = result.host
                 host.beforeDelivery()
                 val text = result.value.text.trim()
-                when (delivery.deliver(ticket, text, host::commit, pending::discard)) {
-                    TextDelivery.Outcome.INSERTED -> {
-                        show(DictationState.Idle)
-                        host.onDelivered(result.value.id, text)
-                        host.onInserted(pairing)
-                    }
-                    TextDelivery.Outcome.EMPTY -> show(DictationState.NoSpeech)
-                    TextDelivery.Outcome.FIELD_CHANGED -> show(DictationState.Kept(null, KeptReason.FIELD_CHANGED))
-                    TextDelivery.Outcome.REJECTED -> show(DictationState.Kept(null, KeptReason.REJECTED))
+                val outcome = delivery.deliver(ticket, text, host::commit, pending::discard)
+                show(CopyFallback.stateAfterDelivery(outcome, text))
+                if (outcome == TextDelivery.Outcome.INSERTED) {
+                    host.onDelivered(result.value.id, text)
+                    host.onInserted(pairing)
                 }
             }
         }
+    }
+
+    private fun copyToClipboard(text: String): Boolean = try {
+        val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return false
+        clipboard.setPrimaryClip(ClipData.newPlainText(context.getString(R.string.clipboard_label), text))
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
+            Toast.makeText(context, R.string.copied_to_clipboard, Toast.LENGTH_SHORT).show()
+        }
+        true
+    } catch (_: RuntimeException) {
+        false
     }
 
     private fun openApp(reason: String) {

@@ -203,13 +203,20 @@ app also offers a floating mic bubble:
 - **Apps without the bubble**: setup step 5 → **Choose apps without the bubble** lists the apps
   with a launcher icon; check an app and the bubble never appears in its fields. Uncheck it to bring
   the bubble back. Changes apply at once.
+- **Idle auto-collapse**: setup step 5 → **Idle auto-collapse** (Off by default, with 5 s, 10 s,
+  and 30 s options) tucks the bubble flush against the nearest screen edge as a slim handle after
+  it sits untouched. Tap the handle to expand it back to the mic button. It never collapses while
+  recording, transcribing, dragging, or showing a kept recording or error card; any touch resets
+  the timer, and closing and reopening the keyboard restores the expanded bubble.
 - **Dictating**: tap the bubble to record, tap again to send. The text goes through the same Mac
   pipeline as the keyboard and is inserted at the cursor of the field the bubble was showing for.
   If you move to another field or close the keyboard first, the text is not typed anywhere; the
   recording is kept and **Retry** inserts it into the field open at that time.
-- **Limitation**: the bubble inserts text with the accessibility "set text" action, which works in
-  standard Android text fields and most apps; a few custom editors (some web pages and games)
-  ignore it, and the bubble then shows "This field didn't accept the text" with the recording kept.
+- **Copy fallback**: the bubble inserts text with the accessibility "set text" action, which works
+  in standard Android text fields and most apps; a few custom editors (some web pages and games)
+  ignore it. When that happens, the bubble shows "This field didn't accept the text" and offers
+  **Copy** alongside **Retry** and **Discard**: tapping **Copy** puts the transcription on the
+  Android clipboard and clears the pending error state so you can paste manually.
 - Force-stopping the app (or reinstalling it with some tools) turns the service off; turn it on
   again in step 5.
 
