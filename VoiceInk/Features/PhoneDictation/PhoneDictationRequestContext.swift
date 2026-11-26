@@ -18,30 +18,37 @@ enum PhoneDictationFieldKind: String, CaseIterable, Equatable {
     }
 }
 
-/// What the phone tells the Mac about where the text goes. Both values are optional in API v1.
+/// What the phone tells the Mac about where the text goes. All values are optional in API v1.
 struct PhoneDictationRequestContext: Equatable {
     /// The Android package name of the app being typed into, or `nil` when absent or malformed.
     var app: String?
     /// The field kind, or `nil` when absent. An unknown value is `.other`.
     var field: PhoneDictationFieldKind?
+    /// The readable name of `app` as the phone shows it (its launcher label), or `nil` when absent,
+    /// unusable, or sent without a valid `app`.
+    var appName: String?
 
     static let empty = PhoneDictationRequestContext(app: nil, field: nil)
 
     /// Longest accepted `app` value, in characters.
     static let maxAppLength = 255
+    /// Longest accepted `appName` value, in characters.
+    static let maxAppNameLength = 100
 
-    init(app: String?, field: PhoneDictationFieldKind?) {
+    init(app: String?, field: PhoneDictationFieldKind?, appName: String? = nil) {
         self.app = app
         self.field = field
+        self.appName = app == nil ? nil : appName
     }
 
-    /// Reads `app` and `field` from the query of a transcribe request. A malformed `app` is
-    /// ignored (the request runs as if it had no app), it never fails the request.
+    /// Reads `app`, `field` and `appName` from the query of a transcribe request. A malformed `app`
+    /// or `appName` is ignored (the request runs as if it had none), it never fails the request.
     init(query: [String: String]) {
         self.app = query["app"].flatMap(Self.validatedApp)
         self.field = query["field"].map { value in
             PhoneDictationFieldKind(rawValue: value.trimmingCharacters(in: .whitespaces).lowercased()) ?? .other
         }
+        self.appName = app == nil ? nil : query["appName"].flatMap(Self.validatedAppName)
     }
 
     /// Whether this request skips AI enhancement and paragraph formatting.
@@ -60,6 +67,16 @@ struct PhoneDictationRequestContext: Equatable {
         }
         return isValid ? value : nil
     }
+
+    /// `value` trimmed when it is a usable app label: not empty, at most 100 characters, and
+    /// without control characters. Otherwise `nil`.
+    static func validatedAppName(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= maxAppNameLength,
+            !trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+        else { return nil }
+        return trimmed
+    }
 }
 
 /// Picks the mode for a phone request. It never looks at the Mac's active mode (the frontmost
@@ -68,15 +85,16 @@ enum PhoneModeResolver {
     /// Whether `mode` has an Android app rule matching `app`.
     typealias AndroidAppRuleMatcher = (_ mode: ModeConfig, _ app: String) -> Bool
 
-    /// Android app rules do not exist yet; until they do, no mode matches an app.
-    static let noAndroidAppRules: AndroidAppRuleMatcher = { _, _ in false }
+    /// Matches the Android app rules saved with the mode (`ModeConfig.androidAppConfigs`).
+    static let androidAppRules: AndroidAppRuleMatcher = { mode, app in mode.hasAndroidAppRule(for: app) }
 
-    /// The first enabled mode whose Android app rule matches `app`, otherwise the enabled Default
-    /// mode, otherwise the first enabled mode (the Mac's own fallback when no Default exists).
+    /// The first enabled mode, in configuration order, whose Android app rule matches `app`,
+    /// otherwise the enabled Default mode, otherwise the first enabled mode (the Mac's own fallback
+    /// when no Default exists).
     static func mode(
         forApp app: String?,
         configurations: [ModeConfig],
-        matchesAndroidApp: AndroidAppRuleMatcher = noAndroidAppRules
+        matchesAndroidApp: AndroidAppRuleMatcher = androidAppRules
     ) -> ModeConfig? {
         let enabled = configurations.filter(\.isEnabled)
         if let app, let match = enabled.first(where: { matchesAndroidApp($0, app) }) {

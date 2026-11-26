@@ -94,12 +94,13 @@ Request:
 Accepted `format` values: `wav`, `mp3`, `m4a`, `aiff`, `mp4`, `mov`, `aac`, `flac`, `caf`,
 `amr`, `ogg`, `oga`, `opus`, `3gp`. Any other `format` or type gets `415`.
 
-Optional query parameters describe where the text goes. Both are additive in v1: a request
+Optional query parameters describe where the text goes. All are additive in v1: a request
 without them works as before.
 
 | Parameter | Values | Meaning |
 |---|---|---|
 | `app` | Android package name, e.g. `com.whatsapp` | The app being typed into. Picks the mode (see [Mode resolution](#mode-resolution)) and is shown in the Mac's History next to the "From phone" mark. |
+| `appName` | Readable app name, e.g. `Google Docs` | The name of `app` as the phone shows it (its launcher label). Only used with a valid `app`. The Mac shows it in the mode editor's list of recent Android apps. |
 | `field` | `text`, `email`, `url`, `number`, `other` | The kind of field being typed into. |
 
 Validation:
@@ -109,6 +110,9 @@ Validation:
   `com.google.android.gm` are valid). Any other value (empty, too long, spaces, a leading digit,
   an empty segment) is ignored: the request runs and is saved as if it had no `app`. It never
   fails the request.
+- `appName` is trimmed and must be at most 100 characters without control characters. Any other
+  value, or an `appName` without a valid `app`, is ignored and never fails the request.
+  Percent-encode it and send spaces as `%20` (`+` is not read as a space). It is never logged.
 - `field` is case-insensitive. An unknown value (including an empty one) is treated as `other`.
   A missing `field` is treated like `text`.
 
@@ -119,15 +123,17 @@ mode's full processing.
 
 The Android client derives `field` from the field's `inputType`: email address variations are
 `email`, URI is `url`, number and phone classes are `number`, password and date/time fields are
-`other`, every other text variation is `text`.
+`other`, every other text variation is `text`. It sends `appName` when the system lets it read the
+target app's label, and leaves it out otherwise.
 
 ### Mode resolution
 
 The phone, not the Mac, decides which mode applies. The Mac's own active mode (picked for its
 frontmost app or website, or selected by hand) is never used for a phone request. The mode is:
 
-1. an enabled mode with an Android app rule matching `app` (Android app rules are planned; until
-   they exist this step never matches),
+1. the first enabled mode, in the order of the mode list, with an Android app rule matching `app`
+   exactly (rules are set in the mode editor's **Android apps** section; a disabled mode is
+   skipped, and Mac app and website triggers never apply to phone requests),
 2. otherwise the enabled **Default** mode,
 3. otherwise the first enabled mode.
 
@@ -161,7 +167,7 @@ for long recordings).
 Example:
 
 ```sh
-curl -sS -X POST "http://192.168.1.20:47821/v1/transcribe?app=com.google.android.gm&field=email" \
+curl -sS -X POST "http://192.168.1.20:47821/v1/transcribe?app=com.google.android.gm&appName=Gmail&field=email" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: audio/mp4" \
   --data-binary @recording.m4a
