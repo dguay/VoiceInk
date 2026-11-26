@@ -4,7 +4,10 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.View
@@ -25,11 +28,19 @@ import com.voiceink.keyboard.api.VoiceInkClient
 import com.voiceink.keyboard.bubble.BubbleSettings
 import com.voiceink.keyboard.bubble.MicBubbleService
 import com.voiceink.keyboard.store.PairingStore
+import com.voiceink.keyboard.update.AppInstaller
+import com.voiceink.keyboard.update.AppUpdateInfo
+import com.voiceink.keyboard.update.AppUpdateOffer
+import com.voiceink.keyboard.update.DownloadCheck
+import com.voiceink.keyboard.update.InstallResultStore
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.IOException
 
 /** Pairing with the Mac and the one-time keyboard setup. */
 class MainActivity : Activity() {
@@ -56,6 +67,19 @@ class MainActivity : Activity() {
     // The bubble can be dragged over this screen; show Reset as soon as it is.
     private val bubbleSettingsChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> refresh() }
 
+    private lateinit var installResults: InstallResultStore
+    private lateinit var updateSection: View
+    private lateinit var updateVersion: TextView
+    private lateinit var updateDetail: TextView
+    private lateinit var updateButton: Button
+    /** The newer version the Mac offers, if any. */
+    private var offeredUpdate: AppUpdateInfo? = null
+    private var macCheck: Job? = null
+    private var updating = false
+    /** The user went to the install permission setting; continue the update when they come back. */
+    private var installAfterPermission = false
+    private val installResultChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> showInstallResult() }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -78,6 +102,15 @@ class MainActivity : Activity() {
         bubbleButton = findViewById(R.id.open_accessibility_settings)
         excludedSummary = findViewById(R.id.excluded_summary)
         resetBubbleButton = findViewById(R.id.reset_bubble_position)
+        installResults = InstallResultStore(this)
+        updateSection = findViewById(R.id.update_section)
+        updateVersion = findViewById(R.id.update_version)
+        updateDetail = findViewById(R.id.update_detail)
+        updateButton = findViewById(R.id.update_button)
+        updateButton.setOnClickListener { onUpdateTapped() }
+        installAfterPermission = savedInstanceState?.getBoolean(STATE_INSTALL_AFTER_PERMISSION) ?: false
+        // A download left over from an interrupted attempt is never installed.
+        if (savedInstanceState == null) updateDirectory().deleteRecursively()
 
         connectButton.setOnClickListener {
             pair(PairingParser.parseManual(addressField.text.toString(), portField.text.toString(), tokenField.text.toString()))
@@ -86,6 +119,7 @@ class MainActivity : Activity() {
         unpairButton.setOnClickListener {
             store.clear()
             pairingResult.text = ""
+            showOffer(null)
             refresh()
         }
         micButton.setOnClickListener { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MIC) }
@@ -115,12 +149,21 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         bubbleSettings.registerListener(bubbleSettingsChanged)
+        installResults.registerListener(installResultChanged)
         refresh()
+        showInstallResult()
+        if (!continueAfterPermission()) checkMac()
     }
 
     override fun onPause() {
         bubbleSettings.unregisterListener(bubbleSettingsChanged)
+        installResults.unregisterListener(installResultChanged)
         super.onPause()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(STATE_INSTALL_AFTER_PERMISSION, installAfterPermission)
     }
 
     override fun onDestroy() {
@@ -181,6 +224,161 @@ class MainActivity : Activity() {
         resetBubbleButton.visibility = if (bubbleSettings.hasCustomPosition) View.VISIBLE else View.GONE
     }
 
+    // MARK: Update from the paired Mac
+
+    /**
+     * Checks the paired Mac's status, then whether it offers a newer version of this app. Neither
+     * result interrupts the setup screen: failures just offer nothing.
+     */
+    private fun checkMac() {
+        val pairing = store.load() ?: return showOffer(null)
+        if (updating || macCheck?.isActive == true) return
+        macCheck = scope.launch {
+            val status = withContext(Dispatchers.IO) { client.status(pairing, store.lastHost) }
+            val host = when (status) {
+                is ApiResult.Success -> status.host
+                is ApiResult.Failure -> when (status.error) {
+                    // Nothing to ask a Mac that is away or no longer accepts the token.
+                    ApiError.Unreachable, ApiError.Unauthorized -> return@launch
+                    else -> store.lastHost
+                }
+            }
+            checkForUpdate(pairing, host)
+        }
+    }
+
+    private fun checkForUpdate(pairing: Pairing, host: String?) {
+        scope.launch {
+            val response = withContext(Dispatchers.IO) { client.appUpdate(pairing, host) }
+            if (updating) return@launch
+            showOffer(AppUpdateOffer.from(installedVersionCode(), response))
+            continueAfterPermission()
+        }
+    }
+
+    private fun showOffer(update: AppUpdateInfo?) {
+        if (update != offeredUpdate) updateDetail.visibility = View.GONE
+        offeredUpdate = update
+        if (update == null) {
+            updateSection.visibility = View.GONE
+            return
+        }
+        val macName = store.load()?.name ?: getString(R.string.your_mac)
+        updateVersion.text = getString(R.string.update_available_version, update.versionName, macName, installedVersionName())
+        updateSection.visibility = View.VISIBLE
+        showUpdateAction()
+    }
+
+    /** Download and install, or first the permission to install, with why it is needed. */
+    private fun showUpdateAction() {
+        val allowed = packageManager.canRequestPackageInstalls()
+        updateButton.text = getString(if (allowed) R.string.update_install else R.string.update_allow_installs)
+        updateButton.isEnabled = !updating
+        if (!allowed && !updating) showUpdateDetail(getString(R.string.update_permission_needed))
+    }
+
+    private fun showUpdateDetail(text: String) {
+        updateDetail.text = text
+        updateDetail.visibility = View.VISIBLE
+    }
+
+    /** Starts the update the user was granting the install permission for. */
+    private fun continueAfterPermission(): Boolean {
+        if (!installAfterPermission || offeredUpdate == null || updating) return false
+        if (!packageManager.canRequestPackageInstalls()) return false
+        installAfterPermission = false
+        startUpdate()
+        return true
+    }
+
+    private fun onUpdateTapped() {
+        if (offeredUpdate == null || updating) return
+        if (!packageManager.canRequestPackageInstalls()) {
+            installAfterPermission = true
+            startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            return
+        }
+        startUpdate()
+    }
+
+    private enum class UpdateOutcome { CONFIRMING, CORRUPTED, GONE, DOWNLOAD_FAILED, INSTALL_FAILED }
+
+    /** Downloads the offered APK, checks it against the advertised size and hash, then installs it. */
+    private fun startUpdate() {
+        val update = offeredUpdate ?: return
+        val pairing = store.load() ?: return showOffer(null)
+        updating = true
+        showUpdateAction()
+        showUpdateDetail(getString(R.string.update_downloading, pairing.name))
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) { downloadAndInstall(pairing, update) }
+            updating = false
+            showUpdateAction()
+            showUpdateDetail(
+                when (outcome) {
+                    UpdateOutcome.CONFIRMING -> getString(R.string.update_confirm)
+                    UpdateOutcome.CORRUPTED -> getString(R.string.update_corrupted)
+                    UpdateOutcome.GONE -> getString(R.string.update_gone)
+                    UpdateOutcome.DOWNLOAD_FAILED -> getString(R.string.update_download_failed)
+                    UpdateOutcome.INSTALL_FAILED -> getString(R.string.update_failed_unknown)
+                },
+            )
+            if (outcome == UpdateOutcome.GONE) checkMac()
+        }
+    }
+
+    private fun downloadAndInstall(pairing: Pairing, update: AppUpdateInfo): UpdateOutcome {
+        val directory = updateDirectory()
+        val apk = File(directory, "VoiceInkKeyboard.apk")
+        try {
+            directory.mkdirs()
+            apk.delete()
+            when (val download = client.downloadAppUpdate(pairing, apk, update.size, store.lastHost)) {
+                is ApiResult.Failure -> {
+                    val error = download.error
+                    return if (error is ApiError.Server && error.httpStatus == 404) UpdateOutcome.GONE else UpdateOutcome.DOWNLOAD_FAILED
+                }
+                is ApiResult.Success -> Unit
+            }
+            if (DownloadCheck.verify(apk, update) != DownloadCheck.Result.MATCHES) return UpdateOutcome.CORRUPTED
+            AppInstaller.install(this, apk)
+            return UpdateOutcome.CONFIRMING
+        } catch (_: IOException) {
+            return if (apk.exists()) UpdateOutcome.DOWNLOAD_FAILED else UpdateOutcome.INSTALL_FAILED
+        } finally {
+            // Installed or not, the download never stays on the phone.
+            apk.delete()
+        }
+    }
+
+    /** Shows what became of an install the user confirmed, canceled or that failed. */
+    private fun showInstallResult() {
+        val (outcome, message) = installResults.take() ?: return
+        if (offeredUpdate == null) return
+        showUpdateDetail(
+            when (outcome) {
+                InstallResultStore.Outcome.CANCELED -> getString(R.string.update_canceled)
+                InstallResultStore.Outcome.FAILED ->
+                    message?.let { getString(R.string.update_failed, it) } ?: getString(R.string.update_failed_unknown)
+            },
+        )
+    }
+
+    /** App-private storage for the download; nothing else can read it. */
+    private fun updateDirectory(): File = File(noBackupFilesDir, "updates")
+
+    private fun installedVersionCode(): Long = installedPackage().longVersionCode
+
+    private fun installedVersionName(): String = installedPackage().versionName.orEmpty()
+
+    private fun installedPackage(): PackageInfo =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, 0)
+        }
+
     private fun scan() {
         val options = GmsBarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
         GmsBarcodeScanning.getClient(this, options).startScan()
@@ -205,6 +403,7 @@ class MainActivity : Activity() {
                 is ApiResult.Success -> {
                     store.save(pairing, result.host, result.value.model)
                     tokenField.text.clear()
+                    checkForUpdate(pairing, result.host)
                     getString(R.string.pair_success, pairing.name, result.value.model)
                 }
                 is ApiResult.Failure -> pairingFailure(pairing, result.error)
@@ -256,5 +455,6 @@ class MainActivity : Activity() {
         const val REASON_REJECTED = "rejected"
         const val REASON_MICROPHONE = "microphone"
         private const val REQUEST_MIC = 1
+        private const val STATE_INSTALL_AFTER_PERMISSION = "install_after_permission"
     }
 }

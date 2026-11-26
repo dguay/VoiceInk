@@ -297,6 +297,73 @@ class VoiceInkClientTest {
 
     private fun closedPort(): Int = ServerSocket(0).use { it.localPort }
 
+    // App update
+
+    private val sha = "a".repeat(64)
+
+    @Test fun appUpdateParsesTheOfferWithTheToken() {
+        var auth: String? = null
+        var path: String? = null
+        handler = {
+            auth = it.requestHeaders.getFirst("Authorization")
+            path = it.requestURI.path
+            respond(it, 200, """{"sha256":"$sha","size":1234,"versionCode":42,"versionName":"0.1.42-abc"}""")
+        }
+
+        val result = client.appUpdate(pairing())
+
+        assertEquals(
+            ApiResult.Success(com.voiceink.keyboard.update.AppUpdateInfo(42, "0.1.42-abc", 1234, sha), "127.0.0.1"),
+            result,
+        )
+        assertEquals("Bearer good-token", auth)
+        assertEquals("/v1/app-update", path)
+    }
+
+    @Test fun appUpdateWithoutAnAPKOrWithABadBodyIsAFailure() {
+        handler = { respond(it, 404, """{"error":{"code":"app_update_unavailable","message":"none"}}""") }
+        val missing = client.appUpdate(pairing()) as ApiResult.Failure
+        assertEquals(ApiError.Server(404, "app_update_unavailable", "none"), missing.error)
+
+        handler = { respond(it, 200, """{"sha256":"nothex","size":1234,"versionCode":42,"versionName":"x"}""") }
+        assertTrue((client.appUpdate(pairing()) as ApiResult.Failure).error is ApiError.InvalidResponse)
+
+        handler = { respond(it, 200, """{"sha256":"$sha","size":1234,"versionName":"x"}""") }
+        assertTrue((client.appUpdate(pairing()) as ApiResult.Failure).error is ApiError.InvalidResponse)
+    }
+
+    @Test fun downloadWritesTheAPKAndStopsPastTheAdvertisedSize() {
+        val apk = ByteArray(50_000) { (it % 253).toByte() }
+        var path: String? = null
+        handler = {
+            path = it.requestURI.path
+            it.responseHeaders.add("Content-Type", "application/vnd.android.package-archive")
+            it.sendResponseHeaders(200, apk.size.toLong())
+            it.responseBody.use { out -> out.write(apk) }
+        }
+
+        val full = tmp.root.resolve("full.apk")
+        assertTrue(client.downloadAppUpdate(pairing(), full, apk.size.toLong()) is ApiResult.Success)
+        assertEquals("/v1/app-update/apk", path)
+        assertTrue(apk.contentEquals(full.readBytes()))
+
+        // A Mac sending more than advertised: one byte past the size is enough to reject it.
+        val capped = tmp.root.resolve("capped.apk")
+        assertTrue(client.downloadAppUpdate(pairing(), capped, 1000) is ApiResult.Success)
+        assertEquals(1001L, capped.length())
+    }
+
+    @Test fun downloadReportsAMissingAPKAndARejectedToken() {
+        handler = { respond(it, 404, """{"error":{"code":"app_update_unavailable","message":"none"}}""") }
+        val file = tmp.root.resolve("missing.apk")
+        val missing = client.downloadAppUpdate(pairing(), file, 100) as ApiResult.Failure
+        assertEquals(404, (missing.error as ApiError.Server).httpStatus)
+
+        handler = { respond(it, 401, """{"error":{"code":"unauthorized","message":"x"}}""") }
+        val rejected = client.downloadAppUpdate(pairing(), file, 100) as ApiResult.Failure
+        assertEquals(ApiError.Unauthorized, rejected.error)
+    }
+
     private fun respond(exchange: HttpExchange, status: Int, body: String) {
         exchange.requestBody.readBytes()
         val bytes = body.toByteArray()
