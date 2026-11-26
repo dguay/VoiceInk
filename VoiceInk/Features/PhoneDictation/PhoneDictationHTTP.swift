@@ -5,10 +5,15 @@ enum PhoneDictationAPI {
     static let version = 1
     static let statusPath = "/v1/status"
     static let transcribePath = "/v1/transcribe"
+    static let correctionsPath = "/v1/corrections"
     /// Largest accepted request body.
     static let maxBodyBytes = 64 * 1024 * 1024
     /// Largest accepted request line plus headers.
     static let maxHeadBytes = 16 * 1024
+    /// Largest accepted `POST /v1/corrections` body.
+    static let maxCorrectionBodyBytes = 256 * 1024
+    /// Longest accepted field text window in a correction, in UTF-16 code units.
+    static let maxCorrectionTextLength = 32_000
 
     /// Audio file extensions accepted for each `Content-Type`.
     static let contentTypeExtensions: [String: String] = [
@@ -63,6 +68,8 @@ enum PhoneDictationErrorCode: String, Codable, Equatable {
     case badRequest = "bad_request"
     case notFound = "not_found"
     case methodNotAllowed = "method_not_allowed"
+    case unknownDictation = "unknown_dictation"
+    case notPhoneDictation = "not_phone_dictation"
 
     var httpStatus: Int {
         switch self {
@@ -75,6 +82,8 @@ enum PhoneDictationErrorCode: String, Codable, Equatable {
         case .badRequest: return 400
         case .notFound: return 404
         case .methodNotAllowed: return 405
+        case .unknownDictation: return 404
+        case .notPhoneDictation: return 409
         }
     }
 
@@ -89,6 +98,8 @@ enum PhoneDictationErrorCode: String, Codable, Equatable {
         case .badRequest: return "Malformed request."
         case .notFound: return "Unknown endpoint."
         case .methodNotAllowed: return "Method not allowed for this endpoint."
+        case .unknownDictation: return "No dictation with this id is in History."
+        case .notPhoneDictation: return "This dictation did not come from the phone."
         }
     }
 }
@@ -205,6 +216,7 @@ struct PhoneDictationHTTPResponse: Equatable {
         case 401: return "Unauthorized"
         case 404: return "Not Found"
         case 405: return "Method Not Allowed"
+        case 409: return "Conflict"
         case 411: return "Length Required"
         case 413: return "Payload Too Large"
         case 415: return "Unsupported Media Type"

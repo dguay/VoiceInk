@@ -32,6 +32,7 @@ final class PhoneDictationController: ObservableObject {
     private var startGeneration: UInt64 = 0
     private var pipeline: AudioFileTranscriptionPipeline?
     private var engine: VoiceInkEngine?
+    private var correctionIntake: PhoneDictationCorrectionIntake?
     private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "PhoneDictation")
 
     init(
@@ -54,6 +55,7 @@ final class PhoneDictationController: ObservableObject {
     func configure(modelContext: ModelContext, engine: VoiceInkEngine) {
         self.engine = engine
         self.pipeline = AudioFileTranscriptionPipeline(modelContext: modelContext, engine: engine)
+        self.correctionIntake = PhoneDictationCorrectionIntake(modelContext: modelContext)
         if isEnabled {
             startServer()
         }
@@ -121,7 +123,7 @@ final class PhoneDictationController: ObservableObject {
 
         server?.stop()
         let server = PhoneDictationServer(
-            tokenStore: tokenStore, handlers: makeHandlers(), queue: requestQueue)
+            tokenStore: tokenStore, handlers: withCorrections(makeHandlers()), queue: requestQueue)
         server.onFailure = { [weak self, weak server] error in
             guard let self, let server, self.server === server else { return }
             self.serverState = .failed(error.localizedDescription)
@@ -175,6 +177,16 @@ final class PhoneDictationController: ObservableObject {
                 return Self.responseBody(for: result)
             }
         )
+    }
+
+    /// Corrections made on the phone feed Auto-Learn (`POST /v1/corrections`).
+    private func withCorrections(_ handlers: PhoneDictationHandlers) -> PhoneDictationHandlers {
+        var handlers = handlers
+        handlers.submitCorrection = { [weak self] request in
+            guard let intake = self?.correctionIntake else { return .unknownDictation }
+            return await intake.submit(request)
+        }
+        return handlers
     }
 
     private func currentConfiguration() -> TranscriptionRuntimeConfiguration? {

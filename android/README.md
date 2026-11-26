@@ -84,7 +84,8 @@ app also offers a floating mic bubble:
 - **Turn it on**: setup step 5, **Open accessibility settings** → *VoiceInk mic bubble* (under
   *Downloaded apps* or *Installed apps*) → turn it on and accept the warning. Android lists the
   bubble as an accessibility service because it has to see when a keyboard opens and which field
-  has focus; it reads nothing else, and only the recording goes to your paired Mac. If the switch is
+  has focus. Besides the recording, it only reads and sends the text around a dictation (see
+  [Corrections teach Auto-Learn](#corrections-teach-auto-learn)). If the switch is
   greyed out on a sideloaded APK (Android 13+), open *App info* → ⋮ → *Allow restricted settings*
   first.
 - **When it shows**: only while a keyboard is open over a text field, in any app. It hides in
@@ -109,6 +110,27 @@ app also offers a floating mic bubble:
 - Force-stopping the app (or reinstalling it with some tools) turns the service off; turn it on
   again in step 5.
 
+### Corrections teach Auto-Learn
+
+When you fix a dictated word in the field ("Parakeat" to "Parakeet"), VoiceInk's Auto-Learn on the
+Mac can learn it, as it does for dictations corrected on the Mac. This needs the mic bubble's
+service to be on (the bubble itself does not need to show); it works for text typed by the bubble
+and by the voice keyboard. Without the service nothing is observed: the voice keyboard hands the
+field back to your usual keyboard right after typing and cannot see later edits.
+
+- **What is watched**: only the field the dictation was typed into, from the moment it was typed
+  until focus moves to another field, focus leaves it for more than a moment, the keyboard closes
+  for more than a moment (0.6 s), or 60 seconds pass, whichever comes first. Password fields are
+  never read.
+- **What is sent**, once, when the watch ends and only if the field changed: the History `id` of the
+  dictation, the dictated text, and the same window of the field right after the dictation and when
+  you left it: at most 200 characters before and 200 after the dictation. Nothing outside that window
+  leaves the phone; when text outside it changed too, or the field grew by more than 2000
+  characters, nothing is sent. The Mac receives it on `POST /v1/corrections` and ignores it while
+  Auto-Learn is off.
+- **Nothing is stored**: the snapshot lives in memory only. It is tried at most 3 times (only while
+  the Mac is unreachable, a few seconds apart) and then dropped.
+
 ## Troubleshooting
 
 | Message on the keyboard or bubble | What to do |
@@ -127,5 +149,6 @@ app also offers a floating mic bubble:
 | `api/Pairing.kt` | Pairing model and QR / manual-entry parsing. |
 | `store/` | Encrypted pairing storage and the kept recording. |
 | `ime/VoiceKeyboardService.kt` | The keyboard (input method service). |
-| `bubble/` | The mic bubble: accessibility service, overlay window, and its visibility, field and placement rules. |
+| `bubble/` | The mic bubble: accessibility service, overlay window, its visibility, field and placement rules, and the correction watcher. |
+| `corrections/` | When a dictated field is done with, and which window of it is sent for Auto-Learn (pure, unit-tested rules). |
 | `setup/MainActivity.kt` | Pairing and keyboard setup screen. |
