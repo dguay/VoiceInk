@@ -4,9 +4,12 @@ import android.accessibilityservice.AccessibilityService
 import android.content.SharedPreferences
 import android.content.res.Configuration
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -31,6 +34,7 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
     private var flow: DictationFlow? = null
     private var bubble: MicBubbleView? = null
     private var settings: BubbleSettings? = null
+    private val steadiness = Steadiness<Pair<Int, Box>>()
     // A new exclusion or a reset position applies at once, even with the bubble on screen.
     private val settingsChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> handler.post(refresh) }
     private val sessions = FieldSessions<AccessibilityNodeInfo>(
@@ -56,8 +60,10 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Focus and window events arrive in bursts; look at the screen once they settle.
         handler.removeCallbacks(refresh)
+        // A keyboard sliding away (Back, or leaving the app) takes the bubble with it right away.
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED && !keyboardOpen(keyboardWindow())) return update()
+        // Focus and window events arrive in bursts; look at the screen once they settle.
         handler.postDelayed(refresh, SETTLE_MS)
     }
 
@@ -76,10 +82,10 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
     private fun update() {
         val flow = flow ?: return
         val bubble = bubble ?: return
-        val keyboard = windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        val keyboard = keyboardWindow()
         val focus = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         val visible = BubbleVisibility.shouldShow(
-            keyboardShown = keyboard != null,
+            keyboardShown = keyboardOpen(keyboard),
             ownKeyboard = keyboard?.root?.packageName?.toString() == packageName,
             field = focus?.let {
                 FocusedField(editable = it.isEditable, password = it.isPassword, app = it.packageName?.toString())
@@ -89,10 +95,34 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
         val fieldChanged = sessions.update(if (visible) focus else null)
         // Never send audio into a field the user has left: keep it for Retry instead.
         if (fieldChanged) flow.interrupt()
-        if (!visible || keyboard == null || focus == null) return bubble.hide()
+        if (!visible || keyboard == null || focus == null) {
+            steadiness.reset()
+            return bubble.hide()
+        }
 
         if (fieldChanged && flow.state != DictationState.Sending) flow.show(flow.restingState(sameField = false))
-        bubble.show(keyboardTop = Rect().also(keyboard::getBoundsInScreen).top, field = focus.screenBox())
+        val keyboardTop = Rect().also(keyboard::getBoundsInScreen).top
+        val field = focus.screenBox()
+        // Still opening or resizing: look again shortly rather than show the bubble on the way.
+        if (!steadiness.look(keyboardTop to field, SystemClock.uptimeMillis())) {
+            handler.removeCallbacks(refresh)
+            handler.postDelayed(refresh, STEADY_MS)
+            return
+        }
+        bubble.show(keyboardTop = keyboardTop, field = field)
+    }
+
+    private fun keyboardWindow(): AccessibilityWindowInfo? =
+        windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+
+    private fun keyboardOpen(keyboard: AccessibilityWindowInfo?): Boolean {
+        val bounds = keyboard?.let { Rect().also(it::getBoundsInScreen) } ?: return false
+        val screenBottom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getSystemService(WindowManager::class.java).maximumWindowMetrics.bounds.bottom
+        } else {
+            Int.MAX_VALUE // Android 10: no reliable screen size here; wait for the keyboard to go.
+        }
+        return BubbleVisibility.keyboardAtRest(Box(bounds.left, bounds.top, bounds.right, bounds.bottom), screenBottom)
     }
 
     /** Focus or keyboard events may still be settling; look now so the text cannot reach a field left meanwhile. */
@@ -137,5 +167,6 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
     private companion object {
         const val BUBBLE_RECORDINGS = "bubble"
         const val SETTLE_MS = 80L
+        const val STEADY_MS = 100L
     }
 }

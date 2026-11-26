@@ -6,6 +6,13 @@ internal data class FocusedField(val editable: Boolean, val password: Boolean, v
 /** Whether the mic bubble is on screen. */
 internal object BubbleVisibility {
     /**
+     * Whether a keyboard window at [keyboard] is open and at rest. A keyboard sliding in or away
+     * reaches below the screen's bottom edge ([screenBottom]): the bubble leaves with it at once
+     * rather than float there until the keyboard is gone.
+     */
+    fun keyboardAtRest(keyboard: Box, screenBottom: Int): Boolean = keyboard.bottom <= screenBottom
+
+    /**
      * Shown only while a keyboard is open over an editable, non-password field, and not while the
      * VoiceInk voice keyboard itself ([ownKeyboard]) is that keyboard: it already dictates. Never
      * shown in a field of one of the [excludedApps] the user picked.
@@ -104,4 +111,34 @@ internal object BubblePlacement {
     }
 
     private fun boxAt(left: Int, top: Int, width: Int, height: Int) = Box(left, top, left + width, top + height)
+}
+
+/**
+ * Holds the bubble back while the keyboard and the field are still moving (a keyboard opening with
+ * its app settles over a few hundred milliseconds, in steps), so it appears once, in place, instead
+ * of jumping there. A look at time `now` (ms) is steady once the value has not changed for
+ * [quietMs], or after waiting [maxWaitMs], so something that never stops moving cannot keep the
+ * bubble away.
+ */
+internal class Steadiness<T : Any>(private val quietMs: Long = 250, private val maxWaitMs: Long = 1000) {
+    private var last: T? = null
+    private var changedAt = 0L
+    private var waitingSince: Long? = null
+
+    fun look(value: T, now: Long): Boolean {
+        if (value != last) {
+            last = value
+            changedAt = now
+        }
+        val waitStart = waitingSince ?: now.also { waitingSince = it }
+        val steady = now - changedAt >= quietMs || now - waitStart >= maxWaitMs
+        if (steady) waitingSince = null
+        return steady
+    }
+
+    /** The bubble hid: the next appearance waits for the screen to settle again. */
+    fun reset() {
+        last = null
+        waitingSince = null
+    }
 }

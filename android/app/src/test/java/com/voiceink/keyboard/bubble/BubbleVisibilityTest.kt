@@ -44,4 +44,13 @@ class BubbleVisibilityTest {
 
         assertTrue(shows(excludedApps = excluded - "com.example.chat"))
     }
+
+    @Test fun aKeyboardSlidingAwayIsAlreadyGone() {
+        // SwiftKey 185 ms after Back on a 2340 px tall screen.
+        assertFalse(BubbleVisibility.keyboardAtRest(Box(0, 1769, 1080, 2717), screenBottom = 2340))
+    }
+
+    @Test fun aKeyboardAtRestReachesTheScreenBottomExactly() {
+        assertTrue(BubbleVisibility.keyboardAtRest(Box(0, 1392, 1080, 2340), screenBottom = 2340))
+    }
 }

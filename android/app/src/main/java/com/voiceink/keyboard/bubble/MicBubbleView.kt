@@ -1,5 +1,6 @@
 package com.voiceink.keyboard.bubble
 
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.PixelFormat
@@ -12,6 +13,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.view.animation.DecelerateInterpolator
 import android.widget.Button
 import android.widget.ImageButton
 import android.widget.LinearLayout
@@ -65,6 +67,7 @@ internal class MicBubbleView(
     private var keyboardTop = 0
     private var field: Box? = null
     private var drag: Drag? = null
+    private var glide: ValueAnimator? = null
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     /** A touch on the mic that started at raw ([x], [y]) with the window at ([windowX], [windowY]). */
@@ -89,6 +92,8 @@ internal class MicBubbleView(
     fun hide() {
         field = null
         drag = null
+        glide?.cancel()
+        root.animate().cancel()
         if (attached) {
             windowManager.removeViewImmediate(root)
             attached = false
@@ -199,18 +204,42 @@ internal class MicBubbleView(
 
     private fun margin() = (MARGIN_DP * context.resources.displayMetrics.density).toInt()
 
+    /** Fades the bubble in where it belongs, glides it to a new place, and follows the finger exactly. */
     private fun move(box: Box) {
-        params.x = box.left
-        params.y = box.top
-        if (attached) {
-            windowManager.updateViewLayout(root, params)
-        } else {
+        glide?.cancel()
+        if (!attached) {
+            params.x = box.left
+            params.y = box.top
+            root.alpha = 0f
             windowManager.addView(root, params)
             attached = true
+            root.animate().alpha(1f).setDuration(FADE_MS).start()
+            return
+        }
+        val fromX = params.x
+        val fromY = params.y
+        if (drag?.moving == true || (fromX == box.left && fromY == box.top)) {
+            params.x = box.left
+            params.y = box.top
+            windowManager.updateViewLayout(root, params)
+            return
+        }
+        glide = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = GLIDE_MS
+            interpolator = DecelerateInterpolator()
+            addUpdateListener {
+                if (!attached) return@addUpdateListener
+                params.x = fromX + ((box.left - fromX) * it.animatedFraction).toInt()
+                params.y = fromY + ((box.top - fromY) * it.animatedFraction).toInt()
+                windowManager.updateViewLayout(root, params)
+            }
+            start()
         }
     }
 
     private companion object {
         const val MARGIN_DP = 8
+        const val FADE_MS = 120L
+        const val GLIDE_MS = 160L
     }
 }
