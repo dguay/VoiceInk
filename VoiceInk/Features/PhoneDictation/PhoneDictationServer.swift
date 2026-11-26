@@ -367,6 +367,9 @@ final class PhoneDictationConnection: @unchecked Sendable {
     private var buffer = Data()
     private var timeout: DispatchWorkItem?
     private var isClosed = false
+    /// When the connection started, to log how long the upload took to arrive.
+    private var startedAt = ContinuousClock.now
+    private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "PhoneDictation")
 
     private static let headTerminator = Data("\r\n\r\n".utf8)
     private static let readChunk = 1024 * 1024
@@ -390,6 +393,7 @@ final class PhoneDictationConnection: @unchecked Sendable {
         let timeout = DispatchWorkItem { [weak self] in self?.close() }
         self.timeout = timeout
         queue.asyncAfter(deadline: .now() + requestTimeout, execute: timeout)
+        startedAt = ContinuousClock.now
         connection.start(queue: queue)
         receiveHead()
     }
@@ -449,6 +453,11 @@ final class PhoneDictationConnection: @unchecked Sendable {
     private func receiveBody(head: PhoneDictationHTTPRequestHead, length: Int, fileExtension: String) {
         if buffer.count >= length {
             let body = buffer.prefix(length)
+            // Size and time only, never the audio.
+            let receiveSeconds = startedAt.duration(to: .now).timeInterval
+            logger.notice(
+                "Phone dictation upload received: \(length, privacy: .public) bytes in \(receiveSeconds, format: .fixed(precision: 3), privacy: .public)s"
+            )
             buffer = Data()
             dispatch(head: head, body: Data(body), fileExtension: fileExtension)
             return
