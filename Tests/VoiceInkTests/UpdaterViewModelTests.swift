@@ -257,7 +257,9 @@ struct UpdaterViewModelTests {
         let updater: any UpdaterModule = UpdaterViewModel(
             defaults: defaults,
             adapter: ForkUpdaterAdapter(transaction: transaction, defaults: defaults),
-            sourceProvenance: nil
+            sourceProvenance: nil,
+            // Its own gate: the shared one follows the test host app's engine, which may be busy.
+            restartGate: UpdateRestartGate()
         )
         #expect(updater.state.stagedUpdate == candidate)
 
@@ -300,7 +302,9 @@ struct UpdaterViewModelTests {
                 now: { startedAt },
                 resumeRequestObserver: ForkUpdateResumeRequestObserverStub()
             ),
-            sourceProvenance: nil
+            sourceProvenance: nil,
+            // Its own gate: the shared one follows the test host app's engine, which may be busy.
+            restartGate: UpdateRestartGate()
         )
         #expect(updater.state.stagedUpdate == fixture.candidate)
 
@@ -374,7 +378,9 @@ struct UpdaterViewModelTests {
         let transaction = ForkUpdateTransactionStub(stagedCandidate: candidate)
         let updater: any UpdaterModule = UpdaterViewModel(
             defaults: defaults,
-            adapter: ForkUpdaterAdapter(transaction: transaction)
+            adapter: ForkUpdaterAdapter(transaction: transaction),
+            // Its own gate: the shared one follows the test host app's engine, which may be busy.
+            restartGate: UpdateRestartGate()
         )
 
         updater.checkForUpdates()
@@ -439,7 +445,9 @@ struct UpdaterViewModelTests {
         let transaction = ForkUpdateTransactionStub(stagedCandidate: candidate)
         let updater: any UpdaterModule = UpdaterViewModel(
             defaults: defaults,
-            adapter: ForkUpdaterAdapter(transaction: transaction)
+            adapter: ForkUpdaterAdapter(transaction: transaction),
+            // Its own gate: the shared one follows the test host app's engine, which may be busy.
+            restartGate: UpdateRestartGate()
         )
 
         updater.checkForUpdates()
@@ -669,7 +677,9 @@ struct UpdaterViewModelTests {
         )
         let updater: any UpdaterModule = UpdaterViewModel(
             defaults: defaults,
-            adapter: ForkUpdaterAdapter(transaction: transaction)
+            adapter: ForkUpdaterAdapter(transaction: transaction),
+            // Its own gate: the shared one follows the test host app's engine, which may be busy.
+            restartGate: UpdateRestartGate()
         )
 
         updater.checkForUpdates()
