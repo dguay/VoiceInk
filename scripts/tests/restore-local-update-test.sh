@@ -37,6 +37,14 @@ mkdir -p \
     "$fake_bin"
 printf 'candidate\n' > "$installed_bundle/Contents/version"
 printf 'previous\n' > "$backup_bundle/Contents/version"
+# Each bundle carries the Android keyboard APK the fork updater built for it.
+mkdir -p "$installed_bundle/Contents/Resources/AndroidKeyboard" "$backup_bundle/Contents/Resources/AndroidKeyboard"
+printf 'candidate-apk\n' > "$installed_bundle/Contents/Resources/AndroidKeyboard/VoiceInkKeyboard.apk"
+printf '{"applicationId":"com.voiceink.keyboard","versionCode":12,"versionName":"0.1.12-111111111111"}\n' \
+    > "$installed_bundle/Contents/Resources/AndroidKeyboard/VoiceInkKeyboard.json"
+printf 'previous-apk\n' > "$backup_bundle/Contents/Resources/AndroidKeyboard/VoiceInkKeyboard.apk"
+printf '{"applicationId":"com.voiceink.keyboard","versionCode":11,"versionName":"0.1.11-222222222222"}\n' \
+    > "$backup_bundle/Contents/Resources/AndroidKeyboard/VoiceInkKeyboard.json"
 printf 'candidate-data\n' > "$application_support/state"
 printf 'previous-data\n' > "$recovery_root/Application Support/state"
 printf 'candidate-preferences\n' > "$preferences"
@@ -159,6 +167,13 @@ fi
 parent_pid=""
 
 [[ "$(< "$installed_bundle/Contents/version")" == "previous" ]]
+# Rolling back restores the APK served for the previous version with it.
+if [[ "$(< "$installed_bundle/Contents/Resources/AndroidKeyboard/VoiceInkKeyboard.apk")" != "previous-apk" \
+    || "$(/usr/bin/plutil -extract versionName raw "$installed_bundle/Contents/Resources/AndroidKeyboard/VoiceInkKeyboard.json")" != "0.1.11-222222222222" ]]
+then
+    printf 'restore-local-update-test: rollback did not restore the previous Android APK\n' >&2
+    exit 1
+fi
 [[ "$(< "$application_support/state")" == "previous-data" ]]
 [[ "$(< "$preferences")" == "previous-preferences" ]]
 [[ "$(< "$credential_log")" == "restored:$credential_generation" ]]

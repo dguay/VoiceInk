@@ -97,6 +97,27 @@ APK with) next to `app-release.apk`. Copy both into
 `VoiceInk.app/Contents/Resources/AndroidKeyboard/` as `VoiceInkKeyboard.apk` and
 `VoiceInkKeyboard.json`. A Mac app without them offers nothing.
 
+**Bundled by the fork updater**: when the Mac's fork updater prepares a new VoiceInk candidate
+(`VoiceInk/Resources/prepare-local-update.sh`), it runs `build-release.sh` from the candidate's own
+checkout after the Mac tests and build pass, so the APK comes from the same commit as the Mac app
+(`versionName` ends with that commit's first 12 characters). It places the APK and its metadata in
+the candidate's `AndroidKeyboard/` folder and re-signs the candidate with the same signing identity,
+so the Mac app keeps its privacy permissions. Install and rollback move the whole app, so restoring
+a previous Mac version also restores the APK it bundled.
+
+- **Toolchain or key missing**: the updater looks for a JDK 17+ (`JAVA_HOME`, then
+  `/usr/libexec/java_home`, then Android Studio's bundled runtime and Homebrew's OpenJDK), the Android SDK (`ANDROID_HOME`, `ANDROID_SDK_ROOT`, then
+  `~/Library/Android/sdk`) and the release key (`release-key.sh check`). If one is missing, it skips
+  the APK, keeps the APK of the installed version in the candidate, and shows one notice saying what
+  to install or import. It never installs a toolchain or prompts. The notice is not repeated on later
+  checks; it comes back when what is missing changes, or when something goes missing again after a
+  successful APK build.
+- **Build failure**: a Gradle error, a missing APK, metadata that does not match the candidate,
+  or a build still running after 15 minutes never blocks the Mac update. The candidate is prepared
+  as usual with the installed version's APK, and the updater shows a notice once for that candidate.
+  The Gradle output is kept in `android-build.log` in the update logs folder (**Open Logs** on the
+  notice, or **Open Update Logs** in Settings).
+
 - **Checking**: when the setup screen opens (and after pairing), the app checks the Mac's status
   and asks `GET /v1/app-update`. Only a greater `versionCode` than the installed one is offered:
   the screen then shows **Update available** with the Mac's version. The same or an older version,

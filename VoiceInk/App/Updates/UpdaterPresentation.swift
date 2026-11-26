@@ -92,6 +92,8 @@ struct StagedUpdatePresentation: Equatable {
     let subjects: [String]
     let additionalCommitCount: Int
     let relativeAge: String
+    /// Why the update bundles no new Android keyboard APK, when it was reported.
+    let androidAppNotice: String?
 
     init(
         candidate: StagedForkCandidate,
@@ -100,6 +102,7 @@ struct StagedUpdatePresentation: Equatable {
     ) {
         shortForkCommit = String(candidate.forkCommit.prefix(SourceProvenance.shortCommitLength))
         relativeAge = Self.relativeAge(from: candidate.preparedAt, to: now)
+        androidAppNotice = candidate.androidAppNotice.flatMap { $0.isEmpty ? nil : $0 }
         if let summary = candidate.changeSummary {
             let count = max(summary.upstreamCommitCount, 0)
             headline = count == 1
@@ -123,12 +126,17 @@ struct StagedUpdatePresentation: Equatable {
 
     var message: String {
         var lines = ["VoiceInk prepared fork commit \(shortForkCommit) \(relativeAge)."]
-        guard let headline else { return lines[0] }
-        lines.append("")
-        lines.append(subjects.isEmpty && additionalCommitCount == 0 ? headline + "." : headline + ":")
-        lines.append(contentsOf: subjects.map { "• \($0)" })
-        if additionalCommitCount > 0 {
-            lines.append("…and \(additionalCommitCount) more")
+        if let headline {
+            lines.append("")
+            lines.append(subjects.isEmpty && additionalCommitCount == 0 ? headline + "." : headline + ":")
+            lines.append(contentsOf: subjects.map { "• \($0)" })
+            if additionalCommitCount > 0 {
+                lines.append("…and \(additionalCommitCount) more")
+            }
+        }
+        if let androidAppNotice {
+            lines.append("")
+            lines.append(androidAppNotice)
         }
         return lines.joined(separator: "\n")
     }

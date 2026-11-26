@@ -130,6 +130,13 @@ for argument in "$@"; do
     esac
 done
 [[ -d "${@: -1}" ]]
+for argument in "$@"; do
+    if [[ "$argument" == --sign ]]; then
+        [[ -z "${CODESIGN_LOG:-}" ]] || printf '%s\n' "$*" >> "$CODESIGN_LOG"
+        [[ "${CODESIGN_SIGN_SHOULD_FAIL:-0}" != 1 ]]
+        exit 0
+    fi
+done
 [[ "${CODESIGN_SHOULD_FAIL:-0}" != 1 ]]
 EOF
 
@@ -1124,5 +1131,319 @@ then
 fi
 [[ ! -e "$history_manifest" ]]
 grep -Fq "does not descend from the installed VoiceInk revision" "$fixture_root/history-output.log"
+
+# The Android keyboard APK is built from the candidate worktree with the
+# revision's own android/scripts. This fixture commits stubs of build-release.sh
+# and release-key.sh, so Gradle and the Keychain are never touched.
+android_fail() {
+    printf 'prepare-local-update-test: %s\n' "$*" >&2
+    exit 1
+}
+android_fork_bare="$fixture_root/android-fork.git"
+android_seed="$fixture_root/android-seed"
+android_clone="$fixture_root/android-clone"
+android_manifest="$fixture_root/android/staging/staged-candidate.plist"
+android_result="$fixture_root/android/staging/preparation-result.plist"
+android_state="$fixture_root/android/staging/android-apk-state.plist"
+android_build_log="$fixture_root/android/staging/Logs/android-build.log"
+android_stub_log="$fixture_root/android-stub.log"
+android_install_log="$fixture_root/android-install.log"
+android_codesign_log="$fixture_root/android-codesign.log"
+android_output="$fixture_root/android-output.log"
+android_jdk="$fixture_root/android-jdk"
+android_sdk="$fixture_root/android-sdk"
+android_installed_app="$fixture_root/android-installed/VoiceInk.app"
+android_installed_keyboard="$android_installed_app/Contents/Resources/AndroidKeyboard"
+
+git init --bare --initial-branch=main "$android_fork_bare" >/dev/null
+git init --initial-branch=main "$android_seed" >/dev/null
+git -C "$android_seed" config user.name "VoiceInk Updater Test"
+git -C "$android_seed" config user.email "updater-test@example.com"
+mkdir -p "$android_seed/android/scripts"
+printf 'candidate\n' > "$android_seed/candidate-marker"
+cat > "$android_seed/android/scripts/release-key.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == check ]]
+printf 'check\n' >> "$ANDROID_STUB_LOG"
+exit "${ANDROID_STUB_KEY_STATUS:-0}"
+EOF
+cat > "$android_seed/android/scripts/build-release.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+android_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+printf 'build|%s|%s|%s|%s\n' "$PWD" "${JAVA_HOME:-}" "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-unset}" >> "$ANDROID_STUB_LOG"
+mode="${ANDROID_STUB_MODE:-success}"
+case "$mode" in
+    fail)
+        printf 'FAILURE: Build failed with an exception.\n' >&2
+        exit 1
+        ;;
+    hang)
+        sleep 600 &
+        printf '%s\n' "$!" > "$ANDROID_STUB_PID_FILE"
+        wait
+        ;;
+esac
+release="$android_directory/app/build/outputs/apk/release"
+mkdir -p "$release"
+count="$(git -C "$android_directory" rev-list --count --first-parent HEAD)"
+sha="$(git -C "$android_directory" rev-parse --short=12 HEAD)"
+[[ "$mode" != bad-version ]] || sha=000000000000
+[[ "$mode" == no-output ]] || printf 'apk-%s\n' "$sha" > "$release/app-release.apk"
+printf '{"applicationId":"com.voiceink.keyboard","versionCode":%s,"versionName":"0.1.%s-%s"}\n' \
+    "$count" "$count" "$sha" > "$release/VoiceInkKeyboard.json"
+EOF
+git -C "$android_seed" add .
+git -C "$android_seed" commit -m "test: seed android fixture" >/dev/null
+printf 'second\n' > "$android_seed/second"
+git -C "$android_seed" add second
+git -C "$android_seed" commit -m "test: advance android fixture" >/dev/null
+git -C "$android_seed" remote add origin "$android_fork_bare"
+git -C "$android_seed" push -u origin main >/dev/null 2>&1
+git clone "$android_fork_bare" "$android_clone" >/dev/null 2>&1
+git -C "$android_clone" remote add upstream "$android_fork_bare"
+android_sha="$(git -C "$android_seed" rev-parse HEAD)"
+android_count="$(git -C "$android_seed" rev-list --count --first-parent HEAD)"
+
+mkdir -p "$android_jdk/bin" "$android_sdk/platforms" "$android_installed_keyboard"
+printf '#!/bin/sh\nexit 0\n' > "$android_jdk/bin/java"
+chmod +x "$android_jdk/bin/java"
+printf 'JAVA_VERSION="17.0.2"\n' > "$android_jdk/release"
+# An older JDK the fallback search must skip.
+android_old_jdk="$fixture_root/android-old-jdk"
+mkdir -p "$android_old_jdk/bin"
+printf '#!/bin/sh\nexit 0\n' > "$android_old_jdk/bin/java"
+chmod +x "$android_old_jdk/bin/java"
+printf 'JAVA_VERSION="11.0.20"\n' > "$android_old_jdk/release"
+/usr/bin/plutil -create xml1 "$android_installed_app/Contents/Info.plist"
+printf 'previous-apk\n' > "$android_installed_keyboard/VoiceInkKeyboard.apk"
+printf '{"applicationId":"com.voiceink.keyboard","versionCode":1,"versionName":"0.1.1-previous0000"}\n' \
+    > "$android_installed_keyboard/VoiceInkKeyboard.json"
+
+cat > "$fake_bin/java_home" <<'EOF'
+#!/usr/bin/env bash
+[[ -n "${FAKE_JAVA_HOME:-}" ]] || exit 1
+printf '%s\n' "$FAKE_JAVA_HOME"
+EOF
+# Anything that would install or run a toolchain outside the build trips these.
+for installer in brew sdkmanager java softwareupdate; do
+    # shellcheck disable=SC2016 # expands in the generated stub
+    printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" "%s" "$*" >> "$ANDROID_INSTALL_LOG"\nexit 1\n' \
+        "$installer" > "$fake_bin/$installer"
+    chmod +x "$fake_bin/$installer"
+done
+chmod +x "$fake_bin/java_home"
+
+# Extra NAME=value arguments override the defaults: a complete toolchain and
+# key, and an installed app that bundles an earlier APK.
+run_android_prepare() {
+    env -u JAVA_HOME -u ANDROID_HOME \
+        PATH="$fake_bin:$PATH" \
+        CANONICAL_PATH="$android_clone" \
+        XCODE_LOG="$xcode_log" \
+        CODESIGN_LOG="$android_codesign_log" \
+        ANDROID_STUB_LOG="$android_stub_log" \
+        ANDROID_INSTALL_LOG="$android_install_log" \
+        ANDROID_SDK_ROOT="$fixture_root/no-sdk-here" \
+        FAKE_JAVA_HOME="$android_jdk" \
+        VOICEINK_JAVA_HOME_TOOL="$fake_bin/java_home" \
+        VOICEINK_ANDROID_JDK_CANDIDATES= \
+        VOICEINK_ANDROID_DEFAULT_SDK_PATH="$android_sdk" \
+        VOICEINK_INSTALLED_BUNDLE_PATH="$android_installed_app" \
+        VOICEINK_REPOSITORY_PATH="$android_clone" \
+        VOICEINK_UPDATE_MANIFEST_PATH="$android_manifest" \
+        VOICEINK_UPDATE_RESULT_PATH="$android_result" \
+        "$@" \
+        /bin/bash "$project_root/VoiceInk/Resources/prepare-local-update.sh" > "$android_output" 2>&1
+}
+
+android_staged_keyboard() {
+    printf '%s/Contents/Resources/AndroidKeyboard' "$(/usr/bin/plutil -extract bundlePath raw "$android_manifest")"
+}
+
+android_notice() {
+    /usr/bin/plutil -extract androidAppNotice raw "$android_manifest" 2>/dev/null || true
+}
+
+expect_android_prepared() {
+    [[ "$(/usr/bin/plutil -extract outcome raw "$android_result" 2>/dev/null || true)" == "candidatePrepared" ]] \
+        || android_fail "$1: the Mac candidate was not prepared"
+    [[ "$(/usr/bin/plutil -extract forkCommit raw "$android_manifest")" == "$android_sha" ]] \
+        || android_fail "$1: the manifest names the wrong candidate"
+}
+
+expect_previous_apk_carried() {
+    local keyboard
+    keyboard="$(android_staged_keyboard)"
+    if ! cmp -s "$keyboard/VoiceInkKeyboard.apk" "$android_installed_keyboard/VoiceInkKeyboard.apk" \
+        || ! cmp -s "$keyboard/VoiceInkKeyboard.json" "$android_installed_keyboard/VoiceInkKeyboard.json"
+    then
+        android_fail "$1: the installed APK was not carried into the candidate"
+    fi
+}
+
+stub_builds() {
+    grep -c '^build|' "$android_stub_log" 2>/dev/null || true
+}
+
+# Success: the candidate bundles the APK built from its own commit, and the
+# staged bundle is re-signed with the resolved identity, metadata preserved.
+run_android_prepare || android_fail "successful Android build failed preparation: $(cat "$android_output")"
+expect_android_prepared success
+android_keyboard="$(android_staged_keyboard)"
+[[ "$(< "$android_keyboard/VoiceInkKeyboard.apk")" == "apk-${android_sha:0:12}" ]] \
+    || android_fail "the candidate does not bundle the APK built from its commit"
+[[ "$(/usr/bin/plutil -extract versionName raw "$android_keyboard/VoiceInkKeyboard.json")" == "0.1.$android_count-${android_sha:0:12}" \
+    && "$(/usr/bin/plutil -extract versionCode raw "$android_keyboard/VoiceInkKeyboard.json")" == "$android_count" ]] \
+    || android_fail "the bundled APK metadata does not match the candidate commit"
+[[ -z "$(android_notice)" ]] || android_fail "a successful APK build recorded a notice"
+[[ ! -e "$android_state" ]] || android_fail "a successful APK build left notice state"
+grep -Fxq -- "--force --sign - --preserve-metadata=identifier,entitlements,requirements,flags,runtime $(/usr/bin/plutil -extract bundlePath raw "$android_manifest")" \
+    "$android_codesign_log" || android_fail "the staged bundle was not re-signed with preserved metadata: $(cat "$android_codesign_log")"
+build_line="$(grep '^build|' "$android_stub_log" | tail -n 1)"
+[[ "$build_line" == "build|"*"/android|$android_jdk|$android_sdk|unset" \
+    && "$build_line" != *"$android_clone/"* ]] \
+    || android_fail "the Android build did not run in the candidate worktree with the found toolchain: $build_line"
+[[ ! -s "$android_install_log" ]] || android_fail "a toolchain install was attempted: $(cat "$android_install_log")"
+
+# A JDK that java_home does not list (Android Studio's runtime, Homebrew's
+# keg-only OpenJDK) is found in the known locations; one older than 17 is skipped.
+: > "$android_stub_log"
+run_android_prepare FAKE_JAVA_HOME= \
+    VOICEINK_ANDROID_JDK_CANDIDATES="$fixture_root/no-jdk-here:$android_old_jdk:$android_jdk" \
+    || android_fail "a JDK outside java_home failed preparation: $(cat "$android_output")"
+expect_android_prepared "JDK outside java_home"
+build_line="$(grep '^build|' "$android_stub_log" | tail -n 1)"
+[[ "$build_line" == "build|"*"/android|$android_jdk|$android_sdk|unset" ]] \
+    || android_fail "the Android build did not use the JDK found outside java_home: $build_line"
+[[ -z "$(android_notice)" ]] || android_fail "a JDK outside java_home was reported missing"
+
+# A stable signing identity seals the APK in by the fingerprint preflight
+# resolved and matched against the installed app, so the identity is unchanged.
+android_leaf_hash="$(printf 'leaf' | shasum -a 1 | awk '{ print toupper($1) }')"
+: > "$android_codesign_log"
+run_android_prepare \
+    LOCAL_CODESIGN_IDENTITY="$android_leaf_hash" \
+    CODESIGNING_IDENTITIES="$android_leaf_hash|Apple Development: VoiceInk Test" \
+    INSTALLED_SIGNATURE_DETAILS='Authority=Apple Development: VoiceInk Test' \
+    INSTALLED_LEAF_CERTIFICATE=leaf \
+    || android_fail "a stable identity preparation failed: $(cat "$android_output")"
+expect_android_prepared "stable identity"
+grep -Fq -- "--force --sign $android_leaf_hash --preserve-metadata=identifier,entitlements,requirements,flags,runtime" \
+    "$android_codesign_log" || android_fail "the APK was not sealed with the resolved signing identity"
+
+# Gradle failure: the Mac candidate is still prepared, the installed APK is
+# carried unchanged, and the failure is reported once for this candidate.
+run_android_prepare ANDROID_STUB_MODE=fail || android_fail "a Gradle failure failed preparation: $(cat "$android_output")"
+expect_android_prepared "Gradle failure"
+expect_previous_apk_carried "Gradle failure"
+[[ "$(android_notice)" == *"could not build the Android keyboard APK"*"0.1.1-previous0000"* ]] \
+    || android_fail "a Gradle failure was not reported: $(android_notice)"
+grep -Fq "FAILURE: Build failed with an exception." "$android_output" \
+    || android_fail "the Gradle output was not kept in the updater output"
+grep -Fq "FAILURE: Build failed with an exception." "$android_build_log" \
+    || android_fail "the Gradle output was not kept in the update logs"
+[[ "$(/usr/bin/plutil -extract lastNoticeKey raw "$android_state")" == "build-failed:$android_sha" ]] \
+    || android_fail "the Gradle failure notice was not persisted next to the updater state"
+run_android_prepare ANDROID_STUB_MODE=fail || android_fail "a repeated Gradle failure failed preparation"
+expect_android_prepared "repeated Gradle failure"
+expect_previous_apk_carried "repeated Gradle failure"
+[[ -z "$(android_notice)" ]] || android_fail "an unchanged Gradle failure was reported twice"
+
+# Invalid metadata and a missing APK are build failures too.
+rm -f "$android_state"
+run_android_prepare ANDROID_STUB_MODE=bad-version || android_fail "invalid APK metadata failed preparation"
+expect_android_prepared "invalid metadata"
+expect_previous_apk_carried "invalid metadata"
+[[ "$(android_notice)" == *"does not match the candidate"* ]] \
+    || android_fail "invalid APK metadata was not reported: $(android_notice)"
+rm -f "$android_state"
+run_android_prepare ANDROID_STUB_MODE=no-output || android_fail "a missing APK failed preparation"
+expect_android_prepared "missing APK"
+expect_previous_apk_carried "missing APK"
+[[ "$(android_notice)" == *"did not produce app-release.apk"* ]] \
+    || android_fail "a missing APK was not reported: $(android_notice)"
+
+# A stuck Gradle is stopped after the Android timeout, with its whole process group.
+rm -f "$android_state"
+android_hang_pid_file="$fixture_root/android-hang.pid"
+run_android_prepare ANDROID_STUB_MODE=hang ANDROID_STUB_PID_FILE="$android_hang_pid_file" \
+    VOICEINK_ANDROID_BUILD_TIMEOUT_SECONDS=2 \
+    || android_fail "a stuck Android build failed preparation: $(cat "$android_output")"
+expect_android_prepared "stuck build"
+expect_previous_apk_carried "stuck build"
+[[ "$(android_notice)" == *"did not finish within 2 seconds"* ]] \
+    || android_fail "a stuck Android build was not reported: $(android_notice)"
+if kill -0 "$(< "$android_hang_pid_file")" >/dev/null 2>&1; then
+    kill "$(< "$android_hang_pid_file")" >/dev/null 2>&1 || true
+    android_fail "the stuck Android build outlived preparation"
+fi
+
+# Re-signing failure: the candidate falls back to the bundle xcodebuild signed.
+rm -f "$android_state"
+run_android_prepare CODESIGN_SIGN_SHOULD_FAIL=1 || android_fail "a re-signing failure failed preparation"
+expect_android_prepared "re-signing failure"
+[[ ! -e "$(android_staged_keyboard)" ]] || android_fail "a failed re-signing left the APK in the candidate"
+[[ "$(android_notice)" == *"could not add the Android keyboard APK"* ]] \
+    || android_fail "a re-signing failure was not reported: $(android_notice)"
+
+# Without an APK in the installed app there is nothing to carry.
+rm -f "$android_state"
+run_android_prepare ANDROID_STUB_MODE=fail VOICEINK_INSTALLED_BUNDLE_PATH= \
+    || android_fail "a Gradle failure without an installed APK failed preparation"
+expect_android_prepared "Gradle failure without installed APK"
+[[ ! -e "$(android_staged_keyboard)" ]] || android_fail "an APK appeared from nowhere"
+[[ "$(android_notice)" == *"has no Android keyboard APK"* ]] \
+    || android_fail "the notice does not say the update has no APK: $(android_notice)"
+
+# Missing JDK and key: the build is skipped, the previous APK carried, one
+# notice names both, and nothing is installed.
+rm -f "$android_state"
+builds_before_missing="$(stub_builds)"
+run_android_prepare FAKE_JAVA_HOME= ANDROID_STUB_KEY_STATUS=1 \
+    || android_fail "a missing toolchain failed preparation: $(cat "$android_output")"
+expect_android_prepared "missing toolchain"
+expect_previous_apk_carried "missing toolchain"
+missing_notice="$(android_notice)"
+[[ "$missing_notice" == *"missing a JDK 17 or later"*"), and the Android release signing key"* \
+    && "$missing_notice" != *"Android SDK"* && "$missing_notice" == *"never installs"* ]] \
+    || android_fail "the missing toolchain notice is unclear: $missing_notice"
+[[ "$(stub_builds)" -eq "$builds_before_missing" ]] || android_fail "the APK was built without a toolchain"
+[[ ! -s "$android_install_log" ]] || android_fail "a toolchain install was attempted: $(cat "$android_install_log")"
+run_android_prepare FAKE_JAVA_HOME= ANDROID_STUB_KEY_STATUS=1 \
+    || android_fail "a repeated missing toolchain failed preparation"
+expect_previous_apk_carried "repeated missing toolchain"
+[[ -z "$(android_notice)" ]] || android_fail "an unchanged missing toolchain was reported twice"
+[[ "$(grep -c 'Android APK notice' "$android_output" || true)" -eq 0 ]] \
+    || android_fail "an unchanged missing toolchain was logged as a new notice"
+
+# Missing SDK alone changes what is missing, so it is reported.
+run_android_prepare VOICEINK_ANDROID_DEFAULT_SDK_PATH="$fixture_root/no-sdk-here" \
+    || android_fail "a missing SDK failed preparation"
+[[ "$(android_notice)" == *"missing the Android SDK (install it with Android Studio; VoiceInk looked in ANDROID_HOME, ANDROID_SDK_ROOT and ~/Library/Android/sdk). VoiceInk never installs"* ]] \
+    || android_fail "a missing SDK was not reported: $(android_notice)"
+[[ "$(stub_builds)" -eq "$builds_before_missing" ]] || android_fail "the APK was built without an SDK"
+
+# Once the toolchain is back, a build clears the state, so the notice returns
+# when the toolchain goes missing again.
+run_android_prepare || android_fail "the restored toolchain failed preparation"
+[[ ! -e "$android_state" ]] || android_fail "a successful build kept the old notice state"
+[[ ! -e "$android_build_log" ]] || android_fail "a successful build kept an old failure log"
+run_android_prepare FAKE_JAVA_HOME= ANDROID_STUB_KEY_STATUS=1 || android_fail "missing toolchain again failed"
+[[ "$(android_notice)" == *"JDK 17"* ]] || android_fail "the notice did not return after the toolchain went missing again"
+[[ ! -s "$android_install_log" ]] || android_fail "a toolchain install was attempted: $(cat "$android_install_log")"
+
+# A Mac test failure still fails preparation as before, without an Android build.
+builds_before_mac_failure="$(stub_builds)"
+if run_android_prepare XCODE_SHOULD_FAIL=1; then
+    android_fail "a Mac test failure was accepted"
+fi
+[[ "$(/usr/bin/plutil -extract outcome raw "$android_result")" == "failure" \
+    && "$(/usr/bin/plutil -extract stage raw "$android_result")" == "test" ]] \
+    || android_fail "a Mac test failure was not reported as before"
+[[ "$(stub_builds)" -eq "$builds_before_mac_failure" ]] || android_fail "the APK was built after the Mac tests failed"
+[[ "$(git -C "$android_clone" worktree list --porcelain | grep -c '^worktree ')" -eq 1 ]] \
+    || android_fail "the Android step left a worktree behind"
 
 printf 'prepare-local-update-test: PASS\n'
