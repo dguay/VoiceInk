@@ -19,6 +19,7 @@ cp "$project_root/android/scripts/release-key.sh" \
     "$project_root/android/scripts/release-key-common.sh" \
     "$project_root/android/scripts/build-release.sh" \
     "$project_root/android/scripts/version.sh" \
+    "$project_root/android/scripts/apk-metadata.sh" \
     "$android_copy/scripts/"
 
 expect() {
@@ -106,6 +107,9 @@ env > "$FAKE_GRADLE_ENV"
 [[ -z "${FAKE_GRADLE_FAIL:-}" ]] || exit 1
 mkdir -p app/build/outputs/apk/release
 printf 'apk' > app/build/outputs/apk/release/app-release.apk
+cat > app/build/outputs/apk/release/output-metadata.json <<'JSON'
+{"version":3,"artifactType":{"type":"APK","kind":"Directory"},"applicationId":"com.voiceink.keyboard","variantName":"release","elements":[{"type":"SINGLE","filters":[],"attributes":[],"versionCode":1200,"versionName":"0.1.1200-0123456789ab","outputFile":"app-release.apk"}],"elementType":"File"}
+JSON
 EOF
 chmod +x "$fake_bin"/* "$android_copy/gradlew"
 
@@ -189,10 +193,15 @@ expect "the password is not in Gradle's environment" bash -c '! grep -Fq "$1" "$
 expect "the keystore is not in Gradle's environment" bash -c '! grep -Fq "$1" "$2"' _ "$keystore_base64" "$gradle_env"
 expect "the build output does not show the password" bash -c '! grep -Fq "$1" <<< "$2"' _ "$password" "$output"
 expect "the build reports the APK" grep -Fq "Signed release APK: $android_copy/app/build/outputs/apk/release/app-release.apk" <<< "$output"
+metadata_file="$android_copy/app/build/outputs/apk/release/VoiceInkKeyboard.json"
+expect "the build writes the metadata the Mac serves" grep -Fqx \
+    '{"applicationId":"com.voiceink.keyboard","versionCode":1200,"versionName":"0.1.1200-0123456789ab"}' "$metadata_file"
+expect "the build reports the metadata" grep -Fq "APK metadata: $metadata_file" <<< "$output"
 
 run_on mac-a env FAKE_GRADLE_FAIL=1 bash "$build_script"
 expect "a failed Gradle build fails the release build" test "$status" -ne 0
 expect "a failed build removes the temporary files" private_tmp_is_empty
+expect "a failed build leaves no stale metadata" test ! -e "$metadata_file"
 
 # --- export: an owner-only file, never inside a Git working tree.
 mkdir -p "$fixture_root/some-repository"
