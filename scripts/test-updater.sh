@@ -10,6 +10,7 @@ readonly suites=(
     prepare-local-update-test.sh
     install-local-update-test.sh
     restore-local-update-test.sh
+    android-release-test.sh
 )
 
 tests_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")/tests" && pwd)" || {

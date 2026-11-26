@@ -14,15 +14,17 @@ git_log="$fixture_root/git.log"
 global_git_config="$fixture_root/gitconfig"
 installed_app="$fixture_root/Applications/VoiceInk.app"
 
-mkdir -p "$clone_path/scripts" "$fake_bin" "$installed_app"
+mkdir -p "$clone_path/scripts" "$clone_path/android/scripts" "$fake_bin" "$installed_app" "$fixture_root/keychain"
 clone_path="$(cd "$clone_path" && pwd -P)"
 cp "$project_root/scripts/bootstrap-local.sh" "$clone_path/scripts/bootstrap-local.sh"
+cp "$project_root/android/scripts/release-key.sh" "$project_root/android/scripts/release-key-common.sh" \
+    "$clone_path/android/scripts/"
 
 "$real_git" -C "$clone_path" init -b main >/dev/null
 "$real_git" -C "$clone_path" config user.name "Bootstrap Test"
 "$real_git" -C "$clone_path" config user.email "bootstrap@example.com"
 printf 'fixture\n' > "$clone_path/README.md"
-"$real_git" -C "$clone_path" add README.md scripts/bootstrap-local.sh
+"$real_git" -C "$clone_path" add README.md scripts/bootstrap-local.sh android/scripts
 "$real_git" -C "$clone_path" commit -m "test: initialize fixture" >/dev/null
 "$real_git" -C "$clone_path" remote add origin https://github.com/dguay/VoiceInk.git
 "$real_git" -C "$clone_path" remote add upstream git@github.com:Beingpax/VoiceInk.git
@@ -75,6 +77,21 @@ if [[ "${!#}" == "test-updater" && -n "${BOOTSTRAP_TEST_FAIL_UPDATER_TESTS:-}" ]
 fi
 EOF
 
+# Answers Keychain lookups from files, so the real Keychain is never read.
+cat > "$fake_bin/security" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "find-generic-password" ]] || exit 1
+service="" account=""
+while (( $# > 0 )); do
+    case "$1" in
+        -s) service="$2"; shift 2 ;;
+        -a) account="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+[[ -f "$BOOTSTRAP_TEST_KEYCHAIN/$service.$account" ]] || exit 44
+EOF
+
 chmod +x "$fake_bin"/* "$clone_path/scripts/bootstrap-local.sh"
 
 run_bootstrap() {
@@ -86,6 +103,8 @@ run_bootstrap() {
         GIT_CONFIG_GLOBAL="$global_git_config" \
         VOICEINK_INSTALLED_APP_PATH="$installed_app" \
         VOICEINK_MIN_FREE_GIB=0 \
+        VOICEINK_SECURITY_BIN="$fake_bin/security" \
+        BOOTSTRAP_TEST_KEYCHAIN="$fixture_root/keychain" \
         VOICEINK_UPSTREAM_REPOSITORY=someone-else/VoiceInk \
         VOICEINK_UPSTREAM_URL=https://github.com/someone-else/VoiceInk.git \
         "$clone_path/scripts/bootstrap-local.sh"
@@ -104,6 +123,20 @@ grep -Fq 'Running updater test suites...' <<< "$output"
 grep -Fq 'Warning: Codex is not installed or authenticated; continuing.' <<< "$output"
 grep -Fq "Registered clone: $clone_path" <<< "$output"
 grep -Fq 'push --dry-run --porcelain origin HEAD:refs/heads/voiceink-bootstrap-access-check-' "$git_log"
+# A missing Android release key is reported with the fix, without failing the Mac bootstrap.
+grep -Fq 'Android release key: missing from the Keychain (voiceink-android-release, account keystore).' <<< "$output"
+grep -Fq "android/scripts/release-key.sh create" <<< "$output"
+grep -Fq 'Warning: Android release builds need the release key; continuing.' <<< "$output"
+
+touch "$fixture_root/keychain/voiceink-android-release.keystore" "$fixture_root/keychain/voiceink-android-release.password"
+rm -f "$make_log"
+present_key_output="$(run_bootstrap 2>&1)"
+grep -Fq 'Android release key: present in the Keychain (voiceink-android-release).' <<< "$present_key_output"
+if grep -Fq 'Warning: Android release builds' <<< "$present_key_output"; then
+    printf 'bootstrap warned about a present Android release key\n' >&2
+    exit 1
+fi
+[[ "$(cat "$make_log")" == "$expected_make_log" ]]
 
 # These Info.plist keys are the external bundle contract consumed by SourceProvenance.
 make -n -C "$project_root" local \
