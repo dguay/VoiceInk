@@ -13,6 +13,7 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.voiceink.keyboard.api.FieldContext
 import com.voiceink.keyboard.api.Pairing
 import com.voiceink.keyboard.dictation.DictationFlow
 import com.voiceink.keyboard.dictation.DictationState
@@ -158,6 +159,10 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
     }
 
     override fun onInserted(pairing: Pairing) = Unit
+
+    /** The field the bubble types into, as last seen with input focus. */
+    override fun fieldContext(): FieldContext? =
+        sessions.current?.let { FieldContext.of(it.packageName, it.inputType, it.isPassword) }
 
     private fun AccessibilityNodeInfo.screenBox(): Box {
         val r = Rect().also(::getBoundsInScreen)

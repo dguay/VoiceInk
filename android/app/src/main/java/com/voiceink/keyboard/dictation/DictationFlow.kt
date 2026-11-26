@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import com.voiceink.keyboard.R
 import com.voiceink.keyboard.api.ApiError
 import com.voiceink.keyboard.api.ApiResult
+import com.voiceink.keyboard.api.FieldContext
 import com.voiceink.keyboard.api.Pairing
 import com.voiceink.keyboard.api.Transcription
 import com.voiceink.keyboard.api.VoiceInkClient
@@ -41,6 +42,12 @@ class DictationFlow internal constructor(
 
         /** The text was typed into its field. */
         fun onInserted(pairing: Pairing)
+
+        /**
+         * The app and kind of the field the text will go to, sent to the Mac to pick the mode;
+         * null when no field is known. Every entry point must say, so it has no default.
+         */
+        fun fieldContext(): FieldContext?
     }
 
     private val pairingStore = PairingStore(context)
@@ -131,9 +138,10 @@ class DictationFlow internal constructor(
         if (!pending.exists()) return show(DictationState.Idle)
         show(DictationState.Sending)
         val ticket = delivery.ticket()
+        val field = host.fieldContext()
         scope.launch {
             val result = withContext(Dispatchers.IO) {
-                client.transcribe(pairing, pending.file, "audio/mp4", pairingStore.lastHost)
+                client.transcribe(pairing, pending.file, "audio/mp4", pairingStore.lastHost, field)
             }
             onTranscribed(pairing, ticket, result)
         }

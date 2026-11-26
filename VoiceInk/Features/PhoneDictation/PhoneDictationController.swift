@@ -163,22 +163,36 @@ final class PhoneDictationController: ObservableObject {
                 guard let configuration = self?.currentConfiguration() else { return .noModelSelected }
                 return .ready(model: configuration.model.displayName, mode: configuration.mode.name)
             },
-            transcribe: { [weak self] audioURL in
+            transcribe: { [weak self] audioURL, context in
                 guard let self, let pipeline = self.pipeline,
-                    let mode = ModeManager.shared.currentEffectiveConfiguration
+                    let mode = Self.phoneMode(forApp: context.app)
                 else {
                     throw TranscriptionError.noModelSelected
                 }
                 FileTranscriptionActivity.shared.begin()
                 defer { FileTranscriptionActivity.shared.end() }
-                let result = try await pipeline.transcribe(audioURL: audioURL, mode: mode, source: .phone)
+                let result = try await pipeline.transcribe(
+                    audioURL: audioURL, mode: mode, source: .phone,
+                    options: Self.transcriptionOptions(for: context))
                 return Self.responseBody(for: result)
             }
         )
     }
 
+    /// The phone's mode, never the Mac's active one. See `PhoneModeResolver`.
+    private static func phoneMode(forApp app: String?) -> ModeConfig? {
+        PhoneModeResolver.mode(forApp: app, configurations: ModeManager.shared.configurations)
+    }
+
+    nonisolated static func transcriptionOptions(for context: PhoneDictationRequestContext) -> AudioFileTranscriptionOptions {
+        AudioFileTranscriptionOptions(
+            sourceApp: context.app,
+            skipsAIEnhancementAndFormatting: context.skipsAIEnhancementAndFormatting)
+    }
+
+    /// The configuration a phone request without app information would use.
     private func currentConfiguration() -> TranscriptionRuntimeConfiguration? {
-        guard let engine, let mode = ModeManager.shared.currentEffectiveConfiguration else { return nil }
+        guard let engine, let mode = Self.phoneMode(forApp: nil) else { return nil }
         return ModeRuntimeResolver.transcriptionConfiguration(
             mode: mode, transcriptionModelManager: engine.transcriptionModelManager)
     }

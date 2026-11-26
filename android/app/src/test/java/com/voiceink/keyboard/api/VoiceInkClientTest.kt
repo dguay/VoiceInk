@@ -99,6 +99,43 @@ class VoiceInkClientTest {
         assertTrue(bytes.contentEquals(received))
     }
 
+    @Test fun transcribeSendsTheAppAndFieldKind() {
+        var query: String? = null
+        var path: String? = null
+        handler = {
+            path = it.requestURI.path
+            query = it.requestURI.rawQuery
+            respond(it, 200, """{"text":"me@example.com"}""")
+        }
+
+        val result = client.transcribe(pairing(), audio(), field = FieldContext("com.google.android.gm", FieldKind.EMAIL))
+
+        assertEquals("me@example.com", (result as ApiResult.Success).value.text)
+        assertEquals("/v1/transcribe", path)
+        assertEquals("app=com.google.android.gm&field=email", query)
+    }
+
+    @Test fun transcribeWithoutContextSendsNoQuery() {
+        var query: String? = "unset"
+        handler = {
+            query = it.requestURI.rawQuery
+            respond(it, 200, """{"text":"hello"}""")
+        }
+
+        client.transcribe(pairing(), audio())
+
+        assertNull(query)
+    }
+
+    @Test fun transcribePathOmitsAMissingAppAndEncodesValues() {
+        assertEquals("/v1/transcribe", VoiceInkClient.transcribePath(null))
+        assertEquals("/v1/transcribe?field=number", VoiceInkClient.transcribePath(FieldContext(null, FieldKind.NUMBER)))
+        assertEquals(
+            "/v1/transcribe?app=com.example%26x%3Dy&field=url",
+            VoiceInkClient.transcribePath(FieldContext("com.example&x=y", FieldKind.URL)),
+        )
+    }
+
     @Test fun transcribeKeepsEnhancementError() {
         handler = { respond(it, 200, """{"text":"raw text","enhancementError":"AI provider timed out","id":null,"durationSeconds":null,"model":null,"mode":null}""") }
 

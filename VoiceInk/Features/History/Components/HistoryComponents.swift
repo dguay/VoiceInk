@@ -195,6 +195,16 @@ struct HistoryTranscriptionRow: View {
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                         .help("Dictated on a paired phone")
+
+                    if let sourceApp = transcription.sourceApp {
+                        Text(AndroidAppName.displayName(for: sourceApp))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(AppTheme.Text.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: 140, alignment: .leading)
+                            .help(Text("Typed into \(sourceApp) on the phone"))
+                    }
                 }
 
                 Text(transcription.timestamp, format: .relative(presentation: .named))

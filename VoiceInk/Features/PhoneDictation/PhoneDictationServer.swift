@@ -10,8 +10,26 @@ enum PhoneDictationReadiness: Equatable {
 /// What the server needs from the app. Both closures run on the main actor.
 struct PhoneDictationHandlers {
     var readiness: @MainActor () -> PhoneDictationReadiness
-    /// Transcribes one uploaded file through the shared pipeline. The file is deleted afterwards.
-    var transcribe: @MainActor (URL) async throws -> PhoneDictationTranscribeBody
+    /// Transcribes one uploaded file through the shared pipeline, with the phone's `app` and
+    /// `field`. The file is deleted afterwards.
+    var transcribe: @MainActor (URL, PhoneDictationRequestContext) async throws -> PhoneDictationTranscribeBody
+
+    init(
+        readiness: @escaping @MainActor () -> PhoneDictationReadiness,
+        transcribe: @escaping @MainActor (URL, PhoneDictationRequestContext) async throws
+            -> PhoneDictationTranscribeBody
+    ) {
+        self.readiness = readiness
+        self.transcribe = transcribe
+    }
+
+    /// For callers that do not need the request context.
+    init(
+        readiness: @escaping @MainActor () -> PhoneDictationReadiness,
+        transcribe: @escaping @MainActor (URL) async throws -> PhoneDictationTranscribeBody
+    ) {
+        self.init(readiness: readiness, transcribe: { url, _ in try await transcribe(url) })
+    }
 }
 
 /// Routes parsed requests. Authorization and size checks happen on the head alone, so a rejected
@@ -101,7 +119,9 @@ final class PhoneDictationRouter: @unchecked Sendable {
             guard currentGeneration == admitted else {
                 return .error(.transcriptionFailed, message: "Phone dictation was turned off.")
             }
-            return await transcribe(token: head.bearerToken, body: body, fileExtension: fileExtension)
+            return await transcribe(
+                token: head.bearerToken, body: body, fileExtension: fileExtension,
+                context: PhoneDictationRequestContext(query: head.query))
         }
     }
 
@@ -118,7 +138,9 @@ final class PhoneDictationRouter: @unchecked Sendable {
     }
 
     @MainActor
-    private func transcribe(token: String?, body: Data, fileExtension: String) async -> PhoneDictationHTTPResponse {
+    private func transcribe(
+        token: String?, body: Data, fileExtension: String, context: PhoneDictationRequestContext
+    ) async -> PhoneDictationHTTPResponse {
         // Queued requests are re-checked when their turn comes.
         guard tokenStore.isValid(token) else { return .error(.unauthorized) }
         if case .noModelSelected = handlers.readiness() {
@@ -132,7 +154,7 @@ final class PhoneDictationRouter: @unchecked Sendable {
 
         do {
             try body.write(to: uploadURL, options: .atomic)
-            let result = try await handlers.transcribe(uploadURL)
+            let result = try await handlers.transcribe(uploadURL, context)
             return .json(result)
         } catch TranscriptionError.noModelSelected {
             return .error(.noModelSelected)

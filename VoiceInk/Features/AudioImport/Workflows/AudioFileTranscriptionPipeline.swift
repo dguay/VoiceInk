@@ -96,12 +96,14 @@ final class AudioFileTranscriptionPipeline {
         audioURL: URL,
         mode: ModeConfig,
         source: TranscriptionSource? = nil,
+        options: AudioFileTranscriptionOptions = AudioFileTranscriptionOptions(),
         onPhase: (Phase) -> Void = { _ in }
     ) async throws -> AudioFileTranscriptionResult {
         let transcriber = dependencies.makeTranscriber()
         do {
             let transcription = try await run(
-                audioURL: audioURL, mode: mode, source: source, transcriber: transcriber, onPhase: onPhase)
+                audioURL: audioURL, mode: mode, source: source, options: options, transcriber: transcriber,
+                onPhase: onPhase)
             await transcriber.cleanup()
             return transcription
         } catch {
@@ -114,6 +116,7 @@ final class AudioFileTranscriptionPipeline {
         audioURL: URL,
         mode: ModeConfig,
         source: TranscriptionSource?,
+        options: AudioFileTranscriptionOptions,
         transcriber: any AudioFileTranscriber,
         onPhase: (Phase) -> Void
     ) async throws -> AudioFileTranscriptionResult {
@@ -156,7 +159,7 @@ final class AudioFileTranscriptionPipeline {
         let modeMetadata = transcriptionConfiguration.metadata
         let formattingConfiguration = ModeRuntimeResolver.transcriptionFormattingConfiguration(mode: mode)
 
-        if formattingConfiguration.isTextFormattingEnabled {
+        if formattingConfiguration.isTextFormattingEnabled, !options.skipsAIEnhancementAndFormatting {
             text = ParagraphFormatter.format(text)
         }
 
@@ -179,7 +182,8 @@ final class AudioFileTranscriptionPipeline {
                 }
             }
 
-        if let enhancementService = dependencies.enhancementService,
+        if !options.skipsAIEnhancementAndFormatting,
+            let enhancementService = dependencies.enhancementService,
             let enhancementConfiguration,
             enhancementConfiguration.isEnabled,
             enhancementService.isConfigured(for: enhancementConfiguration)
@@ -243,6 +247,7 @@ final class AudioFileTranscriptionPipeline {
             )
         }
 
+        transcription.sourceApp = options.sourceApp
         modelContext.insert(transcription)
         try modelContext.save()
         NotificationCenter.default.post(name: .transcriptionCreated, object: transcription)

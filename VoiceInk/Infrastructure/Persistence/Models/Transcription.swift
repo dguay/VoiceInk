@@ -41,6 +41,9 @@ final class Transcription {
     var transcriptionStatus: String?
     /// Raw `TranscriptionSource`; `nil` for recordings and imports made on this Mac.
     var source: String?
+    /// Android package name of the app a phone dictation was typed into; `nil` for Mac entries
+    /// and for phone entries made before it was recorded. Optional, so the store migrates lightweight.
+    var sourceApp: String?
 
     init(
         text: String,
