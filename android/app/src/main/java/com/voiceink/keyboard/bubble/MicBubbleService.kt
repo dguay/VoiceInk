@@ -15,6 +15,8 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.voiceink.keyboard.api.FieldContext
 import com.voiceink.keyboard.api.Pairing
+import com.voiceink.keyboard.corrections.CorrectionHandoff
+import com.voiceink.keyboard.corrections.InsertedDictation
 import com.voiceink.keyboard.dictation.DictationFlow
 import com.voiceink.keyboard.dictation.DictationState
 import com.voiceink.keyboard.dictation.TextInsertion
@@ -26,7 +28,8 @@ import kotlinx.coroutines.cancel
 /**
  * Shows a floating mic over any open keyboard and types the dictation into the field the keyboard
  * was opened for, through the same flow as the voice keyboard. It only looks at which windows are
- * open and which field has input focus.
+ * open and which field has input focus, and, after a dictation, at that field until the user leaves
+ * it ([CorrectionWatcher]).
  */
 class MicBubbleService : AccessibilityService(), DictationFlow.Host {
     private val handler = Handler(Looper.getMainLooper())
@@ -35,6 +38,9 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
     private var flow: DictationFlow? = null
     private var bubble: MicBubbleView? = null
     private var settings: BubbleSettings? = null
+    private var corrections: CorrectionWatcher? = null
+    /** Where the bubble's last dictation starts in its field. */
+    private var lastInsertStart: Int? = null
     private val steadiness = Steadiness<Pair<Int, Box>>()
     // A new exclusion or a reset position applies at once, even with the bubble on screen.
     private val settingsChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> handler.post(refresh) }
@@ -50,6 +56,7 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
         val settings = BubbleSettings(this).also { settings = it }
         settings.registerListener(settingsChanged)
         bubble = MicBubbleView(this, flow, settings)
+        corrections = CorrectionWatcher(this, handler, scope) { keyboardOpen(keyboardWindow()) }.also { it.start() }
         update()
     }
 
@@ -72,6 +79,7 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
 
     override fun onDestroy() {
         handler.removeCallbacks(refresh)
+        corrections?.stop()
         settings?.unregisterListener(settingsChanged)
         sessions.update(null)
         flow?.close()
@@ -150,6 +158,7 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, edit.text)
         }
         if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setText)) return false
+        lastInsertStart = edit.cursor - text.length
         val cursor = Bundle().apply {
             putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, edit.cursor)
             putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, edit.cursor)
@@ -163,6 +172,11 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
     /** The field the bubble types into, as last seen with input focus. */
     override fun fieldContext(): FieldContext? =
         sessions.current?.let { FieldContext.of(it.packageName, it.inputType, it.isPassword) }
+
+    override fun onDelivered(historyId: String?, text: String) {
+        historyId ?: return
+        CorrectionHandoff.inserted(InsertedDictation(historyId, text, lastInsertStart))
+    }
 
     private fun AccessibilityNodeInfo.screenBox(): Box {
         val r = Rect().also(::getBoundsInScreen)

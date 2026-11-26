@@ -30,6 +30,11 @@ struct PhoneDictationHandlers {
     ) {
         self.init(readiness: readiness, transcribe: { url, _ in try await transcribe(url) })
     }
+
+    /// Takes a correction snapshot for a History entry (`POST /v1/corrections`).
+    var submitCorrection: @MainActor (PhoneDictationCorrectionRequest) async -> PhoneDictationCorrectionOutcome = {
+        _ in .unknownDictation
+    }
 }
 
 /// Routes parsed requests. Authorization and size checks happen on the head alone, so a rejected
@@ -99,9 +104,28 @@ final class PhoneDictationRouter: @unchecked Sendable {
                 return .respond(.error(.unsupportedMediaType))
             }
             return .readBody(length: length, fileExtension: fileExtension)
+        case PhoneDictationAPI.correctionsPath:
+            return decideCorrection(head)
         default:
             return .respond(.error(.notFound))
         }
+    }
+
+    /// A correction is small JSON; its size is bounded on the head, before any body is read.
+    private func decideCorrection(_ head: PhoneDictationHTTPRequestHead) -> HeadDecision {
+        guard head.method == "POST" else { return .respond(.error(.methodNotAllowed)) }
+        guard tokenStore.isValid(head.bearerToken) else { return .respond(.error(.unauthorized)) }
+        if let transferEncoding = head.headers["transfer-encoding"], transferEncoding.lowercased() != "identity" {
+            return .respond(.error(.lengthRequired))
+        }
+        guard let length = head.contentLength else { return .respond(.error(.lengthRequired)) }
+        guard length <= PhoneDictationAPI.maxCorrectionBodyBytes else {
+            return .respond(.error(
+                .payloadTooLarge,
+                message: "The correction is larger than \(PhoneDictationAPI.maxCorrectionBodyBytes) bytes."))
+        }
+        guard length > 0 else { return .respond(.error(.badRequest, message: "The request has no body.")) }
+        return .readBody(length: length, fileExtension: "json")
     }
 
     /// Answers a request whose head `decide` accepted.
@@ -111,6 +135,10 @@ final class PhoneDictationRouter: @unchecked Sendable {
         // A token regenerated while the upload was in flight is already invalid.
         guard tokenStore.isValid(head.bearerToken) else { return .error(.unauthorized) }
 
+        // Not queued behind transcriptions: a correction is quick and must not wait minutes.
+        if head.path == PhoneDictationAPI.correctionsPath {
+            return await correction(body: body)
+        }
         guard head.path == PhoneDictationAPI.transcribePath, let fileExtension else {
             return await status()
         }
@@ -134,6 +162,16 @@ final class PhoneDictationRouter: @unchecked Sendable {
                     apiVersion: PhoneDictationAPI.version, status: "ready", model: model, mode: mode))
         case .noModelSelected:
             return .error(.noModelSelected)
+        }
+    }
+
+    @MainActor
+    private func correction(body: Data) async -> PhoneDictationHTTPResponse {
+        switch PhoneDictationCorrectionRequest.decode(body) {
+        case .failure(let error):
+            return .error(.badRequest, message: error.message)
+        case .success(let request):
+            return await handlers.submitCorrection(request).response
         }
     }
 

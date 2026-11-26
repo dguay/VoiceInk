@@ -243,6 +243,44 @@ class VoiceInkClientTest {
         assertEquals(1, accepted.get())
     }
 
+    @Test fun correctionIsPostedAsJsonWithItsLength() {
+        var path: String? = null
+        var method: String? = null
+        var contentType: String? = null
+        var contentLength: String? = null
+        var received: String? = null
+        handler = {
+            path = it.requestURI.path
+            method = it.requestMethod
+            contentType = it.requestHeaders.getFirst("Content-Type")
+            contentLength = it.requestHeaders.getFirst("Content-Length")
+            received = it.requestBody.readBytes().toString(Charsets.UTF_8)
+            respond(it, 200, """{"autoLearnEnabled":true,"status":"accepted"}""")
+        }
+        val snapshot = CorrectionSnapshot("0F8B3B0C-5E43-4C1B-9B7A-2A2E8F9D1C11", "Parakeat", "Note: Parakeat", "Note: Parakeet", 6)
+
+        val result = client.submitCorrection(pairing(), snapshot)
+
+        assertEquals(ApiResult.Success(Unit, "127.0.0.1"), result)
+        assertEquals("/v1/corrections", path)
+        assertEquals("POST", method)
+        assertEquals("application/json", contentType)
+        assertEquals(received!!.toByteArray().size.toString(), contentLength)
+        val json = org.json.JSONObject(received!!)
+        assertEquals("0F8B3B0C-5E43-4C1B-9B7A-2A2E8F9D1C11", json.getString("id"))
+        assertEquals("Note: Parakeet", json.getString("textWhenLeft"))
+        assertEquals(6, json.getInt("insertStart"))
+    }
+
+    @Test fun correctionErrorsKeepTheirCode() {
+        handler = { respond(it, 404, """{"error":{"code":"unknown_dictation","message":"No dictation."}}""") }
+
+        assertEquals(
+            ApiResult.Failure(ApiError.Server(404, "unknown_dictation", "No dictation.")),
+            client.submitCorrection(pairing(), CorrectionSnapshot("x", "a", "a", "b", 0)),
+        )
+    }
+
     private fun closedPort(): Int = ServerSocket(0).use { it.localPort }
 
     private fun respond(exchange: HttpExchange, status: Int, body: String) {

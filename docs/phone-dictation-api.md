@@ -167,6 +167,58 @@ curl -sS -X POST "http://192.168.1.20:47821/v1/transcribe?app=com.google.android
   --data-binary @recording.m4a
 ```
 
+## `POST /v1/corrections`
+
+Lets Auto-Learn learn from a phone dictation corrected on the phone. The phone watches the field it
+typed a dictation into and, when the user leaves it, sends what the field looked like right after
+the dictation and when it was left. The Mac runs it through the same Auto-Learn pipeline as a
+dictation pasted and corrected on the Mac (same correction diff, pending queue, review and
+thresholds). While Auto-Learn is off the request is accepted and nothing is queued.
+
+Request:
+
+- `Content-Type: application/json`, `Content-Length` required (chunked uploads get `411`).
+- Maximum body size: 256 KiB (262 144 bytes). Larger requests get `413` before the body is read.
+- Not queued behind transcriptions; it is answered at once.
+
+```json
+{
+  "id": "0F8B3B0C-5E43-4C1B-9B7A-2A2E8F9D1C11",
+  "insertedText": "Dictate with Parakeat today",
+  "insertStart": 6,
+  "textAfterInsert": "Note: Dictate with Parakeat today",
+  "textWhenLeft": "Note: Dictate with Parakeet today"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string (UUID) | The History `id` returned by `POST /v1/transcribe`. It must be a dictation from the phone. |
+| `insertedText` | string | The dictated text as typed into the field (not empty, at most 12 000 UTF-16 code units). |
+| `textAfterInsert` | string | A window of the field text right after the dictation was typed. |
+| `textWhenLeft` | string | The same window of the field text when the user left the field. |
+| `insertStart` | integer | Where `insertedText` starts in `textAfterInsert`, in UTF-16 code units. `textAfterInsert` must contain `insertedText` there. |
+
+Each text is at most 32 000 UTF-16 code units. Send only a window around the dictation, never the
+whole field: the Android client sends at most 200 characters before and 200 after it, cut at the
+same place in both texts, and sends nothing when text outside the window changed.
+
+`200 OK`:
+
+```json
+{ "autoLearnEnabled": true, "status": "accepted" }
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | string | Always `"accepted"` on `200`. |
+| `autoLearnEnabled` | boolean | False when Auto-Learn is off on the Mac: the snapshot was dropped. |
+
+A snapshot repeated for the same `id` (a retry after a lost response) is accepted again but
+learned from only once. Other outcomes: `400 bad_request` for malformed JSON or fields that do not
+fit together, `404 unknown_dictation` when no History entry has that `id`, and
+`409 not_phone_dictation` when the entry was not dictated on the phone.
+
 ## Errors
 
 Every error has the same body:
@@ -179,12 +231,14 @@ Every error has the same body:
 
 | HTTP | `code` | When |
 |---|---|---|
-| 400 | `bad_request` | Malformed request, empty body or headers over 16 KiB. |
+| 400 | `bad_request` | Malformed request, empty body or headers over 16 KiB; for `/v1/corrections`, malformed JSON or inconsistent fields. |
 | 401 | `unauthorized` | Missing or wrong bearer token (including a token that was regenerated). Re-pair. |
 | 404 | `not_found` | Unknown path. |
+| 404 | `unknown_dictation` | `/v1/corrections`: no History entry has this `id`. |
 | 405 | `method_not_allowed` | Wrong method for the path. |
+| 409 | `not_phone_dictation` | `/v1/corrections`: the History entry was not dictated on the phone. |
 | 411 | `length_required` | `Content-Length` missing, or chunked transfer encoding. |
-| 413 | `payload_too_large` | Body over 64 MiB. |
+| 413 | `payload_too_large` | Body over 64 MiB (256 KiB for `/v1/corrections`). |
 | 415 | `unsupported_media_type` | Audio format not recognised from `format` or `Content-Type`. |
 | 500 | `transcription_failed` | The audio could not be decoded or transcribed; `message` gives the reason. |
 | 503 | `no_model_selected` | No usable transcription model is selected for the phone's mode on the Mac. |

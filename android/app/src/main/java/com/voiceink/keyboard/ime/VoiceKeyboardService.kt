@@ -4,6 +4,7 @@ import android.inputmethodservice.InputMethodService
 import android.text.InputType
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.ImageButton
@@ -12,6 +13,9 @@ import android.widget.TextView
 import com.voiceink.keyboard.R
 import com.voiceink.keyboard.api.FieldContext
 import com.voiceink.keyboard.api.Pairing
+import com.voiceink.keyboard.corrections.CorrectionHandoff
+import com.voiceink.keyboard.corrections.InsertedDictation
+import com.voiceink.keyboard.corrections.PasswordFields
 import com.voiceink.keyboard.dictation.DictationFlow
 import com.voiceink.keyboard.dictation.DictationMessages
 import com.voiceink.keyboard.dictation.DictationState
@@ -28,6 +32,8 @@ import kotlinx.coroutines.cancel
 class VoiceKeyboardService : InputMethodService(), DictationFlow.Host {
     private val scope: CoroutineScope = MainScope()
     private lateinit var flow: DictationFlow
+    /** Where the last dictation starts in its field, when the editor said. */
+    private var lastInsertStart: Int? = null
 
     private var statusView: TextView? = null
     private var micButton: ImageButton? = null
@@ -103,7 +109,18 @@ class VoiceKeyboardService : InputMethodService(), DictationFlow.Host {
     override fun commit(text: String): Boolean {
         val connection = currentInputConnection ?: return false
         val before = connection.getTextBeforeCursor(1, 0)
-        return connection.commitText(TextInsertion.separator(before) + text, 1)
+        val separator = TextInsertion.separator(before)
+        lastInsertStart = connection.getExtractedText(ExtractedTextRequest(), 0)
+            ?.takeIf { it.selectionStart >= 0 && it.selectionEnd >= 0 }
+            ?.let { it.startOffset + minOf(it.selectionStart, it.selectionEnd) + separator.length }
+        return connection.commitText(separator + text, 1)
+    }
+
+    /** Lets the mic bubble's service, when it is on, watch the field for corrections; never for a password field. */
+    override fun onDelivered(historyId: String?, text: String) {
+        historyId ?: return
+        if (PasswordFields.isPassword(false, currentInputEditorInfo?.inputType ?: InputType.TYPE_NULL)) return
+        CorrectionHandoff.inserted(InsertedDictation(historyId, text, lastInsertStart))
     }
 
     private fun switchBack() {

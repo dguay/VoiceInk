@@ -48,6 +48,9 @@ class DictationFlow internal constructor(
          * null when no field is known. Every entry point must say, so it has no default.
          */
         fun fieldContext(): FieldContext?
+
+        /** [text] was just typed for the History entry [historyId] (null from a Mac that sends none), before [onInserted]. */
+        fun onDelivered(historyId: String?, text: String) = Unit
     }
 
     private val pairingStore = PairingStore(context)
@@ -153,9 +156,11 @@ class DictationFlow internal constructor(
             is ApiResult.Success -> {
                 pairingStore.lastHost = result.host
                 host.beforeDelivery()
-                when (delivery.deliver(ticket, result.value.text.trim(), host::commit, pending::discard)) {
+                val text = result.value.text.trim()
+                when (delivery.deliver(ticket, text, host::commit, pending::discard)) {
                     TextDelivery.Outcome.INSERTED -> {
                         show(DictationState.Idle)
+                        host.onDelivered(result.value.id, text)
                         host.onInserted(pairing)
                     }
                     TextDelivery.Outcome.EMPTY -> show(DictationState.NoSpeech)
