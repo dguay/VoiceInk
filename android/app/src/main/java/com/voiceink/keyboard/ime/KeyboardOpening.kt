@@ -9,19 +9,20 @@ internal object KeyboardOpening {
     /**
      * Shows the resting state for [current] and starts recording right away when a fresh
      * recording makes sense: the view opened anew ([restarting] is false) on a [textField],
-     * and nothing is in progress, kept, unpaired or missing the microphone.
+     * and nothing is in progress, kept or blocked by setup ([blocker]: no Mac and no on-device
+     * model, or no microphone).
      */
     fun decide(
         current: DictationState,
         restarting: Boolean,
         textField: Boolean,
-        paired: Boolean,
-        hasMicrophone: Boolean,
+        blocker: DictationState?,
         hasKeptRecording: Boolean,
     ): Decision {
-        if (current == DictationState.Recording || current == DictationState.Sending) return Decision(current, false)
-        val resting = DictationState.resting(current, paired, hasMicrophone, hasKeptRecording, sameField = restarting)
-        val freshRecording = resting == DictationState.Idle || resting == DictationState.NoSpeech
+        if (current == DictationState.Recording || current.isBusy) return Decision(current, false)
+        val resting = DictationState.resting(current, blocker, hasKeptRecording, sameField = restarting)
+        val freshRecording = resting == DictationState.Idle || resting == DictationState.NoSpeech ||
+            resting == DictationState.InsertedOnPhone
         return Decision(resting, startRecording = freshRecording && !restarting && textField)
     }
 }

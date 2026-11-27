@@ -11,13 +11,19 @@
     <string name="status_inserted">Inserted from %1$s</string>
     <string name="status_no_speech">Nothing was heard. Tap to try again.</string>
     <string name="status_recorder_failed">The microphone could not start. Tap to try again.</string>
-    <string name="status_not_paired">Pair with your Mac first.</string>
+    <string name="status_not_paired">Pair with your Mac, or download the on-device model, first.</string>
+    <string name="status_needs_offline_model">Offline mode is on, but the on-device model isn\'t downloaded.</string>
+    <string name="status_transcribing_on_phone">Transcribing on this phone…</string>
+    <string name="status_inserted_on_phone">Typed from this phone (raw text, no Mac cleanup)</string>
+    <string name="status_phone_failed">This phone couldn\'t transcribe the recording. Recording kept: tap retry.</string>
+    <string name="status_phone_model_missing">The on-device model isn\'t downloaded. Recording kept: download it in setup, then retry.</string>
     <string name="status_needs_mic">Microphone access is needed to dictate.</string>
     <string name="status_kept">Recording kept. Tap retry to send it.</string>
     <string name="status_field_changed">The field changed before the text arrived. Recording kept: tap retry to insert it here.</string>
     <string name="status_insert_rejected">This field didn\'t accept the text. Recording kept: tap retry.</string>
     <string name="status_insert_rejected_copy">This field didn\'t accept the text. Copy it to paste manually, or tap retry.</string>
     <string name="error_unreachable">Mac unreachable. Is it awake and on your network or Tailscale? Tap retry.</string>
+    <string name="error_unreachable_phone_offered">Mac unreachable. Tap retry, or transcribe this recording on the phone (raw text).</string>
     <string name="error_unauthorized">Token rejected by the Mac. Pair again, then retry.</string>
     <string name="error_no_model">No model selected on the Mac. Choose one in VoiceInk, then retry.</string>
     <string name="error_transcription_failed">Transcription failed on the Mac. Tap retry.</string>
@@ -29,6 +35,7 @@
     <string name="action_discard">Discard</string>
     <string name="action_copy">Copy</string>
     <string name="action_retry">Retry</string>
+    <string name="action_transcribe_on_phone">Transcribe on phone</string>
     <string name="clipboard_label">VoiceInk transcription</string>
     <string name="copied_to_clipboard">Copied transcription</string>
     <string name="cd_start">Start dictation</string>
@@ -84,8 +91,8 @@
     <string name="invalid_missing_token">Enter the pairing token.</string>
 
     <string name="section_mic">2. Allow the microphone</string>
-    <string name="mic_rationale">The VoiceInk keyboard records your voice only while you dictate, and sends it only to your paired Mac to turn it into text.</string>
-    <string name="mic_granted">Microphone allowed. Audio is recorded only while dictating and sent only to your Mac.</string>
+    <string name="mic_rationale">The VoiceInk keyboard records your voice only while you dictate, and sends it only to your paired Mac to turn it into text (or to the on-device model below, which keeps it on the phone).</string>
+    <string name="mic_granted">Microphone allowed. Audio is recorded only while dictating, and goes only to your Mac or to the on-device model.</string>
     <string name="allow_mic">Allow microphone</string>
 
     <string name="section_enable">3. Turn on the VoiceInk keyboard</string>
@@ -119,6 +126,28 @@
         <item quantity="one">Hidden in %1$d app.</item>
         <item quantity="other">Hidden in %1$d apps.</item>
     </plurals>
+    <!-- On-device offline model -->
+    <string name="section_offline">6. On-device offline model (optional)</string>
+    <string name="offline_help">Transcribe on this phone when your Mac is out of reach, or without a Mac. The model (Whisper base, multilingual) is a one-time download of about 60 MB from Hugging Face and uses about 60 MB of storage. Recordings it transcribes never leave the phone. Its text is raw: no Mac modes, dictionary, word replacements, AI cleanup or History. Your paired Mac stays the default whenever it is reachable.</string>
+    <string name="offline_absent">Not downloaded.</string>
+    <string name="offline_downloading">Downloading: %1$s of %2$s</string>
+    <string name="offline_waiting_wifi">Waiting for Wi-Fi (%1$s of %2$s downloaded). Allow mobile data to download now.</string>
+    <string name="offline_waiting_network">Waiting for a network connection (%1$s of %2$s downloaded).</string>
+    <string name="offline_waiting_other">Download queued (%1$s of %2$s).</string>
+    <string name="offline_verifying">Checking the download…</string>
+    <string name="offline_ready">Downloaded and verified (%1$s). Ready to transcribe on this phone.</string>
+    <string name="offline_failed_download">The download failed. Try again.</string>
+    <string name="offline_failed_corrupted">The download didn\'t match the expected model, so it was deleted. Try again.</string>
+    <string name="offline_failed_no_space">Not enough free storage: about %1$s is needed while downloading.</string>
+    <string name="offline_download">Download model</string>
+    <string name="offline_cancel">Cancel download</string>
+    <string name="offline_delete">Delete model</string>
+    <string name="offline_allow_mobile">Allow download over mobile data</string>
+    <string name="offline_mode">Offline mode: always transcribe on this phone</string>
+    <string name="offline_auto_fallback">Transcribe on this phone when the Mac is unreachable</string>
+    <string name="offline_download_title">VoiceInk offline model</string>
+    <string name="offline_download_description">On-device speech model for VoiceInk Keyboard</string>
+
     <string name="exclusions_title">Apps without the bubble</string>
     <string name="exclusions_help">The mic bubble never appears in the apps you check. Uncheck an app to bring it back there.</string>
     <string name="exclusions_loading">Loading apps…</string>

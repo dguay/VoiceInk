@@ -10,13 +10,18 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.format.Formatter
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.Spinner
+import android.widget.Switch
 import android.widget.TextView
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
@@ -31,6 +36,12 @@ import com.voiceink.keyboard.api.VoiceInkClient
 import com.voiceink.keyboard.bubble.BubbleSettings
 import com.voiceink.keyboard.bubble.IdleCollapseTimeout
 import com.voiceink.keyboard.bubble.MicBubbleService
+import com.voiceink.keyboard.offline.ModelFailure
+import com.voiceink.keyboard.offline.ModelState
+import com.voiceink.keyboard.offline.OfflineModel
+import com.voiceink.keyboard.offline.OfflineModelStore
+import com.voiceink.keyboard.offline.OfflineSettings
+import com.voiceink.keyboard.offline.Waiting
 import com.voiceink.keyboard.store.PairingStore
 import com.voiceink.keyboard.update.AppInstaller
 import com.voiceink.keyboard.update.AppUpdateInfo
@@ -41,6 +52,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -85,6 +97,18 @@ class MainActivity : Activity() {
     /** The user went to the install permission setting; continue the update when they come back. */
     private var installAfterPermission = false
     private val installResultChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> showInstallResult() }
+
+    private lateinit var offlineModel: OfflineModelStore
+    private lateinit var offlineSettings: OfflineSettings
+    private lateinit var offlineStatus: TextView
+    private lateinit var offlineProgress: ProgressBar
+    private lateinit var offlineAllowMobile: CheckBox
+    private lateinit var offlineDownload: Button
+    private lateinit var offlineDelete: Button
+    private lateinit var offlineModeSwitch: Switch
+    private lateinit var offlineFallbackSwitch: Switch
+    private var offlineState: ModelState = ModelState.Absent
+    private var offlineWatch: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -146,6 +170,8 @@ class MainActivity : Activity() {
             getSystemService(InputMethodManager::class.java).showInputMethodPicker()
         }
 
+        setupOfflineModel()
+
         handleReason(intent)
     }
 
@@ -160,10 +186,12 @@ class MainActivity : Activity() {
         installResults.registerListener(installResultChanged)
         refresh()
         showInstallResult()
+        watchOfflineModel()
         if (!continueAfterPermission()) checkMac()
     }
 
     override fun onPause() {
+        offlineWatch?.cancel()
         bubbleSettings.unregisterListener(bubbleSettingsChanged)
         installResults.unregisterListener(installResultChanged)
         super.onPause()
@@ -189,6 +217,11 @@ class MainActivity : Activity() {
             REASON_REJECTED -> pairingResult.text = getString(R.string.pair_rejected_from_keyboard)
             REASON_MICROPHONE -> if (!hasMicrophone()) {
                 requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MIC)
+            }
+            REASON_OFFLINE_MODEL -> {
+                val scroll = findViewById<ScrollView>(R.id.scroll)
+                val section = findViewById<View>(R.id.offline_section)
+                scroll.post { scroll.smoothScrollTo(0, section.top) }
             }
         }
     }
@@ -260,6 +293,115 @@ class MainActivity : Activity() {
         IdleCollapseTimeout.SECONDS_5 -> R.string.idle_collapse_5s
         IdleCollapseTimeout.SECONDS_10 -> R.string.idle_collapse_10s
         IdleCollapseTimeout.SECONDS_30 -> R.string.idle_collapse_30s
+    }
+
+    // MARK: On-device offline model
+
+    private fun setupOfflineModel() {
+        offlineModel = OfflineModelStore(this)
+        offlineSettings = OfflineSettings(this)
+        offlineStatus = findViewById(R.id.offline_status)
+        offlineProgress = findViewById(R.id.offline_progress)
+        offlineAllowMobile = findViewById(R.id.offline_allow_mobile)
+        offlineDownload = findViewById(R.id.offline_download)
+        offlineDelete = findViewById(R.id.offline_delete)
+        offlineModeSwitch = findViewById(R.id.offline_mode)
+        offlineFallbackSwitch = findViewById(R.id.offline_auto_fallback)
+
+        offlineAllowMobile.isChecked = offlineSettings.allowMobileData
+        offlineAllowMobile.setOnCheckedChangeListener { _, checked ->
+            if (offlineSettings.allowMobileData == checked) return@setOnCheckedChangeListener
+            offlineSettings.allowMobileData = checked
+            // DownloadManager fixes the network rule when the download starts: restart under the new one.
+            if (offlineState is ModelState.Downloading) startOfflineDownload()
+        }
+        offlineDownload.setOnClickListener {
+            when (offlineState) {
+                is ModelState.Downloading -> {
+                    offlineModel.cancelDownload()
+                    watchOfflineModel()
+                }
+                ModelState.Absent, is ModelState.Failed -> startOfflineDownload()
+                ModelState.Verifying, ModelState.Ready -> Unit
+            }
+        }
+        offlineDelete.setOnClickListener {
+            offlineModel.delete()
+            // Without the model, Offline mode would only block dictation.
+            offlineSettings.offlineMode = false
+            watchOfflineModel()
+        }
+        offlineModeSwitch.setOnCheckedChangeListener { _, checked ->
+            if (offlineSettings.offlineMode != checked) offlineSettings.offlineMode = checked
+        }
+        offlineFallbackSwitch.setOnCheckedChangeListener { _, checked ->
+            if (offlineSettings.autoFallback != checked) offlineSettings.autoFallback = checked
+        }
+        showOfflineState(offlineState)
+    }
+
+    private fun startOfflineDownload() {
+        offlineModel.startDownload(offlineSettings.allowMobileData)
+        watchOfflineModel()
+    }
+
+    /** Shows the model's state, and follows it while a download or its check is in progress. */
+    private fun watchOfflineModel() {
+        offlineWatch?.cancel()
+        offlineWatch = scope.launch {
+            while (true) {
+                val state = withContext(Dispatchers.IO) { offlineModel.refresh() }
+                showOfflineState(state)
+                if (state !is ModelState.Downloading && state != ModelState.Verifying) break
+                delay(OFFLINE_POLL_MS)
+            }
+        }
+    }
+
+    private fun showOfflineState(state: ModelState) {
+        offlineState = state
+        val size = { bytes: Long -> Formatter.formatShortFileSize(this, bytes) }
+        offlineStatus.text = when (state) {
+            ModelState.Absent -> getString(R.string.offline_absent)
+            is ModelState.Downloading -> when (state.waiting) {
+                null -> getString(R.string.offline_downloading, size(state.downloaded), size(state.total))
+                Waiting.WIFI -> getString(R.string.offline_waiting_wifi, size(state.downloaded), size(state.total))
+                Waiting.NETWORK -> getString(R.string.offline_waiting_network, size(state.downloaded), size(state.total))
+                Waiting.OTHER -> getString(R.string.offline_waiting_other, size(state.downloaded), size(state.total))
+            }
+            ModelState.Verifying -> getString(R.string.offline_verifying)
+            ModelState.Ready -> getString(R.string.offline_ready, size(OfflineModel.SIZE_BYTES))
+            is ModelState.Failed -> when (state.failure) {
+                ModelFailure.DOWNLOAD_FAILED -> getString(R.string.offline_failed_download)
+                ModelFailure.CORRUPTED -> getString(R.string.offline_failed_corrupted)
+                ModelFailure.NO_SPACE -> getString(R.string.offline_failed_no_space, size(OfflineModel.FREE_SPACE_NEEDED))
+            }
+        }
+
+        when (state) {
+            is ModelState.Downloading -> {
+                offlineProgress.visibility = View.VISIBLE
+                offlineProgress.isIndeterminate = false
+                offlineProgress.progress = if (state.total > 0) (state.downloaded * 1000 / state.total).toInt() else 0
+            }
+            ModelState.Verifying -> {
+                offlineProgress.visibility = View.VISIBLE
+                offlineProgress.isIndeterminate = true
+            }
+            else -> offlineProgress.visibility = View.GONE
+        }
+
+        val ready = state == ModelState.Ready
+        offlineDownload.visibility = if (ready) View.GONE else View.VISIBLE
+        offlineDownload.isEnabled = state != ModelState.Verifying
+        offlineDownload.setText(if (state is ModelState.Downloading || state == ModelState.Verifying) R.string.offline_cancel else R.string.offline_download)
+        offlineDelete.visibility = if (ready) View.VISIBLE else View.GONE
+        offlineAllowMobile.visibility = if (ready) View.GONE else View.VISIBLE
+        offlineAllowMobile.isEnabled = state != ModelState.Verifying
+        offlineModeSwitch.isEnabled = ready
+        offlineFallbackSwitch.isEnabled = ready
+        offlineModeSwitch.isChecked = offlineSettings.offlineMode
+        offlineFallbackSwitch.isChecked = offlineSettings.autoFallback
     }
 
     // MARK: Update from the paired Mac
@@ -492,6 +634,8 @@ class MainActivity : Activity() {
         const val REASON_PAIR = "pair"
         const val REASON_REJECTED = "rejected"
         const val REASON_MICROPHONE = "microphone"
+        const val REASON_OFFLINE_MODEL = "offline_model"
+        private const val OFFLINE_POLL_MS = 500L
         private const val REQUEST_MIC = 1
         private const val STATE_INSTALL_AFTER_PERMISSION = "install_after_permission"
     }

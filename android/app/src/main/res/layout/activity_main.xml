@@ -272,5 +272,78 @@
             android:importantForAutofill="no"
             android:inputType="textMultiLine|textCapSentences"
             android:minHeight="96dp" />
+
+        <!-- 6. On-device offline model -->
+        <LinearLayout
+            android:id="@+id/offline_section"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView style="@style/SetupHeading"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/section_offline" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/offline_help" />
+
+            <TextView
+                android:id="@+id/offline_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:accessibilityLiveRegion="polite"
+                android:textStyle="bold" />
+
+            <ProgressBar
+                android:id="@+id/offline_progress"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:max="1000"
+                android:visibility="gone" />
+
+            <CheckBox
+                android:id="@+id/offline_allow_mobile"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:minHeight="48dp"
+                android:text="@string/offline_allow_mobile" />
+
+            <Button
+                android:id="@+id/offline_download"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/offline_download" />
+
+            <Button
+                android:id="@+id/offline_delete"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/offline_delete"
+                android:visibility="gone" />
+
+            <Switch
+                android:id="@+id/offline_mode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:minHeight="48dp"
+                android:text="@string/offline_mode" />
+
+            <Switch
+                android:id="@+id/offline_auto_fallback"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:text="@string/offline_auto_fallback" />
+        </LinearLayout>
     </LinearLayout>
 </ScrollView>

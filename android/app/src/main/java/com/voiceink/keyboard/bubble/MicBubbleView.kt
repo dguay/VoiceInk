@@ -126,24 +126,25 @@ internal class MicBubbleView(
         idleCollapse.sync(settings.idleCollapse, state, now)
         scheduleCollapse(now)
 
-        progress.visibility = if (state == DictationState.Sending) View.VISIBLE else View.GONE
-        mic.isEnabled = state != DictationState.Sending
+        progress.visibility = if (state.isBusy) View.VISIBLE else View.GONE
+        mic.isEnabled = !state.isBusy
         mic.isActivated = state == DictationState.Recording
         val (icon, description) = when (state) {
             DictationState.Recording -> R.drawable.ic_stop to R.string.cd_stop
             is DictationState.Kept -> R.drawable.ic_retry to R.string.cd_retry
-            DictationState.Sending -> R.drawable.ic_mic to R.string.cd_sending
+            DictationState.Sending, DictationState.TranscribingOnPhone -> R.drawable.ic_mic to R.string.cd_sending
             else -> R.drawable.ic_mic to R.string.cd_start
         }
         mic.setImageResource(icon)
         mic.contentDescription = context.getString(description)
 
         val copyAvailable = CopyFallback.isAvailable(state)
+        val phoneOffered = flow.phoneOffered
         card.visibility = if (state == DictationState.Idle) View.GONE else View.VISIBLE
-        status.text = DictationMessages.status(context, state, flow.macName, copyAvailable = copyAvailable)
+        status.text = DictationMessages.status(context, state, flow.macName, copyAvailable = copyAvailable, phoneOffered = phoneOffered)
         discard.visibility = if (state is DictationState.Kept) View.VISIBLE else View.GONE
         copy.visibility = if (copyAvailable) View.VISIBLE else View.GONE
-        val label = DictationMessages.action(state) ?: if (state is DictationState.Kept) R.string.action_retry else null
+        val label = DictationMessages.action(state, phoneOffered) ?: if (state is DictationState.Kept) R.string.action_retry else null
         if (label != null) {
             action.setText(label)
             action.visibility = View.VISIBLE

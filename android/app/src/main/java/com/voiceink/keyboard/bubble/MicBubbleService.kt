@@ -110,7 +110,7 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
             return bubble.hide()
         }
 
-        if (fieldChanged && flow.state != DictationState.Sending) flow.show(flow.restingState(sameField = false))
+        if (fieldChanged && !flow.state.isBusy) flow.show(flow.restingState(sameField = false))
         val keyboardTop = Rect().also(keyboard::getBoundsInScreen).top
         val field = focus.screenBox()
         // Still opening or resizing: look again shortly rather than show the bubble on the way.
@@ -168,7 +168,7 @@ class MicBubbleService : AccessibilityService(), DictationFlow.Host {
         return true
     }
 
-    override fun onInserted(pairing: Pairing) = Unit
+    override fun onInserted(pairing: Pairing?) = Unit
 
     /** The field the bubble types into, as last seen with input focus. */
     override fun fieldContext(): FieldContext? =

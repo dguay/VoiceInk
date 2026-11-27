@@ -2,6 +2,7 @@ package com.voiceink.keyboard.ime
 
 import com.voiceink.keyboard.api.ApiError
 import com.voiceink.keyboard.dictation.DictationState
+import com.voiceink.keyboard.dictation.TranscriptionRoute
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -15,7 +16,15 @@ class KeyboardOpeningTest {
         paired: Boolean = true,
         hasMicrophone: Boolean = true,
         hasKeptRecording: Boolean = false,
-    ) = KeyboardOpening.decide(current, restarting, textField, paired, hasMicrophone, hasKeptRecording)
+        offlineMode: Boolean = false,
+        phoneReady: Boolean = false,
+    ) = KeyboardOpening.decide(
+        current,
+        restarting,
+        textField,
+        TranscriptionRoute.blocker(paired, offlineMode, phoneReady, hasMicrophone),
+        hasKeptRecording,
+    )
 
     @Test fun openingOnATextFieldStartsRecording() {
         assertTrue(open().startRecording)
@@ -49,6 +58,21 @@ class KeyboardOpeningTest {
         assertFalse(decision.startRecording)
     }
 
+    @Test fun withoutAMacTheDownloadedModelLetsTheKeyboardRecord() {
+        assertTrue(open(paired = false, phoneReady = true).startRecording)
+    }
+
+    @Test fun offlineModeWithoutTheModelAsksForItInsteadOfRecording() {
+        val decision = open(offlineMode = true, phoneReady = false)
+
+        assertEquals(DictationState.NeedsOfflineModel, decision.state)
+        assertFalse(decision.startRecording)
+    }
+
+    @Test fun openingAfterAnOnPhoneDictationStartsAFreshRecording() {
+        assertTrue(open(current = DictationState.InsertedOnPhone).startRecording)
+    }
+
     @Test fun missingMicrophonePermissionAsksForItInsteadOfRecording() {
         val decision = open(hasMicrophone = false)
 
@@ -57,7 +81,7 @@ class KeyboardOpeningTest {
     }
 
     @Test fun recordingOrSendingInProgressIsLeftAloneWithoutASecondRecording() {
-        for (busy in listOf(DictationState.Recording, DictationState.Sending)) {
+        for (busy in listOf(DictationState.Recording, DictationState.Sending, DictationState.TranscribingOnPhone)) {
             for (restarting in listOf(true, false)) {
                 val decision = open(current = busy, restarting = restarting)
 
