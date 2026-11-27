@@ -5,6 +5,21 @@ struct TranscriptionRuntimeConfiguration {
     let model: any TranscriptionModel
     let language: String
     let isRealtimeEnabled: Bool
+    let allowedAutoDetectLanguages: [String]
+
+    init(
+        mode: ModeConfig,
+        model: any TranscriptionModel,
+        language: String,
+        isRealtimeEnabled: Bool,
+        allowedAutoDetectLanguages: [String] = []
+    ) {
+        self.mode = mode
+        self.model = model
+        self.language = language
+        self.isRealtimeEnabled = isRealtimeEnabled
+        self.allowedAutoDetectLanguages = allowedAutoDetectLanguages
+    }
 
     var metadata: (name: String?, emoji: String?) {
         guard mode.isEnabled else {
@@ -16,7 +31,8 @@ struct TranscriptionRuntimeConfiguration {
     var requestContext: TranscriptionRequestContext {
         TranscriptionRequestContext(
             language: language,
-            prompt: model.provider == .whisper ? WhisperPrompt.resolvedPrompt(for: language) : nil
+            prompt: model.provider == .whisper ? WhisperPrompt.resolvedPrompt(for: language) : nil,
+            allowedAutoDetectLanguages: allowedAutoDetectLanguages
         )
     }
 }
@@ -35,6 +51,29 @@ struct EnhancementRuntimeConfiguration {
     let useClipboardContext: Bool
     let useSelectedTextContext: Bool
     let useScreenCaptureContext: Bool
+    let allowedAutoDetectLanguages: [String]
+
+    init(
+        mode: ModeConfig?,
+        isEnabled: Bool,
+        prompt: CustomPrompt?,
+        provider: AIProvider?,
+        modelName: String?,
+        useClipboardContext: Bool,
+        useSelectedTextContext: Bool,
+        useScreenCaptureContext: Bool,
+        allowedAutoDetectLanguages: [String] = []
+    ) {
+        self.mode = mode
+        self.isEnabled = isEnabled
+        self.prompt = prompt
+        self.provider = provider
+        self.modelName = modelName
+        self.useClipboardContext = useClipboardContext
+        self.useSelectedTextContext = useSelectedTextContext
+        self.useScreenCaptureContext = useScreenCaptureContext
+        self.allowedAutoDetectLanguages = allowedAutoDetectLanguages
+    }
 
     func replacingPrompt(_ prompt: CustomPrompt) -> EnhancementRuntimeConfiguration {
         EnhancementRuntimeConfiguration(
@@ -45,7 +84,8 @@ struct EnhancementRuntimeConfiguration {
             modelName: modelName,
             useClipboardContext: useClipboardContext,
             useSelectedTextContext: useSelectedTextContext,
-            useScreenCaptureContext: useScreenCaptureContext
+            useScreenCaptureContext: useScreenCaptureContext,
+            allowedAutoDetectLanguages: allowedAutoDetectLanguages
         )
     }
 }
@@ -125,13 +165,20 @@ enum ModeRuntimeResolver {
             for: model,
             realtimeEnabled: mode.isRealtimeTranscriptionEnabled
         )
+        let allowedAutoDetectLanguages = AutoDetectLanguageScope.effectiveAllowedLanguages(
+            selectedLanguage: language,
+            configuredAllowedLanguages: mode.allowedAutoDetectLanguages,
+            for: model,
+            realtimeEnabled: mode.isRealtimeTranscriptionEnabled
+        )
 
         return TranscriptionRuntimeConfiguration(
             mode: mode,
             model: model,
             language: language,
             isRealtimeEnabled: TranscriptionRealtimeSupport.isEnabled(
-                for: model, modeValue: mode.isRealtimeTranscriptionEnabled)
+                for: model, modeValue: mode.isRealtimeTranscriptionEnabled),
+            allowedAutoDetectLanguages: allowedAutoDetectLanguages
         )
     }
 
@@ -168,6 +215,11 @@ enum ModeRuntimeResolver {
             aiService: aiService
         )
 
+        let allowedAutoDetectLanguages = resolvedAllowedAutoDetectLanguages(
+            for: mode,
+            provider: provider
+        )
+
         return EnhancementRuntimeConfiguration(
             mode: mode,
             isEnabled: mode?.isAIEnhancementEnabled ?? false,
@@ -176,7 +228,8 @@ enum ModeRuntimeResolver {
             modelName: modelName,
             useClipboardContext: provider == .voiceInkRefine ? false : mode?.useClipboardContext ?? false,
             useSelectedTextContext: provider == .voiceInkRefine ? false : mode?.useSelectedTextContext ?? true,
-            useScreenCaptureContext: provider == .voiceInkRefine ? false : mode?.useScreenCapture ?? false
+            useScreenCaptureContext: provider == .voiceInkRefine ? false : mode?.useScreenCapture ?? false,
+            allowedAutoDetectLanguages: allowedAutoDetectLanguages
         )
     }
 
@@ -189,6 +242,43 @@ enum ModeRuntimeResolver {
             autoSendKey: mode?.outputMode == .paste ? (mode?.autoSendKey ?? .none) : .none,
             customCommand: mode?.customCommand
         )
+    }
+
+    private static func resolvedAllowedAutoDetectLanguages(
+        for mode: ModeConfig?,
+        provider: AIProvider?
+    ) -> [String] {
+        guard provider != .voiceInkRefine,
+            let mode,
+            let configured = mode.allowedAutoDetectLanguages,
+            !configured.isEmpty
+        else {
+            return []
+        }
+
+        if let modelName = mode.selectedTranscriptionModelName,
+            let model = TranscriptionModelRegistry.model(
+                forSelectionKey: modelName,
+                in: TranscriptionModelRegistry.models
+            )
+        {
+            let effectiveLanguage = TranscriptionLanguageSupport.validLanguageOrFallback(
+                mode.selectedLanguage,
+                for: model,
+                realtimeEnabled: mode.isRealtimeTranscriptionEnabled
+            )
+            return AutoDetectLanguageScope.effectiveAllowedLanguages(
+                selectedLanguage: effectiveLanguage,
+                configuredAllowedLanguages: configured,
+                for: model,
+                realtimeEnabled: mode.isRealtimeTranscriptionEnabled
+            )
+        }
+
+        guard mode.selectedLanguage == "auto" else {
+            return []
+        }
+        return AutoDetectLanguageScope.normalize(configured)
     }
 
     private static func resolvedPrompt(

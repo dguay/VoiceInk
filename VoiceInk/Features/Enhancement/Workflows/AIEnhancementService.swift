@@ -149,6 +149,9 @@ class AIEnhancementService: ObservableObject {
             }
 
         let customVocabularySection = vocabulary.enhancementSection
+        let allowedLanguagesSection = AutoDetectLanguageScope.enhancementSection(
+            for: configuration.allowedAutoDetectLanguages
+        )
 
         let contextBlocks = [selectedTextContext, clipboardContext, screenCaptureContext]
             .filter { !$0.isEmpty }
@@ -164,9 +167,23 @@ class AIEnhancementService: ObservableObject {
                 ""
             }
 
-        return [prompt.finalPromptText, customVocabularySection, contextSection]
+        return [prompt.finalPromptText, customVocabularySection, allowedLanguagesSection, contextSection]
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
+    }
+
+    func systemMessageForTesting(
+        prompt: CustomPrompt,
+        configuration: EnhancementRuntimeConfiguration,
+        contextSnapshot: RecordingContextSnapshot? = nil,
+        vocabulary: RecordingVocabulary = RecordingVocabulary()
+    ) -> String {
+        getSystemMessage(
+            prompt: prompt,
+            configuration: configuration,
+            contextSnapshot: contextSnapshot,
+            vocabulary: vocabulary
+        )
     }
 
     private func makeRequest(

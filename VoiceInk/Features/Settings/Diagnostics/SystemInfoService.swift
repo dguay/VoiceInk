@@ -207,8 +207,18 @@ final class SystemInfoService {
             realtimeEnabled: mode.isRealtimeTranscriptionEnabled
         )[language]
 
+        let allowed = AutoDetectLanguageScope.effectiveAllowedLanguages(
+            selectedLanguage: language,
+            configuredAllowedLanguages: mode.allowedAutoDetectLanguages,
+            for: model,
+            realtimeEnabled: mode.isRealtimeTranscriptionEnabled
+        )
+
         guard let displayName, displayName.caseInsensitiveCompare(language) != .orderedSame else {
-            return language
+            return allowed.isEmpty ? language : "\(language) (\(allowed.joined(separator: ", ")))"
+        }
+        if !allowed.isEmpty {
+            return "\(displayName) (\(language): \(allowed.joined(separator: ", ")))"
         }
         return "\(displayName) (\(language))"
     }

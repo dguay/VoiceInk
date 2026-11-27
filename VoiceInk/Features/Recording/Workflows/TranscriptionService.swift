@@ -4,6 +4,7 @@ struct TranscriptionRequestContext {
     let language: String?
     let prompt: String?
     var vocabulary: RecordingVocabulary? = nil
+    var allowedAutoDetectLanguages: [String] = []
 
     static var currentDefaults: TranscriptionRequestContext {
         let language = UserDefaults.standard.string(forKey: "SelectedLanguage") ?? "auto"
@@ -20,11 +21,26 @@ struct TranscriptionRequestContext {
     }
 
     func scoped(to model: any TranscriptionModel) -> TranscriptionRequestContext {
+        let reconciledAllowed = AutoDetectLanguageScope.effectiveAllowedLanguages(
+            selectedLanguage: language,
+            configuredAllowedLanguages: allowedAutoDetectLanguages,
+            for: model
+        )
         guard model.provider == .whisper else {
-            return TranscriptionRequestContext(language: language, prompt: nil, vocabulary: vocabulary)
+            return TranscriptionRequestContext(
+                language: language,
+                prompt: nil,
+                vocabulary: vocabulary,
+                allowedAutoDetectLanguages: reconciledAllowed
+            )
         }
 
-        return self
+        return TranscriptionRequestContext(
+            language: language,
+            prompt: prompt,
+            vocabulary: vocabulary,
+            allowedAutoDetectLanguages: reconciledAllowed
+        )
     }
 }
 
