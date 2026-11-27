@@ -173,17 +173,34 @@ struct ConfigurationRow: View {
 
     private var selectedLanguage: String? {
         if let langCode = config.selectedLanguage {
-            if langCode == "auto" { return String(localized: "Auto") }
-            if langCode == "en" { return String(localized: "English") }
-
-            if let modelName = config.selectedTranscriptionModelName,
-                let model = TranscriptionModelRegistry.model(
+            let model = config.selectedTranscriptionModelName.flatMap { modelName in
+                TranscriptionModelRegistry.model(
                     forSelectionKey: modelName,
                     in: transcriptionModelManager.allAvailableModels
-                ),
-                let langName = TranscriptionLanguageSupport.languages(
-                    for: model, realtimeEnabled: config.isRealtimeTranscriptionEnabled)[langCode]
-            {
+                )
+            }
+            let supported = model.map {
+                TranscriptionLanguageSupport.languages(
+                    for: $0, realtimeEnabled: config.isRealtimeTranscriptionEnabled)
+            } ?? LanguageDictionary.all
+
+            if langCode == "auto" {
+                let effectiveAllowed = model.map {
+                    AutoDetectLanguageScope.effectiveAllowedLanguages(
+                        selectedLanguage: langCode,
+                        configuredAllowedLanguages: config.allowedAutoDetectLanguages,
+                        for: $0,
+                        realtimeEnabled: config.isRealtimeTranscriptionEnabled
+                    )
+                } ?? AutoDetectLanguageScope.normalize(config.allowedAutoDetectLanguages ?? [])
+                return AutoDetectLanguageScope.badgeLabel(
+                    for: effectiveAllowed,
+                    supportedLanguages: supported
+                )
+            }
+            if langCode == "en" { return String(localized: "English") }
+
+            if let langName = supported[langCode] {
                 return langName
             }
             return langCode.uppercased()

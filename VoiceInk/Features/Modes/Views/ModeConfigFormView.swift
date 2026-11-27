@@ -324,6 +324,19 @@ struct ModeConfigFormView: View {
             .onAppear {
                 draft.selectedLanguage = effectiveLanguage(for: modelInfo)
             }
+
+            if effectiveLanguage(for: modelInfo) == "auto",
+                AutoDetectLanguageScope.supportsAutoDetect(
+                    model: modelInfo,
+                    realtimeEnabled: draft.isRealtimeTranscriptionEnabled
+                )
+            {
+                ModeAllowedAutoDetectLanguagesRow(
+                    allowedLanguages: $draft.allowedAutoDetectLanguages,
+                    model: modelInfo,
+                    realtimeEnabled: draft.isRealtimeTranscriptionEnabled
+                )
+            }
         } else if let selectedModel = effectiveModelName,
             let modelInfo = warmupSnapshot.transcriptionModel(named: selectedModel)
         {

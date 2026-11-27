@@ -14,6 +14,7 @@ struct ModeConfigDraft {
     var selectedTranscriptionModelName: String?
     var isRealtimeTranscriptionEnabled: Bool
     var selectedLanguage: String?
+    var allowedAutoDetectLanguages: [String]
     var isTextFormattingEnabled: Bool
     var useClipboardContext: Bool
     var useSelectedTextContext: Bool
@@ -46,6 +47,9 @@ struct ModeConfigDraft {
             selectedTranscriptionModelName = inheritedConfig?.selectedTranscriptionModelName
             isRealtimeTranscriptionEnabled = true
             selectedLanguage = inheritedConfig?.selectedLanguage
+            allowedAutoDetectLanguages = AutoDetectLanguageScope.normalize(
+                inheritedConfig?.allowedAutoDetectLanguages ?? []
+            )
             isTextFormattingEnabled = true
             useClipboardContext = false
             useSelectedTextContext = false
@@ -74,6 +78,9 @@ struct ModeConfigDraft {
             selectedTranscriptionModelName = latestConfig.selectedTranscriptionModelName
             isRealtimeTranscriptionEnabled = latestConfig.isRealtimeTranscriptionEnabled
             selectedLanguage = latestConfig.selectedLanguage
+            allowedAutoDetectLanguages = AutoDetectLanguageScope.normalize(
+                latestConfig.allowedAutoDetectLanguages ?? []
+            )
             isTextFormattingEnabled = latestConfig.isTextFormattingEnabled
             useClipboardContext = latestConfig.useClipboardContext
             useSelectedTextContext = latestConfig.useSelectedTextContext
@@ -149,6 +156,15 @@ struct ModeConfigDraft {
             for: model,
             realtimeEnabled: isRealtimeTranscriptionEnabled
         )
+        if AutoDetectLanguageScope.supportsAutoDetect(model: model, realtimeEnabled: isRealtimeTranscriptionEnabled),
+            !allowedAutoDetectLanguages.isEmpty
+        {
+            allowedAutoDetectLanguages = AutoDetectLanguageScope.reconcile(
+                allowedAutoDetectLanguages,
+                for: model,
+                realtimeEnabled: isRealtimeTranscriptionEnabled
+            )
+        }
     }
 
     mutating func applyOutputRules(canRespond: Bool) {
@@ -186,6 +202,7 @@ struct ModeConfigDraft {
                 selectedTranscriptionModelName: selectedTranscriptionModelName,
                 isRealtimeTranscriptionEnabled: isRealtimeTranscriptionEnabled,
                 selectedLanguage: selectedLanguage,
+                allowedAutoDetectLanguages: AutoDetectLanguageScope.normalizedOrNil(allowedAutoDetectLanguages),
                 useClipboardContext: useClipboardContext,
                 useSelectedTextContext: useSelectedTextContext,
                 useScreenCapture: useScreenCapture,
@@ -212,6 +229,9 @@ struct ModeConfigDraft {
             updatedConfig.selectedTranscriptionModelName = selectedTranscriptionModelName
             updatedConfig.isRealtimeTranscriptionEnabled = isRealtimeTranscriptionEnabled
             updatedConfig.selectedLanguage = selectedLanguage
+            updatedConfig.allowedAutoDetectLanguages = AutoDetectLanguageScope.normalizedOrNil(
+                allowedAutoDetectLanguages
+            )
             updatedConfig.isTextFormattingEnabled = isTextFormattingEnabled
             updatedConfig.useClipboardContext = useClipboardContext
             updatedConfig.useSelectedTextContext = useSelectedTextContext

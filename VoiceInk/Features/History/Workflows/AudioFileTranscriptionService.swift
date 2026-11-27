@@ -83,11 +83,18 @@ class AudioTranscriptionService: ObservableObject {
                 for: model,
                 realtimeEnabled: mode?.isRealtimeTranscriptionEnabled
             )
+            let allowedAutoDetectLanguages = AutoDetectLanguageScope.effectiveAllowedLanguages(
+                selectedLanguage: language,
+                configuredAllowedLanguages: mode?.allowedAutoDetectLanguages,
+                for: model,
+                realtimeEnabled: mode?.isRealtimeTranscriptionEnabled
+            )
             let vocabulary = CustomVocabularyService.shared.loadSavedVocabulary(from: modelContext)
             let requestContext = TranscriptionRequestContext(
                 language: language,
                 prompt: model.provider == .whisper ? WhisperPrompt.resolvedPrompt(for: language) : nil,
-                vocabulary: vocabulary
+                vocabulary: vocabulary,
+                allowedAutoDetectLanguages: allowedAutoDetectLanguages
             )
             let modeName = (mode?.isEnabled == true) ? mode?.name : nil
             let modeEmoji = (mode?.isEnabled == true) ? mode?.icon.value : nil
