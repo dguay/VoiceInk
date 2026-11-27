@@ -28,7 +28,8 @@ import kotlinx.coroutines.cancel
 
 /**
  * A voice-only keyboard: one mic button and a status line. A finished recording is sent to the
- * paired Mac, the returned text is inserted at the cursor and the previous keyboard comes back.
+ * paired Mac (or transcribed on the phone, see [com.voiceink.keyboard.dictation.TranscriptionRoute]),
+ * the text is inserted at the cursor and the previous keyboard comes back.
  */
 class VoiceKeyboardService : InputMethodService(), DictationFlow.Host {
     private val scope: CoroutineScope = MainScope()
@@ -76,8 +77,7 @@ class VoiceKeyboardService : InputMethodService(), DictationFlow.Host {
             current = flow.state,
             restarting = restarting,
             textField = info != null && info.inputType != InputType.TYPE_NULL,
-            paired = flow.isPaired,
-            hasMicrophone = flow.hasMicrophone,
+            blocker = flow.blocker,
             hasKeptRecording = flow.hasKeptRecording,
         )
         flow.show(opening.state)
@@ -98,8 +98,8 @@ class VoiceKeyboardService : InputMethodService(), DictationFlow.Host {
 
     override fun onStateChanged(state: DictationState) = render()
 
-    override fun onInserted(pairing: Pairing) {
-        statusView?.text = getString(R.string.status_inserted, pairing.name)
+    override fun onInserted(pairing: Pairing?) {
+        statusView?.text = if (pairing != null) getString(R.string.status_inserted, pairing.name) else getString(R.string.status_inserted_on_phone)
         switchBack()
     }
 
@@ -140,22 +140,23 @@ class VoiceKeyboardService : InputMethodService(), DictationFlow.Host {
         val discard = discardButton ?: return
         val state = flow.state
 
-        progress?.visibility = if (state == DictationState.Sending) View.VISIBLE else View.GONE
-        mic.isEnabled = state != DictationState.Sending
+        progress?.visibility = if (state.isBusy) View.VISIBLE else View.GONE
+        mic.isEnabled = !state.isBusy
         mic.isActivated = state == DictationState.Recording
         discard.visibility = if (state is DictationState.Kept) View.VISIBLE else View.GONE
 
         val (icon, description) = when (state) {
             DictationState.Recording -> R.drawable.ic_stop to R.string.cd_stop
             is DictationState.Kept -> R.drawable.ic_retry to R.string.cd_retry
-            DictationState.Sending -> R.drawable.ic_mic to R.string.cd_sending
+            DictationState.Sending, DictationState.TranscribingOnPhone -> R.drawable.ic_mic to R.string.cd_sending
             else -> R.drawable.ic_mic to R.string.cd_start
         }
         mic.setImageResource(icon)
         mic.contentDescription = getString(description)
 
-        status.text = DictationMessages.status(this, state, flow.macName)
-        val label = DictationMessages.action(state)
+        val phoneOffered = flow.phoneOffered
+        status.text = DictationMessages.status(this, state, flow.macName, phoneOffered = phoneOffered)
+        val label = DictationMessages.action(state, phoneOffered)
         if (label != null) {
             action.setText(label)
             action.visibility = View.VISIBLE

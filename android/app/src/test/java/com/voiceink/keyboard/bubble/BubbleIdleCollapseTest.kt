@@ -83,6 +83,9 @@ class BubbleIdleCollapseTest {
         val suppressedStates = listOf(
             DictationState.Recording,
             DictationState.Sending,
+            DictationState.TranscribingOnPhone,
+            DictationState.InsertedOnPhone,
+            DictationState.Kept(null, KeptReason.PHONE_FAILED),
             DictationState.Kept(null, KeptReason.INTERRUPTED),
             DictationState.Kept(null, KeptReason.FIELD_CHANGED),
             DictationState.Kept(null, KeptReason.REJECTED, text = "Hello world"),
@@ -90,6 +93,7 @@ class BubbleIdleCollapseTest {
             DictationState.NoSpeech,
             DictationState.RecorderFailed,
             DictationState.NotPaired,
+            DictationState.NeedsOfflineModel,
             DictationState.NeedsMicrophone,
         )
 

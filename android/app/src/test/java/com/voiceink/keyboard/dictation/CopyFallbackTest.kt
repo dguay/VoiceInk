@@ -75,8 +75,7 @@ class CopyFallbackTest {
 
         val preserved = DictationState.resting(
             current = rejected,
-            paired = true,
-            hasMicrophone = true,
+            blocker = null,
             hasKeptRecording = true,
             sameField = false,
         )
@@ -87,8 +86,7 @@ class CopyFallbackTest {
         val afterCopy = CopyFallback.copy(preserved, { true }, { recordingKept = false })
         val afterResting = DictationState.resting(
             current = afterCopy,
-            paired = true,
-            hasMicrophone = true,
+            blocker = null,
             hasKeptRecording = recordingKept,
             sameField = false,
         )

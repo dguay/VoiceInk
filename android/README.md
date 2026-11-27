@@ -18,14 +18,25 @@ hands control back to your usual keyboard (SwiftKey, Samsung Keyboard, Gboard…
 - **Failures**: "Mac unreachable", "Token rejected", "No model selected on the Mac" and
   "Transcription failed" are shown on the keyboard and on the bubble. The recording is kept until
   its text is inserted, so **Retry** sends it again once the Mac is back; **Discard** drops it.
+- **On-device offline model** (optional): download a Whisper model to the phone and transcribe
+  there when the Mac is unreachable, when no Mac is paired, or always (Offline mode). See
+  [On-device offline model](#on-device-offline-model).
 
 The API is described in [`docs/phone-dictation-api.md`](../docs/phone-dictation-api.md).
 Requires Android 10 (API 29) or later.
 
 ## Build
 
-Requirements: JDK 17+ and the Android SDK (platform 36). Point Gradle at the SDK with
-`ANDROID_HOME` or a `local.properties` file containing `sdk.dir=/path/to/Android/sdk`.
+Requirements: JDK 17+ and the Android SDK (platform 36) with NDK 27.1.12297006 and CMake 3.22.1
+(Android Studio → SDK Manager → SDK Tools; Gradle can also install them when the SDK licenses are
+accepted). Point Gradle at the SDK with `ANDROID_HOME` or a `local.properties` file containing
+`sdk.dir=/path/to/Android/sdk`.
+
+The on-device speech engine is [whisper.cpp](https://github.com/ggml-org/whisper.cpp) built with
+the NDK (`app/src/main/cpp`) for `arm64-v8a`, `armeabi-v7a` and `x86_64`. The first build that
+needs it downloads the pinned release tarball (v1.9.5, about 10 MB) from GitHub into
+`android/build/third_party/`, checks its SHA-256 and stops if it does not match. Unit tests and lint
+do not build it. The native libraries add about 5 MB per ABI to the APK.
 
 ```sh
 cd android
@@ -220,6 +231,37 @@ app also offers a floating mic bubble:
 - Force-stopping the app (or reinstalling it with some tools) turns the service off; turn it on
   again in step 5.
 
+## On-device offline model
+
+Setup step 6 lets the phone transcribe by itself. Your paired Mac stays the default whenever it is
+reachable: only the Mac applies its modes, personal dictionary, word replacements and AI cleanup,
+and only Mac dictations appear in its History and teach Auto-Learn.
+
+- **Model**: Whisper base (multilingual, 5-bit quantized, `ggml-base-q5_1.bin`, 59.7 MB), downloaded
+  from Hugging Face at a pinned revision. It uses about 60 MB in the app's private storage (not
+  backed up); the download needs about 120 MB free while it runs. The language is detected for
+  each dictation. On a recent phone a short dictation takes a few seconds.
+- **Download**: **Download model** hands the file to Android's download manager, so it continues
+  with the app closed and shows its progress in the notification shade and on the setup screen. It
+  waits for Wi-Fi (any unmetered network) unless **Allow download over mobile data** is checked;
+  changing that box during a download restarts it under the new rule. **Cancel download** stops it.
+- **Verification**: the finished file is copied into private storage only if its size and SHA-256
+  match the pinned model; otherwise it is deleted and the screen says the download did not match.
+  Only a verified model is ever used.
+- **Delete model** removes it and turns Offline mode off.
+- **When it is used**:
+  - **Offline mode** on: every dictation is transcribed on the phone, Mac or not.
+  - **No Mac paired**: the keyboard and the bubble dictate on the phone instead of asking to pair.
+  - **Mac unreachable**: the kept recording offers **Transcribe on phone**, which transcribes it
+    without speaking again. With **Transcribe on this phone when the Mac is unreachable** on, this
+    happens automatically. Other Mac errors (token rejected, no model, server errors) never fall
+    back.
+- **What you see**: "Transcribing on this phone…" while it works, then "Typed from this phone (raw
+  text, no Mac cleanup)". If the field rejects the text, **Copy** works as for Mac dictations. If
+  the phone cannot transcribe, the recording is kept for **Retry**.
+- **Privacy**: recordings transcribed on the phone never leave it. The only network traffic is the
+  model download from Hugging Face.
+
 ### Corrections teach Auto-Learn
 
 When you fix a dictated word in the field ("Parakeat" to "Parakeet"), VoiceInk's Auto-Learn on the
@@ -248,17 +290,22 @@ field back to your usual keyboard right after typing and cannot see later edits.
 | Mac unreachable | Wake the Mac, check that *Allow Phone Dictation* is on and that the phone is on the same Wi-Fi or Tailscale, then tap **Retry**. |
 | Token rejected | The token was regenerated on the Mac. Tap **Pair again**, scan the new code, then **Retry**. |
 | No model selected on the Mac | Choose a transcription model in VoiceInk, then **Retry**. |
+| Mac unreachable. Tap retry, or transcribe this recording on the phone | Tap **Transcribe on phone** for raw text now, or **Retry** once the Mac is back. |
+| Offline mode is on, but the on-device model isn't downloaded | Tap **Open setup** and download the model in step 6, or turn Offline mode off. |
+| This phone couldn't transcribe the recording | Tap **Retry**, or **Discard** and record again. |
+| Waiting for Wi-Fi (setup step 6) | Connect to Wi-Fi, or check **Allow download over mobile data**. |
 | Transcription failed | The Mac could not decode or transcribe the recording. **Retry**, or **Discard** and record again. |
 
 ## Code layout
 
 | Path | Role |
 |---|---|
-| `dictation/` | Record → send → type-into-the-recorded-field flow, its states and messages, shared by the keyboard and the bubble. |
+| `dictation/` | Record → transcribe → type-into-the-recorded-field flow, its states and messages, shared by the keyboard and the bubble; `TranscriptionRoute` decides Mac or phone (pure, unit-tested). |
 | `api/VoiceInkClient.kt` | HTTP client and error mapping for the phone dictation API. Tries the Mac's hosts in order, but never re-sends a recording once a host accepted the connection. |
 | `api/Pairing.kt` | Pairing model and QR / manual-entry parsing. |
 | `store/` | Encrypted pairing storage and the kept recording. |
 | `ime/VoiceKeyboardService.kt` | The keyboard (input method service). |
+| `offline/` | On-device transcription: the model's download, verification and lifecycle (pure, unit-tested rules), audio decoding, and the whisper.cpp JNI bridge (`src/main/cpp`). |
 | `bubble/` | The mic bubble: accessibility service, overlay window, its visibility, field and placement rules, and the correction watcher. |
 | `corrections/` | When a dictated field is done with, and which window of it is sent for Auto-Learn (pure, unit-tested rules). |
 | `setup/MainActivity.kt` | Pairing and keyboard setup screen, including **Update available**. |
