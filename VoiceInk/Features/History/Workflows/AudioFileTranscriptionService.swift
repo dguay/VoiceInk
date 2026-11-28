@@ -94,7 +94,8 @@ class AudioTranscriptionService: ObservableObject {
                 language: language,
                 prompt: model.provider == .whisper ? WhisperPrompt.resolvedPrompt(for: language) : nil,
                 vocabulary: vocabulary,
-                allowedAutoDetectLanguages: allowedAutoDetectLanguages
+                allowedAutoDetectLanguages: allowedAutoDetectLanguages,
+                zoomTextPolishingEnabled: mode?.zoomTextPolishingEnabled ?? false
             )
             let modeName = (mode?.isEnabled == true) ? mode?.name : nil
             let modeEmoji = (mode?.isEnabled == true) ? mode?.icon.value : nil

@@ -32,7 +32,8 @@ struct TranscriptionRuntimeConfiguration {
         TranscriptionRequestContext(
             language: language,
             prompt: model.provider == .whisper ? WhisperPrompt.resolvedPrompt(for: language) : nil,
-            allowedAutoDetectLanguages: allowedAutoDetectLanguages
+            allowedAutoDetectLanguages: allowedAutoDetectLanguages,
+            zoomTextPolishingEnabled: mode.zoomTextPolishingEnabled
         )
     }
 }

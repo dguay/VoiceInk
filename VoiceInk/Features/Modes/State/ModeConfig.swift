@@ -58,6 +58,7 @@ struct ModeConfig: Codable, Identifiable, Equatable {
     /// Optional subset of language codes allowed when `selectedLanguage == "auto"`.
     /// `nil` or empty means unconstrained Auto-detect.
     var allowedAutoDetectLanguages: [String]?
+    var zoomTextPolishingEnabled: Bool = false
     var isTextFormattingEnabled: Bool = false
     var useClipboardContext: Bool
     var useSelectedTextContext: Bool
@@ -73,6 +74,7 @@ struct ModeConfig: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, name, icon, appConfigs, urlConfigs, androidAppConfigs, triggerGroups, triggerWords, isAIEnhancementEnabled,
             selectedPrompt, isRealtimeTranscriptionEnabled, selectedLanguage, allowedAutoDetectLanguages,
+            zoomTextPolishingEnabled,
             isTextFormattingEnabled,
             useClipboardContext, useSelectedTextContext, useScreenCapture, selectedAIProvider, selectedAIModel,
             outputMode, autoSendKey, isAutoSendEnabled, customCommand, isEnabled, isDefault
@@ -88,6 +90,7 @@ struct ModeConfig: Codable, Identifiable, Equatable {
         isAIEnhancementEnabled: Bool, selectedPrompt: String? = nil,
         selectedTranscriptionModelName: String? = nil, isRealtimeTranscriptionEnabled: Bool = true,
         selectedLanguage: String? = nil, allowedAutoDetectLanguages: [String]? = nil,
+        zoomTextPolishingEnabled: Bool = false,
         useClipboardContext: Bool = false, useSelectedTextContext: Bool = true,
         useScreenCapture: Bool = false,
         isTextFormattingEnabled: Bool = false, selectedAIProvider: String? = nil, selectedAIModel: String? = nil,
@@ -117,6 +120,7 @@ struct ModeConfig: Codable, Identifiable, Equatable {
         self.isRealtimeTranscriptionEnabled = isRealtimeTranscriptionEnabled
         self.selectedLanguage = selectedLanguage ?? "en"
         self.allowedAutoDetectLanguages = AutoDetectLanguageScope.normalizedOrNil(allowedAutoDetectLanguages)
+        self.zoomTextPolishingEnabled = zoomTextPolishingEnabled
         self.isTextFormattingEnabled = isTextFormattingEnabled
         self.isEnabled = isEnabled
         self.isDefault = isDefault
@@ -160,6 +164,7 @@ struct ModeConfig: Codable, Identifiable, Equatable {
         allowedAutoDetectLanguages = AutoDetectLanguageScope.normalizedOrNil(
             try container.decodeIfPresent([String].self, forKey: .allowedAutoDetectLanguages)
         )
+        zoomTextPolishingEnabled = try container.decodeIfPresent(Bool.self, forKey: .zoomTextPolishingEnabled) ?? false
         isTextFormattingEnabled = try container.decodeIfPresent(Bool.self, forKey: .isTextFormattingEnabled) ?? false
         useClipboardContext =
             try container.decodeIfPresent(Bool.self, forKey: .useClipboardContext)
@@ -217,6 +222,7 @@ struct ModeConfig: Codable, Identifiable, Equatable {
         if let allowedAutoDetectLanguages = AutoDetectLanguageScope.normalizedOrNil(allowedAutoDetectLanguages) {
             try container.encode(allowedAutoDetectLanguages, forKey: .allowedAutoDetectLanguages)
         }
+        try container.encode(zoomTextPolishingEnabled, forKey: .zoomTextPolishingEnabled)
         try container.encode(isTextFormattingEnabled, forKey: .isTextFormattingEnabled)
         try container.encode(useClipboardContext, forKey: .useClipboardContext)
         try container.encode(useSelectedTextContext, forKey: .useSelectedTextContext)

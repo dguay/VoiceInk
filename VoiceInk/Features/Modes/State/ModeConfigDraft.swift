@@ -15,6 +15,7 @@ struct ModeConfigDraft {
     var isRealtimeTranscriptionEnabled: Bool
     var selectedLanguage: String?
     var allowedAutoDetectLanguages: [String]
+    var zoomTextPolishingEnabled: Bool
     var isTextFormattingEnabled: Bool
     var useClipboardContext: Bool
     var useSelectedTextContext: Bool
@@ -50,6 +51,7 @@ struct ModeConfigDraft {
             allowedAutoDetectLanguages = AutoDetectLanguageScope.normalize(
                 inheritedConfig?.allowedAutoDetectLanguages ?? []
             )
+            zoomTextPolishingEnabled = false
             isTextFormattingEnabled = true
             useClipboardContext = false
             useSelectedTextContext = false
@@ -81,6 +83,7 @@ struct ModeConfigDraft {
             allowedAutoDetectLanguages = AutoDetectLanguageScope.normalize(
                 latestConfig.allowedAutoDetectLanguages ?? []
             )
+            zoomTextPolishingEnabled = latestConfig.zoomTextPolishingEnabled
             isTextFormattingEnabled = latestConfig.isTextFormattingEnabled
             useClipboardContext = latestConfig.useClipboardContext
             useSelectedTextContext = latestConfig.useSelectedTextContext
@@ -203,6 +206,7 @@ struct ModeConfigDraft {
                 isRealtimeTranscriptionEnabled: isRealtimeTranscriptionEnabled,
                 selectedLanguage: selectedLanguage,
                 allowedAutoDetectLanguages: AutoDetectLanguageScope.normalizedOrNil(allowedAutoDetectLanguages),
+                zoomTextPolishingEnabled: zoomTextPolishingEnabled,
                 useClipboardContext: useClipboardContext,
                 useSelectedTextContext: useSelectedTextContext,
                 useScreenCapture: useScreenCapture,
@@ -232,6 +236,7 @@ struct ModeConfigDraft {
             updatedConfig.allowedAutoDetectLanguages = AutoDetectLanguageScope.normalizedOrNil(
                 allowedAutoDetectLanguages
             )
+            updatedConfig.zoomTextPolishingEnabled = zoomTextPolishingEnabled
             updatedConfig.isTextFormattingEnabled = isTextFormattingEnabled
             updatedConfig.useClipboardContext = useClipboardContext
             updatedConfig.useSelectedTextContext = useSelectedTextContext

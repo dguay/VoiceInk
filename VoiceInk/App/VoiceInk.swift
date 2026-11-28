@@ -60,7 +60,9 @@ struct VoiceInkApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     let container: ModelContainer
 
-    @StateObject private var engine: VoiceInkEngine
+    // Retain the engine without re-evaluating every scene on each recording state and live
+    // transcript update. Views that display engine state observe it via environmentObject.
+    @State private var engine: VoiceInkEngine
     // Retain managers without subscribing the entire scene to download progress.
     @State private var whisperModelManager: WhisperModelManager
     @State private var fluidAudioModelManager: FluidAudioModelManager
@@ -204,7 +206,7 @@ struct VoiceInkApp: App {
         _fluidAudioModelManager = State(initialValue: fluidAudioModelManager)
         _transcriptionModelManager = StateObject(wrappedValue: transcriptionModelManager)
         _recorderUIManager = StateObject(wrappedValue: recorderUIManager)
-        _engine = StateObject(wrappedValue: engine)
+        _engine = State(initialValue: engine)
         updaterViewModel.observeEngineActivity(
             engine.$recordingState.eraseToAnyPublisher(),
             fileTranscriptionActivity: FileTranscriptionActivity.shared.$isActive.eraseToAnyPublisher()
@@ -589,12 +591,23 @@ struct VoiceInkApp: App {
         guard !didShowLaunchReminders else { return }
         didShowLaunchReminders = true
 
-        if !AXIsProcessTrusted() {
+        switch ControlPermission.status {
+        case .granted:
+            break
+        case .chosenAppsOnly:
             NotificationManager.shared.showNotification(
-                title: String(localized: "Accessibility permission is not provided"),
+                title: String(localized: "VoiceInk needs full access to work properly."),
                 type: .warning,
                 duration: 7.0,
-                actionButton: (String(localized: "Open Settings"), Self.openAccessibilitySettings)
+                actionButton: (String(localized: "Open Settings"), ControlPermission.openSettings)
+            )
+            return
+        case .notGranted:
+            NotificationManager.shared.showNotification(
+                title: String(localized: "Allow VoiceInk in \(ControlPermission.settingsName)"),
+                type: .warning,
+                duration: 7.0,
+                actionButton: (String(localized: "Open Settings"), ControlPermission.openSettings)
             )
             return
         }
@@ -606,12 +619,6 @@ struct VoiceInkApp: App {
                 duration: 7.0,
                 actionButton: (String(localized: "Manage Modes"), ModeSetupNavigator.openModesSettings)
             )
-        }
-    }
-
-    private static func openAccessibilitySettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-            NSWorkspace.shared.open(url)
         }
     }
 }

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftData
 import SwiftUI
@@ -30,7 +31,7 @@ struct DashboardContent: View {
     @State private var isModelUsagePanelPresented = false
     @State private var isInsightsViewPresented = false
     @State private var selectedInsightPeriod: DashboardInsightPeriod = .allTime
-    @State private var isAccessibilityEnabled = AXIsProcessTrusted()
+    @State private var controlPermissionStatus = ControlPermission.status
     @EnvironmentObject private var updaterViewModel: UpdaterViewModel
     @ObservedObject private var modeManager = ModeManager.shared
     @ObservedObject private var starPrompt = GitHubStarPromptCoordinator.shared
@@ -42,6 +43,7 @@ struct DashboardContent: View {
     @AppStorage(AutoLearnSettings.hasFailureKey) private var hasAutoLearnFailure = false
     @FocusState private var isNameFieldFocused: Bool
     @Query(Self.recentTranscriptionsDescriptor()) private var recentTranscriptionCandidates: [Transcription]
+    @State private var isWindowVisible = false
 
     private static func recentTranscriptionsDescriptor() -> FetchDescriptor<Transcription> {
         var descriptor = FetchDescriptor<Transcription>(
@@ -105,6 +107,7 @@ struct DashboardContent: View {
             refreshAccessibilityStatus()
             updaterViewModel.checkForUpdatesIfDue()
         }
+        .background(DashboardWindowVisibilityReader(isVisible: $isWindowVisible))
         .onReceive(LifecycleObserver.shared.publisher(for: .applicationDidBecomeActive)) { _ in
             refreshAccessibilityStatus()
         }
@@ -156,7 +159,7 @@ struct DashboardContent: View {
                 .buttonStyle(.link)
             }
 
-            if !isAccessibilityEnabled {
+            if controlPermissionStatus != .granted {
                 nameEditorDismissArea {
                     accessibilityReminder
                 }
@@ -188,7 +191,11 @@ struct DashboardContent: View {
     }
 
     private var recentDashboardTranscriptions: [Transcription] {
-        Array(
+        // In menu bar mode the main window stays alive while hidden, and this query re-runs after
+        // every save. Without a timestamp index each run reads every transcription row, so only
+        // read it while some part of the window is actually visible.
+        guard isWindowVisible else { return [] }
+        return Array(
             recentTranscriptionCandidates
                 .filter { transcription in
                     isRecentDashboardTranscription(transcription)
@@ -282,7 +289,10 @@ struct DashboardContent: View {
     }
 
     private var accessibilityReminder: some View {
-        DashboardAccessibilityReminder(onOpenSettings: openAccessibilitySettings)
+        DashboardAccessibilityReminder(
+            status: controlPermissionStatus,
+            onOpenSettings: ControlPermission.openSettings
+        )
     }
 
     private var greetingHeader: some View {
@@ -370,13 +380,7 @@ struct DashboardContent: View {
     }
 
     private func refreshAccessibilityStatus() {
-        isAccessibilityEnabled = AXIsProcessTrusted()
-    }
-
-    private func openAccessibilitySettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-            NSWorkspace.shared.open(url)
-        }
+        controlPermissionStatus = ControlPermission.status
     }
 
     private func openInsightsIfAvailable() {
@@ -892,7 +896,17 @@ struct DashboardContent: View {
 }
 
 private struct DashboardAccessibilityReminder: View {
+    let status: ControlPermission.Status
     let onOpenSettings: () -> Void
+
+    private var title: String {
+        String(localized: "Allow VoiceInk in \(ControlPermission.settingsName)")
+    }
+
+    private var message: String {
+        ControlPermission.statusNote
+            ?? String(localized: "Required for VoiceInk to work properly.")
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -908,12 +922,12 @@ private struct DashboardAccessibilityReminder: View {
             .frame(width: 34, height: 34)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text("Enable Accessibility Access")
+                Text(title)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
 
-                Text("Required for VoiceInk shortcuts and app-wide controls to work properly.")
+                Text(message)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -923,7 +937,7 @@ private struct DashboardAccessibilityReminder: View {
 
             Button("Open Settings", action: onOpenSettings)
                 .controlSize(.small)
-                .help("Open Accessibility settings")
+                .help("Open Settings")
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -968,6 +982,51 @@ private struct DashboardNoModesReminder: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(AppCardBackground(cornerRadius: 16))
+    }
+}
+
+private struct DashboardWindowVisibilityReader: NSViewRepresentable {
+    @Binding var isVisible: Bool
+
+    func makeNSView(context: Context) -> VisibilityView {
+        let view = VisibilityView()
+        view.visibility = $isVisible
+        return view
+    }
+
+    func updateNSView(_ view: VisibilityView, context: Context) {
+        view.visibility = $isVisible
+    }
+
+    final class VisibilityView: NSView {
+        var visibility: Binding<Bool>?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            let center = NotificationCenter.default
+            let name = NSWindow.didChangeOcclusionStateNotification
+            center.removeObserver(self, name: name, object: nil)
+            if let window {
+                center.addObserver(self, selector: #selector(occlusionDidChange(_:)), name: name, object: window)
+            }
+
+            // AppKit can attach this view during a SwiftUI update.
+            DispatchQueue.main.async { [weak self] in
+                self?.updateVisibility()
+            }
+        }
+
+        @objc private func occlusionDidChange(_ notification: Notification) {
+            updateVisibility()
+        }
+
+        private func updateVisibility() {
+            guard let visibility else { return }
+            let isVisible = window?.occlusionState.contains(.visible) ?? false
+            if visibility.wrappedValue != isVisible {
+                visibility.wrappedValue = isVisible
+            }
+        }
     }
 }
 

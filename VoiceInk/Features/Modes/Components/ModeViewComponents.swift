@@ -179,15 +179,19 @@ struct ConfigurationRow: View {
                     in: transcriptionModelManager.allAvailableModels
                 )
             }
+            let code = model.map {
+                TranscriptionLanguageSupport.validLanguageOrFallback(
+                    langCode, for: $0, realtimeEnabled: config.isRealtimeTranscriptionEnabled)
+            } ?? langCode
             let supported = model.map {
                 TranscriptionLanguageSupport.languages(
                     for: $0, realtimeEnabled: config.isRealtimeTranscriptionEnabled)
             } ?? LanguageDictionary.all
 
-            if langCode == "auto" {
+            if code == "auto" {
                 let effectiveAllowed = model.map {
                     AutoDetectLanguageScope.effectiveAllowedLanguages(
-                        selectedLanguage: langCode,
+                        selectedLanguage: code,
                         configuredAllowedLanguages: config.allowedAutoDetectLanguages,
                         for: $0,
                         realtimeEnabled: config.isRealtimeTranscriptionEnabled
@@ -198,12 +202,12 @@ struct ConfigurationRow: View {
                     supportedLanguages: supported
                 )
             }
-            if langCode == "en" { return String(localized: "English") }
+            if code == "en" { return String(localized: "English") }
 
-            if let langName = supported[langCode] {
+            if let langName = supported[code] {
                 return langName
             }
-            return langCode.uppercased()
+            return code.uppercased()
         }
         return "Default"
     }

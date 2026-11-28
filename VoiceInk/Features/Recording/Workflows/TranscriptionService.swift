@@ -5,6 +5,8 @@ struct TranscriptionRequestContext {
     let prompt: String?
     var vocabulary: RecordingVocabulary? = nil
     var allowedAutoDetectLanguages: [String] = []
+    /// The mode's Zoom Polishing choice. Read by the Zoom Scribe batch and streaming paths only.
+    var zoomTextPolishingEnabled: Bool = false
 
     static var currentDefaults: TranscriptionRequestContext {
         let language = UserDefaults.standard.string(forKey: "SelectedLanguage") ?? "auto"
@@ -31,7 +33,8 @@ struct TranscriptionRequestContext {
                 language: language,
                 prompt: nil,
                 vocabulary: vocabulary,
-                allowedAutoDetectLanguages: reconciledAllowed
+                allowedAutoDetectLanguages: reconciledAllowed,
+                zoomTextPolishingEnabled: zoomTextPolishingEnabled
             )
         }
 

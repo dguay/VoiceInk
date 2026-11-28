@@ -15,6 +15,7 @@ enum ModelProvider: String, Codable, Hashable, CaseIterable {
     case assemblyAI = "AssemblyAI"
     case xai = "xAI"
     case cartesia = "Cartesia"
+    case zoomScribe = "Zoom Scribe"
     case openRouter = "OpenRouter"
     case custom = "Custom"
     case nativeApple = "Native Apple"
@@ -144,10 +145,13 @@ struct CloudModel: TranscriptionModel {
     let isMultilingualModel: Bool
     let supportsStreaming: Bool
     let supportedLanguages: [String: String]
+    /// Extra languages shown when real-time is off.
+    let recordedOnlyLanguages: [String: String]
 
     init(
         id: UUID = UUID(), name: String, displayName: String, description: String, provider: ModelProvider,
-        isMultilingual: Bool, supportsStreaming: Bool = false, supportedLanguages: [String: String]
+        isMultilingual: Bool, supportsStreaming: Bool = false, supportedLanguages: [String: String],
+        recordedOnlyLanguages: [String: String] = [:]
     ) {
         self.id = id
         self.name = name
@@ -157,6 +161,7 @@ struct CloudModel: TranscriptionModel {
         self.isMultilingualModel = isMultilingual
         self.supportsStreaming = supportsStreaming
         self.supportedLanguages = supportedLanguages
+        self.recordedOnlyLanguages = recordedOnlyLanguages
     }
 }
 
